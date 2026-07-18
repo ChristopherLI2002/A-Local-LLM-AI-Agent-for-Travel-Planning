@@ -163,11 +163,48 @@ def format_comparison_table(rows: list[dict[str, Any]], title: str) -> str:
 
 
 def nights_between(checkin: str, checkout: str) -> int:
-    from datetime import date
-
     try:
         a = date.fromisoformat(checkin)
         b = date.fromisoformat(checkout)
         return max(1, (b - a).days)
     except ValueError:
         return 1
+
+
+def pick_cheapest_from_comparison(text: str) -> dict[str, Any]:
+    """Parse a comparison table and return the cheapest row's label/price/url."""
+    result: dict[str, Any] = {
+        "label": "",
+        "lowest_hkd": None,
+        "url": "",
+        "depart_date": "",
+        "checkin": "",
+    }
+    lines = (text or "").splitlines()
+    for i, line in enumerate(lines):
+        if "CHEAPEST" not in line:
+            continue
+        result["label"] = line.strip()
+        price_m = re.search(r"lowest HK\$([0-9,]+(?:\.[0-9]+)?)", line, re.I)
+        if price_m:
+            try:
+                result["lowest_hkd"] = float(price_m.group(1).replace(",", ""))
+            except ValueError:
+                pass
+        depart_m = re.search(r"depart (\d{4}-\d{2}-\d{2})", line, re.I)
+        if depart_m:
+            result["depart_date"] = depart_m.group(1)
+        checkin_m = re.search(
+            r"\|\s*(\d{4}-\d{2}-\d{2})\s*->",
+            line,
+        )
+        if checkin_m:
+            result["checkin"] = checkin_m.group(1)
+        # URL is usually on the next non-empty line
+        for j in range(i + 1, min(i + 4, len(lines))):
+            url_m = re.search(r"https?://\S+", lines[j])
+            if url_m:
+                result["url"] = url_m.group(0).rstrip(".,;")
+                break
+        break
+    return result

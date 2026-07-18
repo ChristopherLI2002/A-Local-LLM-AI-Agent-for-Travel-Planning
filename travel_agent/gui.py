@@ -425,6 +425,15 @@ class TravelAgentApp(tk.Tk):
         # Gentle entrance: nudge form opacity-like via brief highlight
         self.header.set_status("Warming up…", C["muted"])
 
+    def _sync_return_from_depart(self, *_args: object) -> None:
+        """Keep default trip length at 1 week when depart date changes."""
+        raw = self.depart_var.get().strip()
+        try:
+            depart = date.fromisoformat(raw)
+        except ValueError:
+            return
+        self.return_var.set((depart + timedelta(days=7)).isoformat())
+
     def _show_page(self, index: int) -> None:
         if not hasattr(self, "plan_page") or not hasattr(self, "chat_page"):
             return
@@ -475,6 +484,7 @@ class TravelAgentApp(tk.Tk):
         self.depart_var = tk.StringVar(value=_default_depart())
         self.return_var = tk.StringVar(value=_default_return())
         self.budget_var = tk.StringVar(value="12000")
+        self.depart_var.trace_add("write", self._sync_return_from_depart)
 
         Field(grid, "Origin (city)", self.origin_var).grid(
             row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 12)

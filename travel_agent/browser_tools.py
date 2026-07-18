@@ -15,6 +15,7 @@ from travel_agent.pricing import (
     format_comparison_table,
     nearby_dates,
     nights_between,
+    pick_cheapest_from_comparison,
     summarize_prices,
 )
 
@@ -613,8 +614,11 @@ class TripBrowser:
         flight_best_label = ""
         flight_snippets: list[str] = []
         flight_prices: dict[str, Any] = {}
+        recommended_flight_url = ""
+        recommended_flight_date = depart_date
+        recommended_flight_price = None
+        recommended_flight_option = ""
         if want_flights:
-            # Live date comparison (±3 days) then deep search on the cheapest date
             date_options = nearby_dates(depart_date, (-3, 0, 3))
             flight_compare_text = self.compare_flight_prices(
                 origin=origin,
@@ -624,38 +628,34 @@ class TripBrowser:
                 return_date=return_date,
                 adults=adults,
             )
-            # Prefer the user's requested date search for the primary booking URL,
-            # but surface the full comparison ranking.
+            best_flight = pick_cheapest_from_comparison(flight_compare_text)
+            recommended_flight_date = best_flight.get("depart_date") or depart_date
+            recommended_flight_price = best_flight.get("lowest_hkd")
+            recommended_flight_url = best_flight.get("url") or ""
+            flight_best_label = best_flight.get("label") or ""
+
+            # Open the recommended (cheapest) date so the booking link is exact
             flight_text = self.search_flights(
                 origin=origin,
                 destination=destination,
-                depart_date=depart_date,
+                depart_date=recommended_flight_date,
                 return_date=return_date,
                 trip_type="roundtrip",
                 adults=adults,
             )
             flight_url = self._require_page().url
+            recommended_flight_url = flight_url or recommended_flight_url
             flight_prices = summarize_prices(
-                f"Flights {origin.upper()}->{destination.upper()} on {depart_date}",
+                f"Flights {origin}->{destination} on {recommended_flight_date}",
                 flight_text,
                 url=flight_url,
             )
-            flight_low = flight_prices.get("lowest_hkd")
+            if recommended_flight_price is None:
+                recommended_flight_price = flight_prices.get("lowest_hkd")
+            flight_low = recommended_flight_price
             flight_snippets = flight_prices.get("snippets") or []
-            # Pull cheapest row label from comparison output if present
-            for line in flight_compare_text.splitlines():
-                if "CHEAPEST" in line:
-                    flight_best_label = line.strip()
-                    # Try to use that date's lowest for transport ranking when cheaper
-                    m = re.search(r"lowest HK\$([0-9,]+)", line, re.I)
-                    if m:
-                        try:
-                            cheap = float(m.group(1).replace(",", ""))
-                            if flight_low is None or cheap < flight_low:
-                                flight_low = cheap
-                        except ValueError:
-                            pass
-                    break
+            if flight_snippets:
+                recommended_flight_option = flight_snippets[0]
             if flight_low is not None:
                 transport_lows.append(("flights", float(flight_low)))
             snip_block = (
@@ -664,17 +664,17 @@ class TripBrowser:
             )
             sections.append(
                 f"""{n}) FLIGHTS (compared live)
-- Requested dates: {depart_date} -> {return_date}
+- Recommended depart date: {recommended_flight_date}
+- Recommended flight link: {recommended_flight_url}
+- Lowest seen for that date: {_fmt_hkd(recommended_flight_price)}
 - Compared outbound dates: {", ".join(date_options)}
-- Flight search URL: {flight_url}
-- Lowest on requested dates: {_fmt_hkd(flight_prices.get("lowest_hkd"))}
-- Best date from comparison: {flight_best_label or "see ranking below"}
+- Best row: {flight_best_label or "see ranking below"}
 - Sample options seen:
 {snip_block}
 - Ranking:
 {flight_compare_text.split("Notes:")[0].strip()}"""
             )
-            booking_lines.append(f"  - Flights: {flight_url}")
+            booking_lines.append(f"  - Recommended flights: {recommended_flight_url}")
             raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:2200])
             n += 1
 
@@ -750,24 +750,6 @@ class TripBrowser:
             raw_blocks.append("--- Raw transfer excerpt ---\n" + transfer_text[:1800])
             n += 1
 
-        hotel_text = self.search_hotels(
-            city=hotel_city,
-            checkin=depart_date,
-            checkout=return_date,
-            adults=adults,
-            rooms=1,
-        )
-        hotel_url = self._require_page().url
-        hotel_prices = summarize_prices(
-            f"Hotels in {hotel_city}",
-            hotel_text,
-            url=hotel_url,
-        )
-        hotel_low = hotel_prices.get("lowest_hkd")
-        hotel_total = (
-            round(hotel_low * nights, 2) if hotel_low is not None else None
-        )
-        hotel_snippets = hotel_prices.get("snippets") or []
         hotel_alt_checkins = nearby_dates(depart_date, (-7, 0, 7))
         hotel_compare_text = self.compare_hotel_prices(
             city=hotel_city,
@@ -777,29 +759,75 @@ class TripBrowser:
             rooms=1,
             alternate_checkins=",".join(hotel_alt_checkins),
         )
-        hotel_best_label = ""
-        for line in hotel_compare_text.splitlines():
-            if "CHEAPEST" in line:
-                hotel_best_label = line.strip()
-                break
+        best_hotel = pick_cheapest_from_comparison(hotel_compare_text)
+        hotel_best_label = best_hotel.get("label") or ""
+        recommended_hotel_checkin = best_hotel.get("checkin") or depart_date
+        recommended_hotel_price = best_hotel.get("lowest_hkd")
+        recommended_hotel_url = best_hotel.get("url") or ""
+        recommended_hotel_option = ""
+        recommended_hotel_detail_links: list[str] = []
+
+        # Open the cheapest check-in window and capture listing + detail links
+        try:
+            rec_checkout = (
+                date.fromisoformat(recommended_hotel_checkin) + timedelta(days=nights)
+            ).isoformat()
+        except ValueError:
+            rec_checkout = return_date
+
+        hotel_text = self.search_hotels(
+            city=hotel_city,
+            checkin=recommended_hotel_checkin,
+            checkout=rec_checkout,
+            adults=adults,
+            rooms=1,
+        )
+        hotel_url = self._require_page().url
+        recommended_hotel_url = hotel_url or recommended_hotel_url
+        hotel_prices = summarize_prices(
+            f"Hotels in {hotel_city}",
+            hotel_text,
+            url=hotel_url,
+        )
+        if recommended_hotel_price is None:
+            recommended_hotel_price = hotel_prices.get("lowest_hkd")
+        hotel_low = recommended_hotel_price
+        hotel_total = (
+            round(hotel_low * nights, 2) if hotel_low is not None else None
+        )
+        hotel_snippets = hotel_prices.get("snippets") or []
+        if hotel_snippets:
+            recommended_hotel_option = hotel_snippets[0]
+        recommended_hotel_detail_links = self._extract_detail_links(
+            kinds=("hotel", "hotels"),
+            limit=3,
+        )
+
         snip_hotels = (
             "\n".join(f"  · {s}" for s in hotel_snippets[:5])
             or "  · (hotel names sparse on page — use ranked nightly rates below)"
         )
+        detail_block = (
+            "\n".join(f"  · {u}" for u in recommended_hotel_detail_links)
+            or f"  · {recommended_hotel_url}"
+        )
         sections.append(
             f"""{n}) HOTELS (compared live)
-- Stay: {depart_date} -> {return_date} ({nights} nights) in {hotel_city}
-- Compared check-in dates: {", ".join(hotel_alt_checkins)}
-- Hotel search URL: {hotel_url}
-- Lowest nightly on requested dates: {_fmt_hkd(hotel_low)}
+- Recommended check-in: {recommended_hotel_checkin} ({nights} nights)
+- Recommended hotel list link: {recommended_hotel_url}
+- Hotel detail links found:
+{detail_block}
+- Lowest nightly seen: {_fmt_hkd(hotel_low)}
 - Est. stay total (lowest x nights): {_fmt_hkd(hotel_total)}
-- Best check-in from comparison: {hotel_best_label or "see ranking below"}
+- Best row: {hotel_best_label or "see ranking below"}
 - Sample hotel options / rates seen:
 {snip_hotels}
 - Ranking:
 {hotel_compare_text.split("Notes:")[0].strip()}"""
         )
-        booking_lines.append(f"  - Hotels: {hotel_url}")
+        booking_lines.append(f"  - Recommended hotels: {recommended_hotel_url}")
+        for detail in recommended_hotel_detail_links[:2]:
+            booking_lines.append(f"  - Hotel option: {detail}")
         raw_blocks.append("--- Raw hotel excerpt ---\n" + hotel_text[:2200])
         n += 1
 
@@ -908,50 +936,60 @@ class TripBrowser:
         n += 1
 
         pick_lines = [
-            "These comparisons were already run on Trip.com — do not ask the user to compare again.",
+            "======= YOUR RECOMMENDED BOOKINGS =======",
         ]
         if want_flights:
+            pick_lines.append("RECOMMENDED FLIGHT")
             pick_lines.append(
-                f"- Recommended flight path: use the cheapest ranked date "
-                f"({flight_best_label or 'see FLIGHTS ranking'}); "
-                f"requested-date lowest {_fmt_hkd(flight_prices.get('lowest_hkd'))}."
+                f"- Route: {origin} -> {destination} (round-trip)"
             )
-            if flight_snippets:
-                pick_lines.append(f"- Top flight-like option seen: {flight_snippets[0]}")
-            pick_lines.append(f"- Book flights: {flight_url}")
+            pick_lines.append(f"- Depart date: {recommended_flight_date}")
+            pick_lines.append(f"- Return date: {return_date}")
+            pick_lines.append(f"- Lowest seen: {_fmt_hkd(recommended_flight_price)}")
+            if recommended_flight_option:
+                pick_lines.append(f"- Option seen: {recommended_flight_option}")
+            pick_lines.append(f"- Book this flight search: {recommended_flight_url}")
+            pick_lines.append("")
+        pick_lines.append("RECOMMENDED HOTEL")
+        pick_lines.append(f"- City: {hotel_city}")
+        pick_lines.append(
+            f"- Check-in: {recommended_hotel_checkin} ({nights} nights)"
+        )
+        pick_lines.append(f"- Lowest nightly: {_fmt_hkd(hotel_low)}")
+        pick_lines.append(f"- Est. stay total: {_fmt_hkd(hotel_total)}")
+        if recommended_hotel_option:
+            pick_lines.append(f"- Option seen: {recommended_hotel_option}")
+        pick_lines.append(f"- Book this hotel search: {recommended_hotel_url}")
+        for i, detail in enumerate(recommended_hotel_detail_links[:3], 1):
+            pick_lines.append(f"- Hotel option link {i}: {detail}")
+        pick_lines.append("")
         if want_trains and train_url:
             pick_lines.append(
-                f"- Trains alternative lowest one-way {_fmt_hkd(train_low)}; "
-                f"est. RT floor {_fmt_hkd(round(train_low * 2, 2) if train_low else None)}. "
-                f"Book: {train_url}"
+                f"ALTERNATIVE — Trains (lowest one-way {_fmt_hkd(train_low)}): {train_url}"
             )
-        pick_lines.append(
-            f"- Recommended hotel band: lowest nightly {_fmt_hkd(hotel_low)} "
-            f"(~{_fmt_hkd(hotel_total)} for {nights} nights); "
-            f"best check-in from comparison: {hotel_best_label or 'requested dates'}."
-        )
-        if hotel_snippets:
-            pick_lines.append(f"- Top hotel-like option seen: {hotel_snippets[0]}")
-        pick_lines.append(f"- Book hotels: {hotel_url}")
+            pick_lines.append("")
         if need_car:
-            pick_lines.append("- Car rental included above — open the Cars URL to reserve.")
-        pick_lines.append("Book on Trip.com:")
+            pick_lines.append("Car rental was included — see Cars URL below.")
+            pick_lines.append("")
+        pick_lines.append("Other Trip.com links:")
         pick_lines.extend(booking_lines)
 
+        recommend_block = "\n".join(pick_lines)
         sections.append(
-            f"""{n}) RECOMMENDED PICKS (agent already compared)
-"""
-            + "\n".join(pick_lines)
+            f"""{n}) RECOMMENDED FLIGHT + HOTEL (with links)
+{recommend_block}"""
         )
 
         header = f"""TRIP PLAN (Trip.com Hong Kong live search)
 ========================================
-Route: {origin.upper()} -> {destination.upper()}
-Dates: {depart_date} -> {return_date} ({nights} nights)
+Route: {origin} -> {destination}
+Requested dates: {depart_date} -> {return_date} ({nights} nights)
 Travelers: {adults} adult(s)
 Hotel city: {hotel_city}
 Interests: {interests_line}
 Transport modes: {", ".join(modes)}
+
+{recommend_block}
 """
         plan = header + "\n\n" + "\n\n".join(sections)
         return _clean_text(
@@ -1056,6 +1094,46 @@ Transport modes: {", ".join(modes)}
         if search_btn.count():
             search_btn.first.click()
             page.wait_for_timeout(3000)
+
+    def _extract_detail_links(
+        self,
+        kinds: tuple[str, ...] = ("hotel", "hotels", "flight"),
+        limit: int = 5,
+    ) -> list[str]:
+        """Collect Trip.com detail/list links from the current page."""
+        page = self._require_page()
+        found: list[str] = []
+        seen: set[str] = set()
+        try:
+            anchors = page.locator("a[href]")
+            count = min(anchors.count(), 120)
+        except Exception:
+            return found
+
+        for i in range(count):
+            try:
+                href = (anchors.nth(i).get_attribute("href") or "").strip()
+            except Exception:
+                continue
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = f"{settings.trip_base_url.rstrip('/')}{href}"
+            if "trip.com" not in href.lower():
+                continue
+            low = href.lower()
+            if not any(k in low for k in kinds):
+                continue
+            # Prefer concrete hotel/flight result pages over bare hubs
+            if low.rstrip("/").endswith(("/hotels", "/flights", "/trains")):
+                continue
+            if href in seen:
+                continue
+            seen.add(href)
+            found.append(href)
+            if len(found) >= limit:
+                break
+        return found
 
     def _extract_flightish_content(self) -> str:
         page = self._require_page()
