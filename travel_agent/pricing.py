@@ -6,10 +6,14 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
-# HK$1,234 / HKD 1234 / $1,234.00 / from HK$806
+# HK$1,234 / HKD 1234 / $1,234.00 / from HK$806 / HK$ 806
 _PRICE_RE = re.compile(
-    r"(?:from\s*)?(?:HK\$|HKD\s*|\$)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|"
-    r"[0-9]+(?:\.[0-9]{1,2})?)",
+    r"(?:from\s*)?(?:HK\s*\$|HKD\s*|US\$|USD\s*|€|EUR\s*|£|GBP\s*|¥|JPY\s*|CNY\s*|\$)\s*"
+    r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)",
+    re.IGNORECASE,
+)
+_PRICE_SUFFIX_RE = re.compile(
+    r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?|[0-9]{3,6}(?:\.[0-9]{1,2})?)\s*(?:HKD|HK\$)",
     re.IGNORECASE,
 )
 
@@ -44,7 +48,14 @@ def parse_prices(text: str) -> list[float]:
             value = float(raw)
         except ValueError:
             continue
-        # Ignore tiny/noise and absurd values
+        if 50 <= value <= 500_000:
+            prices.append(value)
+    for match in _PRICE_SUFFIX_RE.finditer(text or ""):
+        raw = match.group(1).replace(",", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
         if 50 <= value <= 500_000:
             prices.append(value)
     return prices

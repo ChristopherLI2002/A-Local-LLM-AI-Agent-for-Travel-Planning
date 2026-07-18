@@ -11,10 +11,12 @@ from urllib.parse import urlencode
 from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
 from travel_agent.config import settings
+from travel_agent.places import to_flight_code, to_hotel_city
 from travel_agent.pricing import (
     format_comparison_table,
     nearby_dates,
     nights_between,
+    parse_prices,
     pick_cheapest_from_comparison,
     summarize_prices,
 )
@@ -148,11 +150,14 @@ class TripBrowser:
     ) -> str:
         """Search flights on Trip.com HK and return visible result text."""
         page = self._require_page()
-        origin = origin.strip().lower()
-        destination = destination.strip().lower()
+        origin_raw = origin.strip()
+        dest_raw = destination.strip()
+        origin = to_flight_code(origin_raw)
+        destination = to_flight_code(dest_raw)
         depart_date = depart_date or _default_depart()
         trip_type_norm = trip_type.strip().lower()
         is_round = trip_type_norm in {"round", "roundtrip", "rt", "2"}
+        adults_n = max(1, min(int(adults or 1), 9))
 
         params: dict[str, Any] = {
             "dcity": origin,
@@ -160,30 +165,93 @@ class TripBrowser:
             "ddate": depart_date,
             "triptype": "rt" if is_round else "ow",
             "class": "y",
-            "quantity": max(1, min(adults, 9)),
+            "quantity": adults_n,
             "searchboxarg": "t",
             "locale": settings.trip_locale,
             "curr": settings.trip_currency,
         }
         if is_round:
-            params["rdate"] = return_date or _default_return()
+            try:
+                params["rdate"] = return_date or (
+                    date.fromisoformat(depart_date) + timedelta(days=7)
+                ).isoformat()
+            except ValueError:
+                params["rdate"] = return_date or _default_return()
 
-        url = f"{settings.trip_base_url}/flights/showfarefirst?{urlencode(params)}"
-        page.goto(url, wait_until="domcontentloaded")
+        canonical = f"{settings.trip_base_url}/flights/showfarefirst?{urlencode(params)}"
+        api_prices: list[float] = []
+
+        def _on_flight_api(response) -> None:  # type: ignore[no-untyped-def]
+            try:
+                url_l = response.url.lower()
+                if "getlowpriceincalender" not in url_l and "getlowprice" not in url_l:
+                    return
+                if response.status != 200:
+                    return
+                data = response.json()
+                blob = json.dumps(data, ensure_ascii=False)
+                api_prices.extend(parse_prices(blob))
+                # Also pull bare numeric price fields commonly used by Trip.com
+                for m in re.finditer(
+                    r'"(?:price|salePrice|totalPrice|lowestPrice|amount)"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+                    blob,
+                ):
+                    try:
+                        val = float(m.group(1))
+                    except ValueError:
+                        continue
+                    if 200 <= val <= 500_000:
+                        api_prices.append(val)
+            except Exception:
+                return
+
+        page.on("response", _on_flight_api)
+        page.goto(canonical, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         self._dismiss_popups()
-        # Trip.com loads fares asynchronously — wait and scroll to trigger more cards
-        self._wait_for_results(keywords=["HK$", "HKD", "direct", "stop", "h"])
-        page.mouse.wheel(0, 1200)
+        # Fares hydrate after calendar/API calls — wait until prices appear
+        for _ in range(16):
+            try:
+                probe = page.inner_text("body")
+            except Exception:
+                probe = ""
+            if parse_prices(probe) or api_prices:
+                break
+            page.wait_for_timeout(1000)
+        page.mouse.wheel(0, 1800)
         page.wait_for_timeout(2000)
+        self._dismiss_popups()
+        try:
+            page.remove_listener("response", _on_flight_api)
+        except Exception:
+            pass
 
+        try:
+            body = page.inner_text("body")
+        except Exception:
+            body = ""
         snippet = self._extract_flightish_content()
+        prices = parse_prices(body) or parse_prices(snippet)
+        if not prices and api_prices:
+            prices = sorted(set(round(p, 2) for p in api_prices))[:12]
+        price_note = (
+            f"Parsed prices (HKD-like): {prices[:10]}"
+            if prices
+            else "Parsed prices: NONE — page may still be loading or blocked."
+        )
+        # Prefer full body when it has prices (main selector can miss late-loaded fares)
+        content = body if prices and len(body) > 200 else snippet
+        final_url = page.url if "trip.com" in page.url else canonical
         return _clean_text(
-            f"Flight search URL: {page.url}\n"
-            f"Origin: {origin.upper()} -> Destination: {destination.upper()}\n"
+            f"Flight search URL: {final_url}\n"
+            f"Canonical search URL: {canonical}\n"
+            f"Origin input: {origin_raw} -> code {origin.upper()}\n"
+            f"Destination input: {dest_raw} -> code {destination.upper()}\n"
             f"Depart: {depart_date}"
             + (f" | Return: {params.get('rdate')}" if is_round else "")
-            + f"\nAdults: {adults}\n\n{snippet}"
+            + f"\nTrip type: {'roundtrip' if is_round else 'oneway'}\n"
+            + f"Adults: {adults_n}\n"
+            + f"{price_note}\n\n{content}"
         )
 
     def search_hotels(
@@ -196,38 +264,68 @@ class TripBrowser:
     ) -> str:
         """Search hotels on Trip.com HK for a city name or code."""
         page = self._require_page()
+        city_name = to_hotel_city(city)
         checkin = checkin or _default_depart(14)
-        checkout = checkout or _default_return(17)
+        try:
+            checkout = checkout or (
+                date.fromisoformat(checkin) + timedelta(days=7)
+            ).isoformat()
+        except ValueError:
+            checkout = checkout or _default_return(17)
+        adults_n = max(1, min(int(adults or 2), 8))
+        rooms_n = max(1, min(int(rooms or 1), 8))
 
-        # Prefer the hotels hub + UI search (more reliable than deep-link params)
-        hub = (
-            f"{settings.trip_base_url}/hotels/"
-            f"?locale={settings.trip_locale}&curr={settings.trip_currency}"
-        )
-        page.goto(hub, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
+        params = {
+            "city": city_name,
+            "cityName": city_name,
+            "keyword": city_name,
+            "checkin": checkin,
+            "checkout": checkout,
+            "adult": adults_n,
+            "crn": rooms_n,
+            "locale": settings.trip_locale,
+            "curr": settings.trip_currency,
+        }
+        canonical = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
+        page.goto(canonical, wait_until="domcontentloaded")
+        page.wait_for_timeout(2500)
         self._dismiss_popups()
 
-        filled = self._try_fill_hotel_form(city, checkin, checkout, adults, rooms)
-        if not filled:
-            params = {
-                "keyword": city,
-                "checkin": checkin,
-                "checkout": checkout,
-                "adult": max(1, min(adults, 8)),
-                "crn": max(1, min(rooms, 8)),
-                "locale": settings.trip_locale,
-                "curr": settings.trip_currency,
-            }
-            url = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
-            page.goto(url, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+        try:
+            body_probe = page.inner_text("body")
+        except Exception:
+            body_probe = ""
+        if len(parse_prices(body_probe)) < 1:
+            hub = (
+                f"{settings.trip_base_url}/hotels/"
+                f"?locale={settings.trip_locale}&curr={settings.trip_currency}"
+            )
+            page.goto(hub, wait_until="domcontentloaded")
+            page.wait_for_timeout(1500)
             self._dismiss_popups()
+            self._try_fill_hotel_form(city_name, checkin, checkout, adults_n, rooms_n)
 
-        self._wait_for_results(keywords=["HK$", "hotel", "guest", "star", "review", "night"])
-        page.mouse.wheel(0, 1400)
-        page.wait_for_timeout(1500)
+        self._wait_for_results(
+            keywords=["HK$", "HKD", "hotel", "guest", "star", "review", "night"],
+            attempts=14,
+        )
+        for _ in range(10):
+            try:
+                probe = page.inner_text("body")
+            except Exception:
+                probe = ""
+            # Need more than tiny filter noise prices
+            found = [p for p in parse_prices(probe) if p >= 200]
+            if found:
+                break
+            page.wait_for_timeout(1000)
+        page.mouse.wheel(0, 2000)
+        page.wait_for_timeout(2000)
 
+        try:
+            body = page.inner_text("body")
+        except Exception:
+            body = ""
         snippet = self._extract_list_content(
             selectors=[
                 "[class*='hotel']",
@@ -237,12 +335,31 @@ class TripBrowser:
                 "body",
             ]
         )
+        prices = [p for p in parse_prices(body) if p >= 200] or [
+            p for p in parse_prices(snippet) if p >= 200
+        ]
+        price_note = (
+            f"Parsed prices (HKD-like): {prices[:10]}"
+            if prices
+            else "Parsed prices: NONE — page may still be loading or blocked."
+        )
+        final_url = page.url if "trip.com" in page.url else canonical
+        detail_links = [
+            u
+            for u in self._extract_detail_links(kinds=("hotel", "hotels"), limit=8)
+            if "/hotels/" in u and "all-cities" not in u and u.rstrip("/").count("/") >= 4
+        ][:3]
+        details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
+        content = body if prices and len(body) > 400 else snippet
         return _clean_text(
-            f"Hotel search URL: {page.url}\n"
-            f"City/keyword: {city}\n"
+            f"Hotel search URL: {final_url}\n"
+            f"Canonical search URL: {canonical}\n"
+            f"City/keyword: {city_name}\n"
             f"Check-in: {checkin} | Check-out: {checkout}\n"
-            f"Adults: {adults} | Rooms: {rooms}\n"
-            f"Form filled: {filled}\n\n{snippet}"
+            f"Adults: {adults_n} | Rooms: {rooms_n}\n"
+            f"{price_note}\n"
+            + (f"{details}\n" if details else "")
+            + f"\n{content}"
         )
 
     def search_trains(
@@ -593,7 +710,7 @@ class TripBrowser:
         """Build a trip plan comparing transport modes + hotels on Trip.com."""
         depart_date = depart_date or _default_depart(21)
         return_date = return_date or _default_return(28)
-        hotel_city = hotel_city or destination
+        hotel_city = to_hotel_city(hotel_city or destination)
         nights = nights_between(depart_date, return_date)
         need_car = _wants_rental_car(rent_car, interests)
         want_flights = _as_bool(include_flights, default=True)
@@ -644,7 +761,14 @@ class TripBrowser:
                 adults=adults,
             )
             flight_url = self._require_page().url
-            recommended_flight_url = flight_url or recommended_flight_url
+            # Prefer canonical hk.trip.com link from tool text
+            canon_m = re.search(r"Canonical search URL:\s*(\S+)", flight_text)
+            if canon_m:
+                recommended_flight_url = canon_m.group(1).rstrip(".,;")
+            else:
+                recommended_flight_url = flight_url or recommended_flight_url
+            if "hk.trip.com" not in recommended_flight_url and canon_m:
+                recommended_flight_url = canon_m.group(1).rstrip(".,;")
             flight_prices = summarize_prices(
                 f"Flights {origin}->{destination} on {recommended_flight_date}",
                 flight_text,
@@ -783,7 +907,11 @@ class TripBrowser:
             rooms=1,
         )
         hotel_url = self._require_page().url
-        recommended_hotel_url = hotel_url or recommended_hotel_url
+        canon_h = re.search(r"Canonical search URL:\s*(\S+)", hotel_text)
+        if canon_h:
+            recommended_hotel_url = canon_h.group(1).rstrip(".,;")
+        else:
+            recommended_hotel_url = hotel_url or recommended_hotel_url
         hotel_prices = summarize_prices(
             f"Hotels in {hotel_city}",
             hotel_text,
