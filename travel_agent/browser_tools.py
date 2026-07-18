@@ -28,6 +28,34 @@ def _default_return(days_ahead: int = 28) -> str:
     return (date.today() + timedelta(days=days_ahead)).isoformat()
 
 
+_CAR_NEED_RE = re.compile(
+    r"\b("
+    r"rent(?:al)?\s*car|car\s*rental|hire\s*car|car\s*hire|"
+    r"road\s*trip|self[- ]?drive|need(?:s)?\s+a?\s*car|driving"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_rental_car(
+    rent_car: bool | str | None = None,
+    interests: str = "",
+) -> bool:
+    """True when the user explicitly wants a rental car or interests imply it."""
+    if isinstance(rent_car, bool):
+        return rent_car
+    if isinstance(rent_car, str):
+        token = rent_car.strip().lower()
+        if token in {"1", "true", "yes", "y", "on"}:
+            return True
+        if token in {"0", "false", "no", "n", "off", ""}:
+            # Still allow interests to request a car when flag is empty/false-ish
+            if token in {"0", "false", "no", "n", "off"}:
+                return False
+    blob = f"{rent_car or ''} {interests or ''}"
+    return bool(_CAR_NEED_RE.search(blob))
+
+
 def _clean_text(text: str, limit: int = 6000) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -236,6 +264,106 @@ class TripBrowser:
             f"Depart: {depart_date}\n\n{snippet}"
         )
 
+    def search_cars(
+        self,
+        location: str,
+        pickup_date: str | None = None,
+        dropoff_date: str | None = None,
+    ) -> str:
+        """Search car rentals on Trip.com Hong Kong car hire."""
+        page = self._require_page()
+        pickup_date = pickup_date or _default_depart(21)
+        dropoff_date = dropoff_date or _default_return(28)
+        params = {
+            "locale": settings.trip_locale,
+            "curr": settings.trip_currency,
+            "channelid": "14409",
+        }
+        # Hub + location keyword; Trip.com may rewrite to a city results URL.
+        url = f"{settings.trip_base_url}/carhire/?{urlencode(params)}"
+        page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        self._dismiss_popups()
+
+        filled = self._try_fill_car_form(location, pickup_date, dropoff_date)
+        if not filled:
+            # Fallback: reopen hub with location in query when form fill fails.
+            params["keyword"] = location
+            params["pickupdate"] = pickup_date
+            params["dropoffdate"] = dropoff_date
+            page.goto(
+                f"{settings.trip_base_url}/carhire/?{urlencode(params)}",
+                wait_until="domcontentloaded",
+            )
+            page.wait_for_timeout(2500)
+            self._dismiss_popups()
+
+        self._wait_for_results(
+            keywords=["HK$", "car", "rental", "pickup", "pick-up", "day", "supplier"]
+        )
+        page.mouse.wheel(0, 1200)
+        page.wait_for_timeout(1500)
+
+        snippet = self._extract_list_content(
+            selectors=[
+                "[class*='car']",
+                "[class*='Car']",
+                "[class*='hire']",
+                "[class*='list']",
+                "main",
+                "body",
+            ]
+        )
+        return _clean_text(
+            f"Car rental search URL: {page.url}\n"
+            f"Pick-up location: {location}\n"
+            f"Pick-up: {pickup_date} | Drop-off: {dropoff_date}\n"
+            f"Form filled: {filled}\n\n{snippet}"
+        )
+
+    def _try_fill_car_form(
+        self,
+        location: str,
+        pickup_date: str,
+        dropoff_date: str,
+    ) -> bool:
+        """Best-effort fill of the Trip.com car hire search form."""
+        page = self._require_page()
+        try:
+            location_box = page.locator(
+                "input[placeholder*='Pick'], "
+                "input[placeholder*='pick'], "
+                "input[placeholder*='Location'], "
+                "input[placeholder*='City'], "
+                "input[aria-label*='Pick'], "
+                "input[aria-label*='location']"
+            ).first
+            if location_box.count() == 0:
+                return False
+            location_box.click(timeout=3000)
+            location_box.fill(location)
+            page.wait_for_timeout(800)
+            suggestion = page.get_by_text(location, exact=False).first
+            try:
+                suggestion.click(timeout=2500)
+            except Exception:
+                page.keyboard.press("Enter")
+            page.wait_for_timeout(600)
+
+            # Dates are often prefilled; try a search/submit button.
+            for label in ("Search", "Find cars", "Show cars", "Search cars"):
+                btn = page.get_by_role("button", name=re.compile(label, re.I))
+                if btn.count():
+                    btn.first.click(timeout=3000)
+                    page.wait_for_timeout(2500)
+                    return True
+            # Fallback: press Enter in the location field
+            location_box.press("Enter")
+            page.wait_for_timeout(2500)
+            return True
+        except Exception:
+            return False
+
     def browse_url(self, url: str) -> str:
         """Navigate to any Trip.com (or related) URL and summarize visible content."""
         page = self._require_page()
@@ -402,12 +530,14 @@ class TripBrowser:
         hotel_city: str | None = None,
         budget_hkd: float | None = None,
         interests: str = "",
+        rent_car: bool | str | None = None,
     ) -> str:
-        """Build a trip plan from live flight + hotel searches on Trip.com."""
+        """Build a trip plan from live flight + hotel (+ optional car) searches."""
         depart_date = depart_date or _default_depart(21)
         return_date = return_date or _default_return(28)
         hotel_city = hotel_city or destination
         nights = nights_between(depart_date, return_date)
+        need_car = _wants_rental_car(rent_car, interests)
 
         flight_text = self.search_flights(
             origin=origin,
@@ -438,14 +568,36 @@ class TripBrowser:
             url=hotel_url,
         )
 
+        car_text = ""
+        car_url = ""
+        car_prices: dict[str, Any] = {}
+        if need_car:
+            car_text = self.search_cars(
+                location=hotel_city,
+                pickup_date=depart_date,
+                dropoff_date=return_date,
+            )
+            car_url = self._require_page().url
+            car_prices = summarize_prices(
+                f"Car rental in {hotel_city}",
+                car_text,
+                url=car_url,
+            )
+
         flight_low = flight_prices.get("lowest_hkd")
         hotel_low = hotel_prices.get("lowest_hkd")
+        car_low = car_prices.get("lowest_hkd") if need_car else None
         hotel_total = (
             round(hotel_low * nights, 2) if hotel_low is not None else None
+        )
+        car_total = (
+            round(car_low * nights, 2) if car_low is not None else None
         )
         trip_total = None
         if flight_low is not None and hotel_total is not None:
             trip_total = round(flight_low + hotel_total, 2)
+            if car_total is not None:
+                trip_total = round(trip_total + car_total, 2)
 
         budget_note = "No budget set."
         if budget_hkd is not None and trip_total is not None:
@@ -463,6 +615,30 @@ class TripBrowser:
                 )
 
         interests_line = interests.strip() or "general sightseeing, food, local transport"
+        car_section = ""
+        car_next = ""
+        car_raw = ""
+        if need_car and car_url:
+            car_section = f"""
+3) CAR RENTAL
+- Car rental search URL: {car_url}
+- Open results: [View car rentals on Trip.com]({car_url})
+- Lowest daily seen: {"HK${:,.0f}".format(car_low) if car_low else "n/a"}
+- Est. rental total (lowest x nights): {"HK${:,.0f}".format(car_total) if car_total else "n/a"}
+- Sample prices: {car_prices.get("prices_hkd", [])[:8]}
+"""
+            car_next = f"\n  - Cars: {car_url}"
+            car_raw = "\n\n--- Raw car rental excerpt ---\n" + car_text[:2500]
+            budget_label = "flight + hotel + car"
+            section_budget = "4"
+            section_days = "5"
+            section_next = "6"
+        else:
+            budget_label = "flight + hotel"
+            section_budget = "3"
+            section_days = "4"
+            section_next = "5"
+
         plan = f"""TRIP PLAN (Trip.com Hong Kong live search)
 ========================================
 Route: {origin.upper()} -> {destination.upper()} (round-trip)
@@ -470,6 +646,7 @@ Dates: {depart_date} -> {return_date} ({nights} nights)
 Travelers: {adults} adult(s)
 Hotel city: {hotel_city}
 Interests: {interests_line}
+Rental car needed: {"yes" if need_car else "no"}
 
 1) FLIGHTS
 - Flight search URL: {flight_url}
@@ -483,32 +660,33 @@ Interests: {interests_line}
 - Lowest nightly seen: {"HK${:,.0f}".format(hotel_low) if hotel_low else "n/a"}
 - Est. stay total (lowest x nights): {"HK${:,.0f}".format(hotel_total) if hotel_total else "n/a"}
 - Sample prices: {hotel_prices.get("prices_hkd", [])[:8]}
-
-3) BUDGET SNAPSHOT
-- Est. low-end trip (flight + hotel): {"HK${:,.0f}".format(trip_total) if trip_total else "n/a"}
+{car_section}
+{section_budget}) BUDGET SNAPSHOT
+- Est. low-end trip ({budget_label}): {"HK${:,.0f}".format(trip_total) if trip_total else "n/a"}
 - {budget_note}
 
-4) SUGGESTED DAY FLOW
+{section_days}) SUGGESTED DAY FLOW
 - Day 1: Arrive, check-in, neighborhood walk, easy dinner near hotel
 - Day 2: Main city highlights + local food
 - Day 3: Secondary area / day trip if time allows
 - Final day: Buffer for checkout, airport transfer, flight home
   (Trim/expand days to match the {nights}-night stay.)
 
-5) NEXT ACTIONS FOR THE USER
+{section_next}) NEXT ACTIONS FOR THE USER
 - Compare nearby departure/return dates with compare_flight_prices
 - Compare hotel areas/dates with compare_hotel_prices
-- Open the flight/hotel links above on Trip.com to book:
+- Open the Trip.com links above to book:
   - Flights: {flight_url}
-  - Hotels: {hotel_url}
+  - Hotels: {hotel_url}{car_next}
 """
         return _clean_text(
             plan
             + "\n\n--- Raw flight excerpt ---\n"
             + flight_text[:2500]
             + "\n\n--- Raw hotel excerpt ---\n"
-            + hotel_text[:2500],
-            limit=10000,
+            + hotel_text[:2500]
+            + car_raw,
+            limit=12000,
         )
 
     def click_text(self, text: str) -> str:
@@ -736,6 +914,34 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "search_cars",
+            "description": (
+                "Search car rentals on Trip.com Hong Kong. Use when the traveler needs a "
+                "rental car, road trip, or self-drive option at the destination."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "Pick-up city or airport, e.g. Tokyo, Taipei, NRT",
+                    },
+                    "pickup_date": {
+                        "type": "string",
+                        "description": "Pick-up date YYYY-MM-DD",
+                    },
+                    "dropoff_date": {
+                        "type": "string",
+                        "description": "Drop-off date YYYY-MM-DD",
+                    },
+                },
+                "required": ["location"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "compare_flight_prices",
             "description": (
                 "Compare flight prices across multiple departure dates and/or alternate "
@@ -814,8 +1020,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "plan_trip",
             "description": (
                 "Create a full travel plan: search round-trip flights + hotels on Trip.com, "
-                "estimate budget, and outline a day-by-day itinerary. Prefer this for "
-                "'plan my trip' requests."
+                "optionally car rentals when needed, estimate budget, and outline a "
+                "day-by-day itinerary. Prefer this for 'plan my trip' requests."
             ),
             "parameters": {
                 "type": "object",
@@ -838,7 +1044,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                     "interests": {
                         "type": "string",
-                        "description": "Trip interests, e.g. food, museums, shopping",
+                        "description": "Trip interests, e.g. food, museums, shopping, road trip",
+                    },
+                    "rent_car": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the traveler needs a rental car / self-drive"
+                        ),
                     },
                 },
                 "required": ["origin", "destination"],
@@ -896,6 +1108,7 @@ def dispatch_tool(browser: TripBrowser, name: str, arguments: dict[str, Any] | s
         "search_flights": lambda: browser.search_flights(**arguments),
         "search_hotels": lambda: browser.search_hotels(**arguments),
         "search_trains": lambda: browser.search_trains(**arguments),
+        "search_cars": lambda: browser.search_cars(**arguments),
         "compare_flight_prices": lambda: browser.compare_flight_prices(**arguments),
         "compare_hotel_prices": lambda: browser.compare_hotel_prices(**arguments),
         "plan_trip": lambda: browser.plan_trip(**arguments),

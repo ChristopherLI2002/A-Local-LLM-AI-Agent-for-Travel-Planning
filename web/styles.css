@@ -244,6 +244,22 @@ input:focus {
   letter-spacing: 0.02em;
 }
 
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 0.15rem;
+  font-weight: 600;
+  color: var(--teal-deep);
+  cursor: pointer;
+}
+
+.check-field input {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: var(--teal);
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -526,6 +542,15 @@ input:focus {
 
 .booking-link-hotel:hover {
   box-shadow: 0 14px 26px rgba(180, 83, 9, 0.3);
+}
+
+.booking-link-car {
+  background: linear-gradient(135deg, #2f6f8f 0%, #1d4a63 100%);
+  box-shadow: 0 10px 22px rgba(29, 74, 99, 0.24);
+}
+
+.booking-link-car:hover {
+  box-shadow: 0 14px 26px rgba(29, 74, 99, 0.3);
 }
 
 @media (max-width: 520px) {
