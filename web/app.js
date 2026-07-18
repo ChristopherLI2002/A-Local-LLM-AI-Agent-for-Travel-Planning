@@ -4,6 +4,7 @@
     departDate: "",
     returnDate: "",
     budget: "",
+    rentCar: false,
   };
 
   const panels = {
@@ -18,10 +19,12 @@
   const departInput = document.getElementById("depart-date");
   const returnInput = document.getElementById("return-date");
   const budgetInput = document.getElementById("budget");
+  const rentCarInput = document.getElementById("rent-car");
 
   const sumDestination = document.getElementById("sum-destination");
   const sumDates = document.getElementById("sum-dates");
   const sumBudget = document.getElementById("sum-budget");
+  const sumCar = document.getElementById("sum-car");
 
   const planBtn = document.getElementById("plan-btn");
   const restartBtn = document.getElementById("restart-btn");
@@ -79,6 +82,7 @@
     sumDestination.textContent = state.destination;
     sumDates.textContent = formatDates();
     sumBudget.textContent = formatMoney(state.budget);
+    sumCar.textContent = state.rentCar ? "Yes" : "No";
   }
 
   function resetWizard() {
@@ -86,10 +90,12 @@
     state.departDate = "";
     state.returnDate = "";
     state.budget = "";
+    state.rentCar = false;
     destinationInput.value = "";
     departInput.value = "";
     returnInput.value = "";
     budgetInput.value = "";
+    rentCarInput.checked = false;
     resultBody.hidden = true;
     resultBody.textContent = "";
     resultBody.classList.remove("is-error");
@@ -143,6 +149,7 @@
     const budget = budgetInput.value;
     if (!budget || Number(budget) <= 0) return;
     state.budget = budget;
+    state.rentCar = Boolean(rentCarInput.checked);
     fillSummary();
     showStep(4);
   });
@@ -172,6 +179,7 @@
           return_date: state.returnDate || null,
           budget_hkd: Number(state.budget),
           origin: "HKG",
+          rent_car: state.rentCar,
         }),
       });
       const data = await res.json();

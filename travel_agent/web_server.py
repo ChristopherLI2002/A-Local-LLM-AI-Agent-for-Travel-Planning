@@ -57,24 +57,33 @@ def _build_query(
     return_date: str | None,
     budget_hkd: float,
     origin: str,
+    rent_car: bool = False,
 ) -> str:
     dates = (
         f"{depart_date} to {return_date}"
         if return_date
         else f"departing {depart_date}"
     )
+    car_line = (
+        "The traveler needs a rental car — call plan_trip with rent_car=true "
+        "(or search_cars) and include the car rental link."
+        if rent_car
+        else "Only include a rental car if the traveler clearly needs one."
+    )
     return (
         f"Plan a round-trip from {origin} to {destination}, {dates}, "
-        f"budget {budget_hkd:g} HKD. Use live Trip.com prices and stay within budget.\n\n"
+        f"budget {budget_hkd:g} HKD. Use live Trip.com prices and stay within budget. "
+        f"{car_line}\n\n"
         "Format your FINAL answer as clean semantic HTML only (no markdown, no code fences). "
         "Use <article>, <h2>, <h3>, <p>, <ul>, <ol>, <table>, <thead>, <tbody>, <tr>, <th>, <td>, "
-        "<strong>, <a>. Structure sections as: Overview, Flights, Hotels, Day-by-day itinerary, "
-        "Budget breakdown, Book on Trip.com, Next steps. "
-        "In Flights and Hotels, include the live Trip.com search URLs from the tools as "
-        'clickable links, e.g. <a href="URL" target="_blank" rel="noopener noreferrer">'
-        "View flights on Trip.com</a> and the same for hotels. "
-        "Never invent URLs — only use Search URL / Flight search URL / Hotel search URL "
-        "values from tool output. Do not include <script>, <style>, or external CSS."
+        "<strong>, <a>. Structure sections as: Overview, Flights, Hotels, "
+        "Car rental (only if needed), Day-by-day itinerary, Budget breakdown, "
+        "Book on Trip.com, Next steps. "
+        "Include live Trip.com search URLs from the tools as clickable links, e.g. "
+        '<a href="URL" target="_blank" rel="noopener noreferrer">View flights on Trip.com</a>, '
+        "hotels, and car rentals when searched. "
+        "Never invent URLs — only use Flight / Hotel / Car rental search URL values from "
+        "tool output. Do not include <script>, <style>, or external CSS."
     )
 
 
@@ -91,6 +100,7 @@ def plan():
     return_raw = payload.get("return_date")
     return_date = str(return_raw).strip() if return_raw else None
     origin = str(payload.get("origin") or "HKG").strip() or "HKG"
+    rent_car = bool(payload.get("rent_car"))
 
     try:
         budget_hkd = float(payload.get("budget_hkd"))
@@ -104,7 +114,14 @@ def plan():
     if budget_hkd <= 0:
         return jsonify({"error": "budget_hkd must be positive."}), 400
 
-    query = _build_query(destination, depart_date, return_date, budget_hkd, origin)
+    query = _build_query(
+        destination,
+        depart_date,
+        return_date,
+        budget_hkd,
+        origin,
+        rent_car=rent_car,
+    )
 
     try:
         with _agent_lock:
