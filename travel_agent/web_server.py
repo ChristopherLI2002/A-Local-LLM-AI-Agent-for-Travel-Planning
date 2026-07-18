@@ -11,6 +11,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
+from travel_agent.plan_html import plan_to_html
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -60,7 +61,11 @@ def _build_query(
     )
     return (
         f"Plan a round-trip from {origin} to {destination}, {dates}, "
-        f"budget {budget_hkd:g} HKD. Use live Trip.com prices and stay within budget."
+        f"budget {budget_hkd:g} HKD. Use live Trip.com prices and stay within budget.\n\n"
+        "Format your FINAL answer as clean semantic HTML only (no markdown, no code fences). "
+        "Use <article>, <h2>, <h3>, <p>, <ul>, <ol>, <table>, <thead>, <tbody>, <tr>, <th>, <td>, "
+        "<strong>. Structure sections as: Overview, Flights, Hotels, Day-by-day itinerary, "
+        "Budget breakdown, Next steps. Do not include <script>, <style>, or external CSS."
     )
 
 
@@ -101,7 +106,13 @@ def plan():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
-    return jsonify({"plan": plan_text, "query": query})
+    return jsonify(
+        {
+            "plan": plan_text,
+            "plan_html": plan_to_html(plan_text),
+            "query": query,
+        }
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

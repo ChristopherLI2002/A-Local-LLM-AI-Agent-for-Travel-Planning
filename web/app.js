@@ -61,6 +61,15 @@
     return `HK$${n.toLocaleString("en-HK", { maximumFractionDigits: 0 })}`;
   }
 
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
   function formatDates() {
     if (!state.returnDate) return state.departDate;
     return `${state.departDate} → ${state.returnDate}`;
@@ -83,6 +92,7 @@
     budgetInput.value = "";
     resultBody.hidden = true;
     resultBody.textContent = "";
+    resultBody.classList.remove("is-error");
     loader.hidden = false;
     resultActions.hidden = true;
     resultTitle.textContent = "Building your plan…";
@@ -170,12 +180,14 @@
       }
       resultTitle.textContent = "Your trip plan";
       resultHint.textContent = `Live search for ${state.destination} · budget ${formatMoney(state.budget)}`;
-      resultBody.textContent = data.plan;
+      resultBody.classList.remove("is-error");
+      resultBody.innerHTML = data.plan_html || `<article class="plan-doc"><p>${escapeHtml(data.plan || "")}</p></article>`;
       resultBody.hidden = false;
     } catch (err) {
       resultTitle.textContent = "Something went wrong";
       resultHint.textContent = "Check that Ollama and the agent server are running.";
-      resultBody.textContent = err.message || String(err);
+      resultBody.classList.add("is-error");
+      resultBody.innerHTML = `<article class="plan-doc"><p>${escapeHtml(err.message || String(err))}</p></article>`;
       resultBody.hidden = false;
     } finally {
       loader.hidden = true;
