@@ -1,4 +1,4 @@
-"""Interactive CLI for the Trip.com + Ollama travel agent."""
+"""Entry point: desktop GUI by default, optional terminal chat."""
 
 from __future__ import annotations
 
@@ -15,19 +15,12 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
-
-from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
-
-console = Console(force_terminal=True, soft_wrap=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="AI travel agent using Ollama + Trip.com Hong Kong browser search",
+        description="AI travel agent using Ollama + Trip.com Hong Kong (desktop window)",
     )
     parser.add_argument(
         "-m",
@@ -38,33 +31,44 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-q",
         "--query",
-        help="Single-shot question (non-interactive)",
+        help="Single-shot question in the terminal (skips the window UI)",
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Use terminal chat instead of the desktop window",
     )
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Run the browser without a visible window",
+        help="Run the Trip.com Playwright browser without a visible window",
     )
-    parser.add_argument(
-        "--web",
-        action="store_true",
-        help="Open the HTML trip wizard UI (destination → date → budget)",
-    )
-    parser.add_argument("--host", default="127.0.0.1", help="Web UI bind host")
-    parser.add_argument("--port", type=int, default=7860, help="Web UI bind port")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.web:
-        from travel_agent.web_server import main as web_main
+    # Desktop window is the default unless --cli or -q is used.
+    if not args.cli and not args.query:
+        from travel_agent.gui import main as gui_main
 
-        web_args = ["--host", args.host, "--port", str(args.port), "-m", args.model]
+        gui_args = ["-m", args.model]
         if args.headless:
-            web_args.append("--headless")
-        return web_main(web_args)
+            gui_args.append("--headless")
+        return gui_main(gui_args)
+
+    return _run_cli(args)
+
+
+def _run_cli(args: argparse.Namespace) -> int:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    from travel_agent.agent import TravelAgent
+
+    console = Console(force_terminal=True, soft_wrap=True)
 
     if args.headless:
         settings.headless = True
@@ -105,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.query:
-            _run_one(agent, args.query)
+            _run_one(console, agent, args.query)
             return 0
 
         console.print(
@@ -135,21 +139,23 @@ def main(argv: list[str] | None = None) -> int:
                 console.print(f"[dim]{msg}[/dim]")
                 continue
 
-            _run_one(agent, user)
+            _run_one(console, agent, user)
     finally:
         agent.close()
 
     return 0
 
 
-def _run_one(agent: TravelAgent, query: str) -> None:
+def _run_one(console, agent, query: str) -> None:
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
     console.print("[dim]Thinking / searching Trip.com...[/dim]")
     try:
         answer = agent.chat(query)
     except Exception as exc:
         console.print(f"[red]Agent error:[/red] {exc}")
         return
-    # Prefer plain text if markdown rendering hits encoding issues
     try:
         console.print(Panel(Markdown(answer), title="Agent", border_style="green"))
     except Exception:

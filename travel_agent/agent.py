@@ -37,7 +37,8 @@ Guidelines:
 - Present comparisons as ranked tables: cheapest first, savings called out.
 - For travel plans, compare relevant transport modes (flights vs trains) and include hotels, budget, day-by-day outline, booking next steps.
 - If a rental car is needed, search cars and include the Car rental search URL as a clickable link.
-- Always pass through Trip.com search URLs from tool output (Flight / Train / Airport transfer / Hotel / Car rental). Include them as clickable links — never invent URLs.
+- Always pass through Trip.com search URLs from tool output (Flight / Train / Airport transfer / Hotel / Car rental) as plain URLs — never invent URLs.
+- Write plain text answers (no HTML). Use short headings and bullet lists.
 - If page text is sparse, say what is uncertain and suggest a narrower search.
 - Keep answers practical and concise; use HKD unless the page shows otherwise.
 """
