@@ -74,7 +74,7 @@
         <article class="panel" data-step="3" id="step-budget" hidden>
           <p class="step-count">3 / 3</p>
           <h1 class="prompt">What’s your total budget?</h1>
-          <p class="hint">We’ll aim flights + hotel stays within this amount (HKD).</p>
+          <p class="hint">We’ll aim transport + hotels within this amount (HKD).</p>
           <form class="step-form" id="form-budget">
             <label class="field">
               <span class="field-label">Total budget (HKD)</span>
@@ -91,10 +91,25 @@
                 />
               </div>
             </label>
-            <label class="check-field">
-              <input id="rent-car" name="rent_car" type="checkbox" />
-              <span>I need a rental car</span>
-            </label>
+            <fieldset class="transport-fieldset">
+              <legend class="field-label">Transport to consider</legend>
+              <label class="check-field">
+                <input id="include-flights" name="include_flights" type="checkbox" checked />
+                <span>Flights</span>
+              </label>
+              <label class="check-field">
+                <input id="include-trains" name="include_trains" type="checkbox" checked />
+                <span>Trains</span>
+              </label>
+              <label class="check-field">
+                <input id="include-transfers" name="include_transfers" type="checkbox" checked />
+                <span>Airport transfers</span>
+              </label>
+              <label class="check-field">
+                <input id="rent-car" name="rent_car" type="checkbox" />
+                <span>Rental car</span>
+              </label>
+            </fieldset>
             <div class="actions">
               <button type="button" class="btn btn-ghost" data-back="2">Back</button>
               <button type="submit" class="btn btn-primary">Review trip</button>
@@ -121,8 +136,8 @@
               <dd id="sum-budget">—</dd>
             </div>
             <div>
-              <dt>Rental car</dt>
-              <dd id="sum-car">—</dd>
+              <dt>Transport</dt>
+              <dd id="sum-transport">—</dd>
             </div>
           </dl>
           <div class="actions">

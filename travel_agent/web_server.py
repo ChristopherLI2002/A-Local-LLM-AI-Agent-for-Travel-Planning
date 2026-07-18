@@ -58,32 +58,51 @@ def _build_query(
     budget_hkd: float,
     origin: str,
     rent_car: bool = False,
+    include_flights: bool = True,
+    include_trains: bool = True,
+    include_transfers: bool = True,
 ) -> str:
     dates = (
         f"{depart_date} to {return_date}"
         if return_date
         else f"departing {depart_date}"
     )
+    modes = []
+    if include_flights:
+        modes.append("flights")
+    if include_trains:
+        modes.append("trains")
+    if include_transfers:
+        modes.append("airport transfers")
+    if rent_car:
+        modes.append("rental car")
+    if not modes:
+        modes = ["flights", "trains", "airport transfers"]
+
     car_line = (
-        "The traveler needs a rental car — call plan_trip with rent_car=true "
-        "(or search_cars) and include the car rental link."
+        "Set rent_car=true and include the car rental link."
         if rent_car
-        else "Only include a rental car if the traveler clearly needs one."
+        else "Only include a rental car if clearly needed."
     )
     return (
-        f"Plan a round-trip from {origin} to {destination}, {dates}, "
-        f"budget {budget_hkd:g} HKD. Use live Trip.com prices and stay within budget. "
-        f"{car_line}\n\n"
+        f"Plan a trip from {origin} to {destination}, {dates}, "
+        f"budget {budget_hkd:g} HKD. Consider these transport modes: {', '.join(modes)}. "
+        "Do not plan with flights only when trains or airport transfers are selected — "
+        "compare the relevant modes using plan_trip "
+        f"(include_flights={str(include_flights).lower()}, "
+        f"include_trains={str(include_trains).lower()}, "
+        f"include_transfers={str(include_transfers).lower()}). {car_line} "
+        "Use live Trip.com prices and stay within budget.\n\n"
         "Format your FINAL answer as clean semantic HTML only (no markdown, no code fences). "
         "Use <article>, <h2>, <h3>, <p>, <ul>, <ol>, <table>, <thead>, <tbody>, <tr>, <th>, <td>, "
-        "<strong>, <a>. Structure sections as: Overview, Flights, Hotels, "
+        "<strong>, <a>. Structure sections as: Overview, Transport comparison "
+        "(Flights / Trains / Airport transfers as applicable), Hotels, "
         "Car rental (only if needed), Day-by-day itinerary, Budget breakdown, "
         "Book on Trip.com, Next steps. "
-        "Include live Trip.com search URLs from the tools as clickable links, e.g. "
-        '<a href="URL" target="_blank" rel="noopener noreferrer">View flights on Trip.com</a>, '
-        "hotels, and car rentals when searched. "
-        "Never invent URLs — only use Flight / Hotel / Car rental search URL values from "
-        "tool output. Do not include <script>, <style>, or external CSS."
+        "Include live Trip.com search URLs from the tools as clickable links for every "
+        "mode searched (flights, trains, transfers, hotels, cars). "
+        "Never invent URLs — only use search URL values from tool output. "
+        "Do not include <script>, <style>, or external CSS."
     )
 
 
@@ -101,6 +120,11 @@ def plan():
     return_date = str(return_raw).strip() if return_raw else None
     origin = str(payload.get("origin") or "HKG").strip() or "HKG"
     rent_car = bool(payload.get("rent_car"))
+    include_flights = bool(payload.get("include_flights", True))
+    include_trains = bool(payload.get("include_trains", True))
+    include_transfers = bool(payload.get("include_transfers", True))
+    if not include_flights and not include_trains:
+        include_flights = True
 
     try:
         budget_hkd = float(payload.get("budget_hkd"))
@@ -121,6 +145,9 @@ def plan():
         budget_hkd,
         origin,
         rent_car=rent_car,
+        include_flights=include_flights,
+        include_trains=include_trains,
+        include_transfers=include_transfers,
     )
 
     try:

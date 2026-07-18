@@ -37,6 +37,19 @@ _CAR_NEED_RE = re.compile(
 )
 
 
+def _as_bool(value: bool | str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "y", "on"}:
+        return True
+    if token in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def _wants_rental_car(
     rent_car: bool | str | None = None,
     interests: str = "",
@@ -48,12 +61,14 @@ def _wants_rental_car(
         token = rent_car.strip().lower()
         if token in {"1", "true", "yes", "y", "on"}:
             return True
-        if token in {"0", "false", "no", "n", "off", ""}:
-            # Still allow interests to request a car when flag is empty/false-ish
-            if token in {"0", "false", "no", "n", "off"}:
-                return False
+        if token in {"0", "false", "no", "n", "off"}:
+            return False
     blob = f"{rent_car or ''} {interests or ''}"
     return bool(_CAR_NEED_RE.search(blob))
+
+
+def _fmt_hkd(value: float | None) -> str:
+    return f"HK${value:,.0f}" if value is not None else "n/a"
 
 
 def _clean_text(text: str, limit: int = 6000) -> str:
@@ -262,6 +277,44 @@ class TripBrowser:
             f"Train search URL: {page.url}\n"
             f"Origin: {origin} -> Destination: {destination}\n"
             f"Depart: {depart_date}\n\n{snippet}"
+        )
+
+    def search_transfers(
+        self,
+        location: str,
+        date: str | None = None,
+    ) -> str:
+        """Open Trip.com airport transfers / ground transfer options."""
+        page = self._require_page()
+        date = date or _default_depart(21)
+        params = {
+            "locale": settings.trip_locale,
+            "curr": settings.trip_currency,
+            "keyword": location,
+            "date": date,
+        }
+        url = f"{settings.trip_base_url}/airport-transfers/?{urlencode(params)}"
+        page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_timeout(2500)
+        self._dismiss_popups()
+        self._wait_for_results(
+            keywords=["HK$", "transfer", "airport", "pickup", "car", "private"]
+        )
+        page.mouse.wheel(0, 1000)
+        page.wait_for_timeout(1200)
+        snippet = self._extract_list_content(
+            selectors=[
+                "[class*='transfer']",
+                "[class*='Transfer']",
+                "[class*='airport']",
+                "main",
+                "body",
+            ]
+        )
+        return _clean_text(
+            f"Airport transfer search URL: {page.url}\n"
+            f"Location: {location}\n"
+            f"Date: {date}\n\n{snippet}"
         )
 
     def search_cars(
@@ -531,28 +584,130 @@ class TripBrowser:
         budget_hkd: float | None = None,
         interests: str = "",
         rent_car: bool | str | None = None,
+        include_flights: bool | str | None = True,
+        include_trains: bool | str | None = True,
+        include_transfers: bool | str | None = True,
     ) -> str:
-        """Build a trip plan from live flight + hotel (+ optional car) searches."""
+        """Build a trip plan comparing transport modes + hotels on Trip.com."""
         depart_date = depart_date or _default_depart(21)
         return_date = return_date or _default_return(28)
         hotel_city = hotel_city or destination
         nights = nights_between(depart_date, return_date)
         need_car = _wants_rental_car(rent_car, interests)
+        want_flights = _as_bool(include_flights, default=True)
+        want_trains = _as_bool(include_trains, default=True)
+        want_transfers = _as_bool(include_transfers, default=True)
+        if not want_flights and not want_trains:
+            want_flights = True
 
-        flight_text = self.search_flights(
-            origin=origin,
-            destination=destination,
-            depart_date=depart_date,
-            return_date=return_date,
-            trip_type="roundtrip",
-            adults=adults,
-        )
-        flight_url = self._require_page().url
-        flight_prices = summarize_prices(
-            f"Flights {origin.upper()}->{destination.upper()}",
-            flight_text,
-            url=flight_url,
-        )
+        raw_blocks: list[str] = []
+        sections: list[str] = []
+        booking_lines: list[str] = []
+        transport_lows: list[tuple[str, float]] = []
+        n = 1
+
+        flight_url = ""
+        flight_low = None
+        if want_flights:
+            flight_text = self.search_flights(
+                origin=origin,
+                destination=destination,
+                depart_date=depart_date,
+                return_date=return_date,
+                trip_type="roundtrip",
+                adults=adults,
+            )
+            flight_url = self._require_page().url
+            flight_prices = summarize_prices(
+                f"Flights {origin.upper()}->{destination.upper()}",
+                flight_text,
+                url=flight_url,
+            )
+            flight_low = flight_prices.get("lowest_hkd")
+            if flight_low is not None:
+                transport_lows.append(("flights", float(flight_low)))
+            sections.append(
+                f"""{n}) FLIGHTS
+- Flight search URL: {flight_url}
+- Open results: [View flights on Trip.com]({flight_url})
+- Lowest seen: {_fmt_hkd(flight_low)}
+- Sample prices: {flight_prices.get("prices_hkd", [])[:8]}"""
+            )
+            booking_lines.append(f"  - Flights: {flight_url}")
+            raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:2200])
+            n += 1
+
+        train_url = ""
+        train_low = None
+        if want_trains:
+            train_out = self.search_trains(
+                origin=origin,
+                destination=destination,
+                depart_date=depart_date,
+            )
+            train_url = self._require_page().url
+            train_return = self.search_trains(
+                origin=destination,
+                destination=origin,
+                depart_date=return_date,
+            )
+            train_return_url = self._require_page().url
+            train_prices = summarize_prices(
+                f"Trains {origin}->{destination}",
+                train_out + "\n" + train_return,
+                url=train_url,
+            )
+            train_low = train_prices.get("lowest_hkd")
+            # One-way sample x2 as a rough round-trip floor when prices exist.
+            train_rt = round(train_low * 2, 2) if train_low is not None else None
+            if train_rt is not None:
+                transport_lows.append(("trains", float(train_rt)))
+            sections.append(
+                f"""{n}) TRAINS
+- Train search URL (outbound): {train_url}
+- Train search URL (return): {train_return_url}
+- Open results: [View trains on Trip.com]({train_url})
+- Lowest one-way seen: {_fmt_hkd(train_low)}
+- Est. round-trip floor (2x lowest one-way): {_fmt_hkd(train_rt)}
+- Sample prices: {train_prices.get("prices_hkd", [])[:8]}
+- Note: Train availability depends on the corridor; compare with flights."""
+            )
+            booking_lines.append(f"  - Trains: {train_url}")
+            if train_return_url and train_return_url != train_url:
+                booking_lines.append(f"  - Return trains: {train_return_url}")
+            raw_blocks.append(
+                "--- Raw train excerpt ---\n"
+                + train_out[:1600]
+                + "\n\n"
+                + train_return[:1600]
+            )
+            n += 1
+
+        transfer_url = ""
+        transfer_low = None
+        if want_transfers:
+            transfer_text = self.search_transfers(
+                location=hotel_city,
+                date=depart_date,
+            )
+            transfer_url = self._require_page().url
+            transfer_prices = summarize_prices(
+                f"Airport transfers in {hotel_city}",
+                transfer_text,
+                url=transfer_url,
+            )
+            transfer_low = transfer_prices.get("lowest_hkd")
+            sections.append(
+                f"""{n}) AIRPORT TRANSFERS / LOCAL GROUND
+- Airport transfer search URL: {transfer_url}
+- Open results: [View airport transfers on Trip.com]({transfer_url})
+- Lowest seen: {_fmt_hkd(transfer_low)}
+- Sample prices: {transfer_prices.get("prices_hkd", [])[:8]}
+- Use for airport↔hotel rides when not renting a car."""
+            )
+            booking_lines.append(f"  - Airport transfers: {transfer_url}")
+            raw_blocks.append("--- Raw transfer excerpt ---\n" + transfer_text[:1800])
+            n += 1
 
         hotel_text = self.search_hotels(
             city=hotel_city,
@@ -567,10 +722,24 @@ class TripBrowser:
             hotel_text,
             url=hotel_url,
         )
+        hotel_low = hotel_prices.get("lowest_hkd")
+        hotel_total = (
+            round(hotel_low * nights, 2) if hotel_low is not None else None
+        )
+        sections.append(
+            f"""{n}) HOTELS
+- Hotel search URL: {hotel_url}
+- Open results: [View hotels on Trip.com]({hotel_url})
+- Lowest nightly seen: {_fmt_hkd(hotel_low)}
+- Est. stay total (lowest x nights): {_fmt_hkd(hotel_total)}
+- Sample prices: {hotel_prices.get("prices_hkd", [])[:8]}"""
+        )
+        booking_lines.append(f"  - Hotels: {hotel_url}")
+        raw_blocks.append("--- Raw hotel excerpt ---\n" + hotel_text[:2200])
+        n += 1
 
-        car_text = ""
-        car_url = ""
-        car_prices: dict[str, Any] = {}
+        car_low = None
+        car_total = None
         if need_car:
             car_text = self.search_cars(
                 location=hotel_city,
@@ -583,110 +752,117 @@ class TripBrowser:
                 car_text,
                 url=car_url,
             )
+            car_low = car_prices.get("lowest_hkd")
+            car_total = (
+                round(car_low * nights, 2) if car_low is not None else None
+            )
+            sections.append(
+                f"""{n}) CAR RENTAL
+- Car rental search URL: {car_url}
+- Open results: [View car rentals on Trip.com]({car_url})
+- Lowest daily seen: {_fmt_hkd(car_low)}
+- Est. rental total (lowest x nights): {_fmt_hkd(car_total)}
+- Sample prices: {car_prices.get("prices_hkd", [])[:8]}"""
+            )
+            booking_lines.append(f"  - Cars: {car_url}")
+            raw_blocks.append("--- Raw car rental excerpt ---\n" + car_text[:2200])
+            n += 1
 
-        flight_low = flight_prices.get("lowest_hkd")
-        hotel_low = hotel_prices.get("lowest_hkd")
-        car_low = car_prices.get("lowest_hkd") if need_car else None
-        hotel_total = (
-            round(hotel_low * nights, 2) if hotel_low is not None else None
-        )
-        car_total = (
-            round(car_low * nights, 2) if car_low is not None else None
-        )
+        best_transport_name = None
+        best_transport_cost = None
+        if transport_lows:
+            best_transport_name, best_transport_cost = min(
+                transport_lows, key=lambda item: item[1]
+            )
+
         trip_total = None
-        if flight_low is not None and hotel_total is not None:
-            trip_total = round(flight_low + hotel_total, 2)
+        if best_transport_cost is not None and hotel_total is not None:
+            trip_total = round(best_transport_cost + hotel_total, 2)
             if car_total is not None:
                 trip_total = round(trip_total + car_total, 2)
+            if transfer_low is not None and not need_car:
+                # Rough round-trip airport transfers when not driving.
+                trip_total = round(trip_total + (transfer_low * 2), 2)
+
+        transport_compare = ", ".join(
+            f"{name} {_fmt_hkd(cost)}" for name, cost in transport_lows
+        ) or "n/a"
+        budget_parts = []
+        if best_transport_name:
+            budget_parts.append(f"best transport ({best_transport_name})")
+        budget_parts.append("hotel")
+        if need_car:
+            budget_parts.append("car")
+        elif want_transfers and transfer_low is not None:
+            budget_parts.append("transfers")
+        budget_label = " + ".join(budget_parts)
 
         budget_note = "No budget set."
         if budget_hkd is not None and trip_total is not None:
             if trip_total <= budget_hkd:
                 budget_note = (
-                    f"Estimated low end HK${trip_total:,.0f} fits budget "
-                    f"HK${budget_hkd:,.0f}."
+                    f"Estimated low end {_fmt_hkd(trip_total)} fits budget "
+                    f"{_fmt_hkd(budget_hkd)}."
                 )
             else:
                 over = trip_total - budget_hkd
                 budget_note = (
-                    f"Estimated low end HK${trip_total:,.0f} is about "
-                    f"HK${over:,.0f} over budget HK${budget_hkd:,.0f}. "
-                    "Suggest flexible dates or nearby cities."
+                    f"Estimated low end {_fmt_hkd(trip_total)} is about "
+                    f"{_fmt_hkd(over)} over budget {_fmt_hkd(budget_hkd)}. "
+                    "Suggest flexible dates, trains vs flights, or nearby cities."
                 )
 
         interests_line = interests.strip() or "general sightseeing, food, local transport"
-        car_section = ""
-        car_next = ""
-        car_raw = ""
-        if need_car and car_url:
-            car_section = f"""
-3) CAR RENTAL
-- Car rental search URL: {car_url}
-- Open results: [View car rentals on Trip.com]({car_url})
-- Lowest daily seen: {"HK${:,.0f}".format(car_low) if car_low else "n/a"}
-- Est. rental total (lowest x nights): {"HK${:,.0f}".format(car_total) if car_total else "n/a"}
-- Sample prices: {car_prices.get("prices_hkd", [])[:8]}
-"""
-            car_next = f"\n  - Cars: {car_url}"
-            car_raw = "\n\n--- Raw car rental excerpt ---\n" + car_text[:2500]
-            budget_label = "flight + hotel + car"
-            section_budget = "4"
-            section_days = "5"
-            section_next = "6"
-        else:
-            budget_label = "flight + hotel"
-            section_budget = "3"
-            section_days = "4"
-            section_next = "5"
+        modes = []
+        if want_flights:
+            modes.append("flights")
+        if want_trains:
+            modes.append("trains")
+        if want_transfers:
+            modes.append("airport transfers")
+        if need_car:
+            modes.append("rental car")
 
-        plan = f"""TRIP PLAN (Trip.com Hong Kong live search)
+        sections.append(
+            f"""{n}) TRANSPORT COMPARISON + BUDGET
+- Modes considered: {", ".join(modes)}
+- Transport options seen: {transport_compare}
+- Cheapest long-haul option: {best_transport_name or "n/a"} ({_fmt_hkd(best_transport_cost)})
+- Est. low-end trip ({budget_label}): {_fmt_hkd(trip_total)}
+- {budget_note}"""
+        )
+        n += 1
+        sections.append(
+            f"""{n}) SUGGESTED DAY FLOW
+- Day 1: Arrive via chosen transport, check-in, neighborhood walk, easy dinner
+- Day 2: Main city highlights + local food
+- Day 3: Secondary area / day trip if time allows
+- Final day: Buffer for checkout, ground transfer to station/airport, depart
+  (Trim/expand days to match the {nights}-night stay.)"""
+        )
+        n += 1
+        sections.append(
+            f"""{n}) NEXT ACTIONS FOR THE USER
+- Compare flights vs trains using the links below
+- Compare hotel areas/dates with compare_hotel_prices
+- Open the Trip.com links above to book:
+"""
+            + "\n".join(booking_lines)
+        )
+
+        header = f"""TRIP PLAN (Trip.com Hong Kong live search)
 ========================================
-Route: {origin.upper()} -> {destination.upper()} (round-trip)
+Route: {origin.upper()} -> {destination.upper()}
 Dates: {depart_date} -> {return_date} ({nights} nights)
 Travelers: {adults} adult(s)
 Hotel city: {hotel_city}
 Interests: {interests_line}
-Rental car needed: {"yes" if need_car else "no"}
-
-1) FLIGHTS
-- Flight search URL: {flight_url}
-- Open results: [View flights on Trip.com]({flight_url})
-- Lowest seen: {"HK${:,.0f}".format(flight_low) if flight_low else "n/a"}
-- Sample prices: {flight_prices.get("prices_hkd", [])[:8]}
-
-2) HOTELS
-- Hotel search URL: {hotel_url}
-- Open results: [View hotels on Trip.com]({hotel_url})
-- Lowest nightly seen: {"HK${:,.0f}".format(hotel_low) if hotel_low else "n/a"}
-- Est. stay total (lowest x nights): {"HK${:,.0f}".format(hotel_total) if hotel_total else "n/a"}
-- Sample prices: {hotel_prices.get("prices_hkd", [])[:8]}
-{car_section}
-{section_budget}) BUDGET SNAPSHOT
-- Est. low-end trip ({budget_label}): {"HK${:,.0f}".format(trip_total) if trip_total else "n/a"}
-- {budget_note}
-
-{section_days}) SUGGESTED DAY FLOW
-- Day 1: Arrive, check-in, neighborhood walk, easy dinner near hotel
-- Day 2: Main city highlights + local food
-- Day 3: Secondary area / day trip if time allows
-- Final day: Buffer for checkout, airport transfer, flight home
-  (Trim/expand days to match the {nights}-night stay.)
-
-{section_next}) NEXT ACTIONS FOR THE USER
-- Compare nearby departure/return dates with compare_flight_prices
-- Compare hotel areas/dates with compare_hotel_prices
-- Open the Trip.com links above to book:
-  - Flights: {flight_url}
-  - Hotels: {hotel_url}{car_next}
+Transport modes: {", ".join(modes)}
 """
+        plan = header + "\n\n" + "\n\n".join(sections)
         return _clean_text(
-            plan
-            + "\n\n--- Raw flight excerpt ---\n"
-            + flight_text[:2500]
-            + "\n\n--- Raw hotel excerpt ---\n"
-            + hotel_text[:2500]
-            + car_raw,
-            limit=12000,
+            plan + "\n\n" + "\n\n".join(raw_blocks),
+            limit=14000,
         )
 
     def click_text(self, text: str) -> str:
@@ -899,7 +1075,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_trains",
-            "description": "Search train tickets on Trip.com Hong Kong between two stations/cities.",
+            "description": (
+                "Search train tickets on Trip.com Hong Kong between two stations/cities. "
+                "Use as an alternative to flights when ground rail is plausible."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -908,6 +1087,27 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "depart_date": {"type": "string", "description": "Depart YYYY-MM-DD"},
                 },
                 "required": ["origin", "destination"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_transfers",
+            "description": (
+                "Search airport transfers / private ground pickup on Trip.com Hong Kong "
+                "for airport↔hotel rides."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City or airport area, e.g. Tokyo, Taipei",
+                    },
+                    "date": {"type": "string", "description": "Service date YYYY-MM-DD"},
+                },
+                "required": ["location"],
             },
         },
     },
@@ -1019,9 +1219,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "plan_trip",
             "description": (
-                "Create a full travel plan: search round-trip flights + hotels on Trip.com, "
-                "optionally car rentals when needed, estimate budget, and outline a "
-                "day-by-day itinerary. Prefer this for 'plan my trip' requests."
+                "Create a full travel plan on Trip.com: compare transport modes "
+                "(flights, trains, airport transfers), hotels, optional car rental, "
+                "budget, and day-by-day outline. Prefer this for 'plan my trip' requests."
             ),
             "parameters": {
                 "type": "object",
@@ -1050,6 +1250,20 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "boolean",
                         "description": (
                             "Set true when the traveler needs a rental car / self-drive"
+                        ),
+                    },
+                    "include_flights": {
+                        "type": "boolean",
+                        "description": "Include flight search (default true)",
+                    },
+                    "include_trains": {
+                        "type": "boolean",
+                        "description": "Include train search as an alternative (default true)",
+                    },
+                    "include_transfers": {
+                        "type": "boolean",
+                        "description": (
+                            "Include airport transfer / ground pickup search (default true)"
                         ),
                     },
                 },
@@ -1108,6 +1322,7 @@ def dispatch_tool(browser: TripBrowser, name: str, arguments: dict[str, Any] | s
         "search_flights": lambda: browser.search_flights(**arguments),
         "search_hotels": lambda: browser.search_hotels(**arguments),
         "search_trains": lambda: browser.search_trains(**arguments),
+        "search_transfers": lambda: browser.search_transfers(**arguments),
         "search_cars": lambda: browser.search_cars(**arguments),
         "compare_flight_prices": lambda: browser.compare_flight_prices(**arguments),
         "compare_hotel_prices": lambda: browser.compare_hotel_prices(**arguments),

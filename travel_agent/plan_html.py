@@ -61,8 +61,23 @@ _CAR_LABEL_RE = re.compile(
     r"(?:Car rental search URL|Cars?[^\n]{0,40}Search URL|Car hire search URL)\s*:\s*(https?://\S+)",
     re.IGNORECASE,
 )
+_TRAIN_LABEL_RE = re.compile(
+    r"(?:Train search URL(?:\s*\([^)]*\))?|Trains?[^\n]{0,40}Search URL)\s*:\s*(https?://\S+)",
+    re.IGNORECASE,
+)
+_TRANSFER_LABEL_RE = re.compile(
+    r"(?:Airport transfer search URL|Transfer search URL)\s*:\s*(https?://\S+)",
+    re.IGNORECASE,
+)
 
-_LINK_KEYS = ("flight", "hotel", "car")
+_LINK_KEYS = ("flight", "train", "transfer", "hotel", "car")
+_LINK_LABELS = {
+    "flight": "flights",
+    "train": "trains",
+    "transfer": "airport transfers",
+    "hotel": "hotels",
+    "car": "car rentals",
+}
 
 
 def _strip_fences(text: str) -> str:
@@ -106,43 +121,36 @@ def _clean_url(url: str) -> str:
 
 
 def extract_booking_links(*texts: str) -> dict[str, str | None]:
-    """Pull Trip.com flight/hotel/car result URLs from tool output or plan text."""
+    """Pull Trip.com transport/hotel/car result URLs from tool output or plan text."""
     blob = "\n".join(t for t in texts if t)
-    links: dict[str, str | None] = {"flight": None, "hotel": None, "car": None}
+    links: dict[str, str | None] = {key: None for key in _LINK_KEYS}
 
-    flight_m = _FLIGHT_LABEL_RE.search(blob)
-    if flight_m:
-        links["flight"] = _clean_url(flight_m.group(1))
-    hotel_m = _HOTEL_LABEL_RE.search(blob)
-    if hotel_m:
-        links["hotel"] = _clean_url(hotel_m.group(1))
-    car_m = _CAR_LABEL_RE.search(blob)
-    if car_m:
-        links["car"] = _clean_url(car_m.group(1))
-
-    flight_block = re.search(
-        r"1\)\s*FLIGHTS[\s\S]{0,400}?Search URL:\s*(https?://\S+)",
-        blob,
-        re.IGNORECASE,
+    labeled = (
+        (_FLIGHT_LABEL_RE, "flight"),
+        (_TRAIN_LABEL_RE, "train"),
+        (_TRANSFER_LABEL_RE, "transfer"),
+        (_HOTEL_LABEL_RE, "hotel"),
+        (_CAR_LABEL_RE, "car"),
     )
-    if flight_block and not links["flight"]:
-        links["flight"] = _clean_url(flight_block.group(1))
+    for pattern, key in labeled:
+        match = pattern.search(blob)
+        if match:
+            links[key] = _clean_url(match.group(1))
 
-    hotel_block = re.search(
-        r"2\)\s*HOTELS[\s\S]{0,400}?Search URL:\s*(https?://\S+)",
-        blob,
-        re.IGNORECASE,
+    block_patterns = (
+        (r"\)\s*FLIGHTS[\s\S]{0,500}?Search URL:\s*(https?://\S+)", "flight"),
+        (r"\)\s*TRAINS[\s\S]{0,500}?Search URL[^\n]*:\s*(https?://\S+)", "train"),
+        (
+            r"\)\s*AIRPORT TRANSFERS[\s\S]{0,500}?Search URL:\s*(https?://\S+)",
+            "transfer",
+        ),
+        (r"\)\s*HOTELS[\s\S]{0,500}?Search URL:\s*(https?://\S+)", "hotel"),
+        (r"\)\s*CAR RENTAL[\s\S]{0,500}?Search URL:\s*(https?://\S+)", "car"),
     )
-    if hotel_block and not links["hotel"]:
-        links["hotel"] = _clean_url(hotel_block.group(1))
-
-    car_block = re.search(
-        r"3\)\s*CAR RENTAL[\s\S]{0,400}?Search URL:\s*(https?://\S+)",
-        blob,
-        re.IGNORECASE,
-    )
-    if car_block and not links["car"]:
-        links["car"] = _clean_url(car_block.group(1))
+    for pattern, key in block_patterns:
+        match = re.search(pattern, blob, re.IGNORECASE)
+        if match and not links[key]:
+            links[key] = _clean_url(match.group(1))
 
     for raw in _URL_RE.findall(blob):
         url = _clean_url(raw)
@@ -151,6 +159,10 @@ def extract_booking_links(*texts: str) -> dict[str, str | None]:
             continue
         if links["flight"] is None and "/flight" in lower:
             links["flight"] = url
+        elif links["train"] is None and "/train" in lower:
+            links["train"] = url
+        elif links["transfer"] is None and "airport-transfer" in lower:
+            links["transfer"] = url
         elif links["hotel"] is None and "/hotel" in lower:
             links["hotel"] = url
         elif links["car"] is None and "carhire" in lower:
@@ -161,34 +173,32 @@ def extract_booking_links(*texts: str) -> dict[str, str | None]:
 
 def _booking_links_section(links: dict[str, str | None]) -> str:
     items: list[str] = []
-    if links.get("flight"):
-        href = html.escape(links["flight"], quote=True)
+    button_copy = {
+        "flight": "View flights on Trip.com",
+        "train": "View trains on Trip.com",
+        "transfer": "View airport transfers on Trip.com",
+        "hotel": "View hotels on Trip.com",
+        "car": "View car rentals on Trip.com",
+    }
+    for key in _LINK_KEYS:
+        url = links.get(key)
+        if not url:
+            continue
+        href = html.escape(url, quote=True)
         items.append(
-            f'<li><a class="booking-link booking-link-flight" href="{href}" '
-            f'target="_blank" rel="noopener noreferrer">View flights on Trip.com</a></li>'
-        )
-    if links.get("hotel"):
-        href = html.escape(links["hotel"], quote=True)
-        items.append(
-            f'<li><a class="booking-link booking-link-hotel" href="{href}" '
-            f'target="_blank" rel="noopener noreferrer">View hotels on Trip.com</a></li>'
-        )
-    if links.get("car"):
-        href = html.escape(links["car"], quote=True)
-        items.append(
-            f'<li><a class="booking-link booking-link-car" href="{href}" '
-            f'target="_blank" rel="noopener noreferrer">View car rentals on Trip.com</a></li>'
+            f'<li><a class="booking-link booking-link-{key}" href="{href}" '
+            f'target="_blank" rel="noopener noreferrer">{button_copy[key]}</a></li>'
         )
     if not items:
         return ""
 
-    kinds = [k for k in _LINK_KEYS if links.get(k)]
+    kinds = [_LINK_LABELS[k] for k in _LINK_KEYS if links.get(k)]
     if len(kinds) == 1:
         blurb = f"Open the live {kinds[0]} results:"
     elif len(kinds) == 2:
         blurb = f"Open the live {kinds[0]} and {kinds[1]} results:"
     else:
-        blurb = "Open the live flight, hotel, and car rental results:"
+        blurb = "Open the live Trip.com booking results:"
 
     return (
         '<section class="booking-links">'
@@ -210,7 +220,7 @@ def _has_any_link(links: dict[str, str | None] | None) -> bool:
 
 
 def ensure_booking_links(body_html: str, links: dict[str, str | None] | None) -> str:
-    """Append a booking-links section when flight/hotel/car URLs are missing from HTML."""
+    """Append a booking-links section when transport/hotel URLs are missing from HTML."""
     if not _has_any_link(links):
         return body_html
     assert links is not None
@@ -261,10 +271,7 @@ def plan_to_html(
 
     links = booking_links or extract_booking_links(text, extra_text)
     mined = extract_booking_links(text, extra_text)
-    links = {
-        key: links.get(key) or mined.get(key)
-        for key in _LINK_KEYS
-    }
+    links = {key: links.get(key) or mined.get(key) for key in _LINK_KEYS}
 
     if _looks_like_html(text):
         body = text
