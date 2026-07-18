@@ -183,7 +183,7 @@ def ensure_booking_links(body_html: str, links: dict[str, str | None] | None) ->
     }
     if not missing["flight"] and not missing["hotel"]:
         # URLs are already present; still add a clear CTA block if none exists.
-        if 'class="booking-links"' in body_html or "Book on Trip.com" in body_html:
+        if 'class="booking-links"' in body_html or "Booking links" in body_html:
             return body_html
         section = _booking_links_section(links)
         return body_html + section if section else body_html
