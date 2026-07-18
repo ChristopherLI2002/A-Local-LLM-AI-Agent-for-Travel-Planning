@@ -31,6 +31,7 @@ Guidelines:
 - Always ground prices in tool output. Never invent live fares.
 - Present comparisons as ranked tables: cheapest first, savings called out.
 - For travel plans include: flights, hotels, estimated HKD budget, day-by-day outline, booking next steps.
+- Always pass through the Trip.com flight and hotel search URLs from tool output (Flight search URL / Hotel search URL / Search URL). Include them as clickable links in the final answer — never invent URLs.
 - If page text is sparse, say what is uncertain and suggest a narrower search.
 - Keep answers practical and concise; use HKD unless the page shows otherwise.
 """
