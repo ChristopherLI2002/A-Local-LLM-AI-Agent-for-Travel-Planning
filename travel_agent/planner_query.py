@@ -1,6 +1,16 @@
-"""Shared trip-plan prompt builder (plain text for desktop UI)."""
+"""Shared trip-plan prompt builder (Trip.Planner-style)."""
 
 from __future__ import annotations
+
+
+TRAVEL_STYLES = (
+    "First-time",
+    "Culture",
+    "Food",
+    "Family",
+    "Relaxed",
+    "Adventure",
+)
 
 
 def build_plan_query(
@@ -13,12 +23,18 @@ def build_plan_query(
     include_flights: bool = True,
     include_trains: bool = True,
     include_transfers: bool = True,
+    travel_styles: list[str] | None = None,
+    nights: int | None = None,
 ) -> str:
     dates = (
         f"{depart_date} to {return_date}"
         if return_date
         else f"departing {depart_date}"
     )
+    styles = [s for s in (travel_styles or []) if s]
+    style_line = ", ".join(styles) if styles else "First-time"
+    stay = f"{nights} nights" if nights else "full stay"
+
     modes: list[str] = []
     if include_flights:
         modes.append("flights")
@@ -37,29 +53,47 @@ def build_plan_query(
         else "Only include a rental car if clearly needed."
     )
     return_part = return_date or "(open return)"
+
     return (
-        f"Plan a ROUND-TRIP trip from {origin} to {destination}, {dates}, "
-        f"hotel stay from {depart_date} to {return_part}, "
-        f"budget {budget_hkd:g} HKD. Modes: {', '.join(modes)}. {car_line}\n\n"
-        "Call plan_trip once with matching depart_date/return_date and hotel_city="
-        f"{destination}. "
-        "plan_trip maps city names to airport codes automatically.\n\n"
-        "Your final answer MUST start with:\n\n"
+        f"Create a Trip.Planner-style itinerary from {origin} to {destination}, "
+        f"{dates} ({stay}), budget {budget_hkd:g} HKD. "
+        f"Travel style(s): {style_line}. Modes: {', '.join(modes)}. {car_line}\n\n"
+        "Workflow:\n"
+        "1) Call plan_trip with matching depart_date/return_date and "
+        f"hotel_city={destination}, interests={style_line!r}.\n"
+        "2) Use live hk.trip.com Canonical search URL / Flight search URL / "
+        "Hotel search URL from the tool — never invent www.trip.com links.\n\n"
+        "Format the FINAL answer as plain text with EXACTLY these sections "
+        "(headings must match):\n\n"
         "Recommended flight\n"
-        "- Depart / return dates\n"
-        "- Price (HKD) from tool output, or 'price unavailable on page'\n"
-        "- Link: paste Canonical search URL or Flight search URL exactly "
-        "(must be https://hk.trip.com/...)\n\n"
+        "- Airline: <name if known>\n"
+        "- From: <IATA> [terminal]   Depart time: HH:MM\n"
+        "- To: <IATA> [terminal]     Arrive time: HH:MM\n"
+        "- Duration: e.g. 4h 30m\n"
+        "- Stops: Direct or N stop(s)\n"
+        "- Baggage: e.g. Checked baggage 20 kg (if known)\n"
+        "- Price: HK$… (or 'price unavailable on page')\n"
+        "- Trip: Return or One-way\n"
+        "- Link: <exact https://hk.trip.com/... URL>\n\n"
         "Recommended hotel\n"
-        "- Check-in / check-out (full trip length, not 1 night)\n"
-        "- Nightly and total if available\n"
-        "- Link: paste Canonical search URL or Hotel search URL exactly "
-        "(must be https://hk.trip.com/...)\n"
-        "- Also paste any Hotel option link lines from tools\n\n"
-        "Then add brief overview, budget vs user budget, and itinerary.\n\n"
-        "FORBIDDEN:\n"
-        "- Inventing www.trip.com/flights/search or /hotels/search URLs\n"
-        "- Making up prices\n"
-        "- Telling the user to compare flights/hotels themselves\n"
-        "- One-night hotel checkout when the trip is a week\n"
+        "- Hotel: <property name>\n"
+        "- Stars: <1-5>\n"
+        "- Score: <e.g. 9.0>  Reviews: <e.g. 261 reviews>\n"
+        "- Location: <area • landmark>\n"
+        "- Features: <e.g. Suite • breakfast • lounge>\n"
+        "- Room: <e.g. Superior Twin>\n"
+        "- Beds: <e.g. 2 single beds>\n"
+        "- Nightly: HK$…\n"
+        "- Total: HK$… (incl. taxes & fees) if known\n"
+        "- Link: <exact https://hk.trip.com/... URL>\n\n"
+        "Day-by-day itinerary\n"
+        "Day 1: ...\n"
+        "Day 2: ...\n"
+        f"(One day block per night/day of the {stay} trip. "
+        f"Pace and attractions MUST match travel style: {style_line}. "
+        "Use Morning / Afternoon / Evening bullets when possible.)\n\n"
+        "Budget snapshot\n"
+        "- Compare estimated flight+hotel total vs the user budget\n\n"
+        "FORBIDDEN: inventing URLs/prices; one-night hotel when trip is a week; "
+        "telling the user to compare flights/hotels themselves."
     )

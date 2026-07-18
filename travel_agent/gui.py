@@ -1,4 +1,4 @@
-"""Desktop window UI for the Trip.com + Ollama travel agent (tkinter)."""
+"""Trip.Planner-style desktop UI for the Voyage travel agent (tkinter)."""
 
 from __future__ import annotations
 
@@ -13,11 +13,16 @@ from tkinter import messagebox, scrolledtext
 
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
-from travel_agent.planner_query import build_plan_query
+from travel_agent.itinerary_parse import FlightOffer, HotelOffer, ParsedItinerary, parse_itinerary
+from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
 
-# Harbor mist — light, coastal, no purple / cream-terracotta / dark-mode defaults
+TRIP_PLANNER_URL = (
+    "https://hk.trip.com/webapp/tripmap/tripplanner"
+    "?source=t_online_homepage&locale=en-HK&curr=HKD"
+)
+
 C = {
     "sky_top": "#B9D6E8",
     "sky_mid": "#D7E8F2",
@@ -38,9 +43,14 @@ C = {
     "danger": "#C45B5B",
     "ok": "#2F8F64",
     "shadow": "#9BB4C4",
+    "card": "#FFFFFF",
+    "trip_blue": "#3264FF",
+    "trip_blue_hover": "#254ED6",
+    "badge_teal": "#0B7A74",
+    "badge_outline": "#5BB8B1",
 }
 
-FONT_BRAND = ("Georgia", 36, "bold")
+FONT_BRAND = ("Georgia", 34, "bold")
 FONT_DISPLAY = ("Georgia", 18)
 FONT_UI = ("Segoe UI", 11)
 FONT_UI_BOLD = ("Segoe UI Semibold", 11)
@@ -62,16 +72,22 @@ def _lerp_hex(a: str, b: str, t: float) -> str:
     return f"#{r:02x}{g:02x}{bl:02x}"
 
 
-class GradientHeader(tk.Canvas):
-    """Full-bleed soft sky gradient with brand lockup."""
+def _default_depart() -> str:
+    return (date.today() + timedelta(days=1)).isoformat()
 
+
+def _default_return(nights: int = 7) -> str:
+    return (date.today() + timedelta(days=1 + nights)).isoformat()
+
+
+class GradientHeader(tk.Canvas):
     def __init__(self, master: tk.Misc, **kwargs) -> None:
-        super().__init__(master, height=148, highlightthickness=0, bd=0, **kwargs)
+        super().__init__(master, height=132, highlightthickness=0, bd=0, **kwargs)
         self.bind("<Configure>", self._paint)
         self._pulse = 0.0
         self._status = "Starting Trip.com browser…"
         self._status_color = C["muted"]
-        self.after(40, self._tick)
+        self.after(50, self._tick)
 
     def set_status(self, text: str, color: str | None = None) -> None:
         self._status = text
@@ -80,72 +96,47 @@ class GradientHeader(tk.Canvas):
         self._paint()
 
     def _tick(self) -> None:
-        self._pulse = (self._pulse + 0.08) % (math.pi * 2)
+        self._pulse = (self._pulse + 0.07) % (math.pi * 2)
         self._paint()
-        self.after(50, self._tick)
+        self.after(60, self._tick)
 
     def _paint(self, _event: object | None = None) -> None:
         w = max(self.winfo_width(), 2)
         h = max(self.winfo_height(), 2)
         self.delete("all")
-        steps = 48
+        steps = 40
         for i in range(steps):
             t = i / (steps - 1)
-            if t < 0.55:
-                color = _lerp_hex(C["sky_top"], C["sky_mid"], t / 0.55)
-            else:
-                color = _lerp_hex(C["sky_mid"], C["sky_bot"], (t - 0.55) / 0.45)
+            color = (
+                _lerp_hex(C["sky_top"], C["sky_mid"], t / 0.55)
+                if t < 0.55
+                else _lerp_hex(C["sky_mid"], C["sky_bot"], (t - 0.55) / 0.45)
+            )
             y0 = int(h * i / steps)
             y1 = int(h * (i + 1) / steps) + 1
             self.create_rectangle(0, y0, w, y1, outline="", fill=color)
 
-        # Soft horizon haze
-        glow = 0.35 + 0.15 * math.sin(self._pulse)
+        glow = 0.35 + 0.12 * math.sin(self._pulse)
         self.create_oval(
-            w * 0.62,
-            h * (0.05 - 0.02 * math.sin(self._pulse)),
-            w * 0.98,
-            h * (0.85 + 0.04 * math.sin(self._pulse)),
+            w * 0.58,
+            -10,
+            w * 1.05,
+            h * 0.95,
             outline="",
             fill=_lerp_hex(C["sky_top"], "#FFFFFF", glow),
         )
-
-        # Thin topographic arcs
-        for i, offset in enumerate((18, 34, 50)):
-            self.create_arc(
-                -80,
-                h - 90 + offset,
-                w + 80,
-                h + 120 + offset,
-                start=200,
-                extent=140,
-                style="arc",
-                outline=_lerp_hex(C["line"], C["sky_mid"], 0.4 + i * 0.15),
-                width=1,
-            )
-
-        self.create_text(
-            36,
-            42,
-            anchor="w",
-            text="Voyage",
-            fill=C["ink"],
-            font=FONT_BRAND,
-        )
+        self.create_text(36, 38, anchor="w", text="Voyage", fill=C["ink"], font=FONT_BRAND)
         self.create_text(
             40,
-            88,
+            78,
             anchor="w",
-            text="Your trip starts here — live from Trip.com Hong Kong",
+            text="Trip.Planner-style itineraries · live from Trip.com Hong Kong",
             fill=C["ink_soft"],
             font=FONT_DISPLAY,
         )
-
-        # Status pill
-        pad_x, pad_y = 14, 7
         tw = self.create_text(
-            36 + pad_x,
-            h - 28,
+            50,
+            h - 22,
             anchor="w",
             text=self._status,
             fill=self._status_color,
@@ -155,27 +146,19 @@ class GradientHeader(tk.Canvas):
         if bbox:
             x1, y1, x2, y2 = bbox
             self.create_rectangle(
-                x1 - pad_x,
-                y1 - pad_y,
-                x2 + pad_x,
-                y2 + pad_y,
-                fill="#FFFFFF",
-                outline=C["line"],
-                width=1,
+                x1 - 12, y1 - 6, x2 + 12, y2 + 6, fill="#FFFFFF", outline=C["line"]
             )
             self.tag_raise(tw)
 
 
 class PillButton(tk.Canvas):
-    """Custom primary/secondary button with hover motion."""
-
     def __init__(
         self,
         master: tk.Misc,
         text: str,
         command: object | None = None,
         primary: bool = True,
-        width: int = 140,
+        width: int = 150,
         height: int = 42,
         **kwargs,
     ) -> None:
@@ -194,9 +177,9 @@ class PillButton(tk.Canvas):
         self._primary = primary
         self._enabled = True
         self._hover = False
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Button-1>", self._click)
         self._draw()
 
     def configure(self, **kwargs) -> None:  # type: ignore[override]
@@ -204,8 +187,15 @@ class PillButton(tk.Canvas):
             self._enabled = kwargs.pop("state") != "disabled"
             super().configure(cursor="hand2" if self._enabled else "arrow")
             self._draw()
+        if "text" in kwargs:
+            self._text = kwargs.pop("text")
+            self._draw()
         if kwargs:
             super().configure(**kwargs)
+
+    def _set_hover(self, value: bool) -> None:
+        self._hover = value
+        self._draw()
 
     def _colors(self) -> tuple[str, str, str]:
         if not self._enabled:
@@ -214,81 +204,33 @@ class PillButton(tk.Canvas):
             fill = C["accent_deep"] if self._hover else C["accent"]
             return fill, fill, "#FFFFFF"
         fill = C["accent_glow"] if self._hover else "#FFFFFF"
-        outline = C["accent"] if self._hover else C["line"]
-        text = C["accent_deep"] if self._hover else C["ink"]
-        return fill, outline, text
+        return fill, C["accent"] if self._hover else C["line"], C["ink"]
 
     def _draw(self) -> None:
         self.delete("all")
-        w = int(self["width"])
-        h = int(self["height"])
+        w, h = int(self["width"]), int(self["height"])
         fill, outline, fg = self._colors()
-        if self._primary and self._enabled and self._hover:
-            self.create_rectangle(4, 5, w, h, fill=C["shadow"], outline="")
-        # Rounded rectangle via polygon approximation
         r = 12
         points = [
-            r, 1,
-            w - r - 2, 1,
-            w - 2, 1,
-            w - 2, r,
-            w - 2, h - r - 2,
-            w - 2, h - 2,
-            w - r - 2, h - 2,
-            r, h - 2,
-            1, h - 2,
-            1, h - r - 2,
-            1, r,
-            1, 1,
+            r, 1, w - r - 2, 1, w - 2, 1, w - 2, r,
+            w - 2, h - r - 2, w - 2, h - 2, w - r - 2, h - 2,
+            r, h - 2, 1, h - 2, 1, h - r - 2, 1, r, 1, 1,
         ]
-        self.create_polygon(
-            points,
-            smooth=True,
-            fill=fill,
-            outline=outline,
-            width=1,
-        )
-        self.create_text(
-            (w - 1) // 2,
-            (h - 1) // 2,
-            text=self._text,
-            fill=fg,
-            font=FONT_UI_BOLD,
-        )
+        self.create_polygon(points, smooth=True, fill=fill, outline=outline, width=1)
+        self.create_text((w - 1) // 2, (h - 1) // 2, text=self._text, fill=fg, font=FONT_UI_BOLD)
 
-    def _on_enter(self, _e: object) -> None:
-        self._hover = True
-        self._draw()
-
-    def _on_leave(self, _e: object) -> None:
-        self._hover = False
-        self._draw()
-
-    def _on_click(self, _e: object) -> None:
-        if self._enabled and self._command:
+    def _click(self, _e: object) -> None:
+        if self._enabled and callable(self._command):
             self._command()
 
 
 class Chip(tk.Label):
-    """Toggle chip for transport modes."""
-
     def __init__(self, master: tk.Misc, text: str, variable: tk.BooleanVar) -> None:
-        super().__init__(
-            master,
-            text=text,
-            font=FONT_SMALL,
-            padx=12,
-            pady=6,
-            cursor="hand2",
-            bd=0,
-        )
+        super().__init__(master, text=text, font=FONT_SMALL, padx=12, pady=7, cursor="hand2", bd=0)
         self._var = variable
         self._var.trace_add("write", lambda *_: self._sync())
-        self.bind("<Button-1>", self._toggle)
+        self.bind("<Button-1>", lambda _e: self._var.set(not self._var.get()))
         self._sync()
-
-    def _toggle(self, _e: object) -> None:
-        self._var.set(not self._var.get())
 
     def _sync(self) -> None:
         on = self._var.get()
@@ -299,17 +241,10 @@ class Chip(tk.Label):
 
 
 class Field(tk.Frame):
-    """Labeled input with focus ring."""
-
     def __init__(self, master: tk.Misc, label: str, textvariable: tk.StringVar) -> None:
         super().__init__(master, bg=C["paper"])
         tk.Label(
-            self,
-            text=label.upper(),
-            bg=C["paper"],
-            fg=C["muted"],
-            font=("Segoe UI", 8),
-            anchor="w",
+            self, text=label.upper(), bg=C["paper"], fg=C["muted"], font=("Segoe UI", 8), anchor="w"
         ).pack(fill="x", pady=(0, 4))
         shell = tk.Frame(self, bg=C["line"], padx=1, pady=1)
         shell.pack(fill="x")
@@ -325,58 +260,460 @@ class Field(tk.Frame):
         )
         self.entry.pack(fill="x", ipady=10, ipadx=10)
         self.entry.bind("<FocusIn>", lambda _e: shell.configure(bg=C["accent"]))
-        self.entry.bind(
-            "<FocusOut>",
-            lambda _e: shell.configure(bg=C["line"]),
-        )
-        self.entry.bind(
-            "<FocusIn>",
-            lambda _e: self.entry.configure(bg=C["field_focus"]),
-            add="+",
-        )
-        self.entry.bind(
-            "<FocusOut>",
-            lambda _e: self.entry.configure(bg=C["field"]),
-            add="+",
-        )
+        self.entry.bind("<FocusOut>", lambda _e: shell.configure(bg=C["line"]))
+        self.entry.bind("<FocusIn>", lambda _e: self.entry.configure(bg=C["field_focus"]), add="+")
+        self.entry.bind("<FocusOut>", lambda _e: self.entry.configure(bg=C["field"]), add="+")
 
 
-class SegmentedTabs(tk.Frame):
-    def __init__(
-        self,
-        master: tk.Misc,
-        labels: list[str],
-        on_change,
-    ) -> None:
-        super().__init__(master, bg=C["chip"], padx=4, pady=4)
-        self._on_change = on_change
-        self._btns: list[tk.Label] = []
-        self._index = 0
-        for i, label in enumerate(labels):
-            btn = tk.Label(
-                self,
-                text=label,
-                font=FONT_UI_BOLD,
-                padx=18,
-                pady=8,
-                cursor="hand2",
-                bg=C["chip"],
-                fg=C["muted"],
-            )
-            btn.pack(side="left", padx=2)
-            btn.bind("<Button-1>", lambda _e, idx=i: self.select(idx))
-            self._btns.append(btn)
-        self.select(0)
+class LinkLabel(tk.Label):
+    def __init__(self, master: tk.Misc, url: str, **kwargs) -> None:
+        super().__init__(
+            master,
+            text=url,
+            fg=C["accent"],
+            bg=kwargs.pop("bg", C["card"]),
+            font=FONT_SMALL,
+            cursor="hand2",
+            wraplength=kwargs.pop("wraplength", 320),
+            justify="left",
+            anchor="w",
+            **kwargs,
+        )
+        self._url = url
+        self.bind("<Button-1>", lambda _e: webbrowser.open(self._url))
 
-    def select(self, index: int) -> None:
-        self._index = index
-        for i, btn in enumerate(self._btns):
-            active = i == index
-            btn.configure(
-                bg="#FFFFFF" if active else C["chip"],
-                fg=C["ink"] if active else C["muted"],
-            )
-        self._on_change(index)
+
+class FlightRowCard(tk.Frame):
+    """Trip.com-style flight result row (badges, times, duration, price, Select)."""
+
+    def __init__(self, master: tk.Misc, **kwargs) -> None:
+        super().__init__(master, bg=C["paper"], **kwargs)
+        tk.Label(
+            self,
+            text="Recommended flight",
+            bg=C["paper"],
+            fg=C["ink"],
+            font=FONT_UI_BOLD,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        shell = tk.Frame(self, bg=C["line"], padx=1, pady=1)
+        shell.pack(fill="x")
+        self.card = tk.Frame(shell, bg="#FFFFFF", padx=14, pady=12)
+        self.card.pack(fill="x")
+
+        self.badges = tk.Frame(self.card, bg="#FFFFFF")
+        self.badges.pack(fill="x", pady=(0, 8))
+
+        self.row = tk.Frame(self.card, bg="#FFFFFF")
+        self.row.pack(fill="x")
+        self.row.columnconfigure(0, weight=2)
+        self.row.columnconfigure(1, weight=1)
+        self.row.columnconfigure(2, weight=2)
+        self.row.columnconfigure(3, weight=2)
+        self.row.columnconfigure(4, weight=2)
+
+        # Airline
+        air = tk.Frame(self.row, bg="#FFFFFF")
+        air.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.logo = tk.Canvas(air, width=36, height=36, bg="#FFFFFF", highlightthickness=0)
+        self.logo.pack(side="left", padx=(0, 8))
+        self.airline_lbl = tk.Label(
+            air, text="—", bg="#FFFFFF", fg=C["ink"], font=FONT_UI, anchor="w"
+        )
+        self.airline_lbl.pack(side="left")
+
+        # Depart
+        dep = tk.Frame(self.row, bg="#FFFFFF")
+        dep.grid(row=0, column=1, sticky="w", padx=4)
+        self.dep_time = tk.Label(
+            dep, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 16)
+        )
+        self.dep_time.pack(anchor="w")
+        self.dep_airport = tk.Label(
+            dep, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.dep_airport.pack(anchor="w")
+
+        # Duration / path
+        mid = tk.Frame(self.row, bg="#FFFFFF")
+        mid.grid(row=0, column=2, sticky="ew", padx=4)
+        self.duration = tk.Label(
+            mid, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.duration.pack()
+        self.path = tk.Canvas(mid, height=14, bg="#FFFFFF", highlightthickness=0)
+        self.path.pack(fill="x", pady=2)
+        self.stops = tk.Label(
+            mid, text="Direct", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.stops.pack()
+        self.path.bind("<Configure>", lambda _e: self._draw_path())
+
+        # Arrive
+        arr = tk.Frame(self.row, bg="#FFFFFF")
+        arr.grid(row=0, column=3, sticky="w", padx=4)
+        self.arr_time = tk.Label(
+            arr, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 16)
+        )
+        self.arr_time.pack(anchor="w")
+        self.arr_airport = tk.Label(
+            arr, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.arr_airport.pack(anchor="w")
+
+        # Price + Select
+        right = tk.Frame(self.row, bg="#FFFFFF")
+        right.grid(row=0, column=4, sticky="e", padx=(8, 0))
+        self.price = tk.Label(
+            right,
+            text="—",
+            bg="#FFFFFF",
+            fg=C["trip_blue"],
+            font=("Segoe UI Semibold", 14),
+        )
+        self.price.pack(anchor="e")
+        self.trip_lbl = tk.Label(
+            right, text="Return", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.trip_lbl.pack(anchor="e", pady=(0, 6))
+        self.select_btn = tk.Label(
+            right,
+            text="Select",
+            bg=C["trip_blue"],
+            fg="#FFFFFF",
+            font=FONT_UI_BOLD,
+            padx=16,
+            pady=6,
+            cursor="hand2",
+        )
+        self.select_btn.pack(anchor="e")
+        self._url = ""
+        self.select_btn.bind("<Button-1>", self._open)
+        self.select_btn.bind(
+            "<Enter>", lambda _e: self.select_btn.configure(bg=C["trip_blue_hover"])
+        )
+        self.select_btn.bind(
+            "<Leave>", lambda _e: self.select_btn.configure(bg=C["trip_blue"])
+        )
+
+        self.set_loading("Waiting for plan…")
+
+    def _draw_path(self) -> None:
+        self.path.delete("all")
+        w = max(self.path.winfo_width(), 40)
+        y = 7
+        self.path.create_line(8, y, w - 8, y, fill="#C5CDD6", width=2)
+        self.path.create_oval(4, y - 3, 10, y + 3, fill="#C5CDD6", outline="")
+        self.path.create_oval(w - 10, y - 3, w - 4, y + 3, fill="#C5CDD6", outline="")
+
+    def _draw_logo(self, initials: str) -> None:
+        self.logo.delete("all")
+        self.logo.create_polygon(18, 2, 34, 30, 2, 30, fill=C["badge_teal"], outline="")
+        self.logo.create_text(
+            18, 20, text=(initials or "TP")[:3].upper(), fill="#FFFFFF", font=("Segoe UI", 7, "bold")
+        )
+
+    def _open(self, _e: object | None = None) -> None:
+        if self._url:
+            webbrowser.open(self._url)
+
+    def set_loading(self, message: str) -> None:
+        self._clear_badges()
+        self._add_badge(message, filled=False)
+        self.airline_lbl.configure(text="Searching Trip.com…")
+        self._draw_logo("…")
+        self.dep_time.configure(text="--:--")
+        self.arr_time.configure(text="--:--")
+        self.dep_airport.configure(text="—")
+        self.arr_airport.configure(text="—")
+        self.duration.configure(text="—")
+        self.stops.configure(text="—")
+        self.price.configure(text="…")
+        self.trip_lbl.configure(text="")
+        self._url = ""
+
+    def _clear_badges(self) -> None:
+        for child in self.badges.winfo_children():
+            child.destroy()
+
+    def _add_badge(self, text: str, filled: bool = True) -> None:
+        if not text:
+            return
+        if filled:
+            tk.Label(
+                self.badges,
+                text=text,
+                bg=C["badge_teal"],
+                fg="#FFFFFF",
+                font=("Segoe UI", 8, "bold"),
+                padx=8,
+                pady=3,
+            ).pack(side="left", padx=(0, 6))
+        else:
+            outer = tk.Frame(self.badges, bg=C["badge_outline"], padx=1, pady=1)
+            outer.pack(side="left", padx=(0, 6))
+            tk.Label(
+                outer,
+                text=text,
+                bg="#FFFFFF",
+                fg=C["badge_teal"],
+                font=("Segoe UI", 8),
+                padx=7,
+                pady=2,
+            ).pack()
+
+    def set_offer(self, offer: FlightOffer) -> None:
+        self._clear_badges()
+        self._add_badge(offer.badge or "Recommended", filled=True)
+        if offer.baggage:
+            self._add_badge(offer.baggage, filled=False)
+
+        initials = "".join(w[0] for w in offer.airline.split()[:3] if w) or "TP"
+        self._draw_logo(initials)
+        self.airline_lbl.configure(text=offer.airline)
+        self.dep_time.configure(text=offer.depart_time)
+        self.arr_time.configure(text=offer.arrive_time)
+        self.dep_airport.configure(text=offer.depart_airport)
+        self.arr_airport.configure(text=offer.arrive_airport)
+        self.duration.configure(text=offer.duration)
+        self.stops.configure(text=offer.stops)
+        self.price.configure(text=offer.price_label)
+        self.trip_lbl.configure(text=offer.trip_label)
+        self._url = offer.url
+        self.after(30, self._draw_path)
+
+
+class HotelRowCard(tk.Frame):
+    """Trip.com-style hotel listing card (photo, name, stars, score, room, price)."""
+
+    def __init__(self, master: tk.Misc, **kwargs) -> None:
+        super().__init__(master, bg=C["paper"], **kwargs)
+        tk.Label(
+            self,
+            text="Recommended hotel",
+            bg=C["paper"],
+            fg=C["ink"],
+            font=FONT_UI_BOLD,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        shell = tk.Frame(self, bg=C["line"], padx=1, pady=1)
+        shell.pack(fill="x")
+        self.card = tk.Frame(shell, bg="#FFFFFF")
+        self.card.pack(fill="x")
+
+        body = tk.Frame(self.card, bg="#FFFFFF")
+        body.pack(fill="x")
+        body.columnconfigure(1, weight=1)
+
+        # Photo placeholder (warm night hotel vibe)
+        self.photo = tk.Canvas(
+            body, width=150, height=150, bg="#2A3340", highlightthickness=0
+        )
+        self.photo.grid(row=0, column=0, sticky="ns")
+        self._draw_photo_placeholder()
+
+        info = tk.Frame(body, bg="#FFFFFF", padx=12, pady=10)
+        info.grid(row=0, column=1, sticky="nsew")
+        info.columnconfigure(0, weight=1)
+
+        head = tk.Frame(info, bg="#FFFFFF")
+        head.pack(fill="x")
+        left_h = tk.Frame(head, bg="#FFFFFF")
+        left_h.pack(side="left", fill="x", expand=True)
+        self.name_lbl = tk.Label(
+            left_h,
+            text="Hotel",
+            bg="#FFFFFF",
+            fg=C["trip_blue"],
+            font=("Segoe UI Semibold", 13),
+            anchor="w",
+        )
+        self.name_lbl.pack(side="left")
+        self.stars_lbl = tk.Label(
+            left_h, text="", bg="#FFFFFF", fg="#E6A800", font=("Segoe UI", 11), anchor="w"
+        )
+        self.stars_lbl.pack(side="left", padx=(8, 0))
+
+        score_box = tk.Frame(head, bg="#FFFFFF")
+        score_box.pack(side="right")
+        score_txt = tk.Frame(score_box, bg="#FFFFFF")
+        score_txt.pack(side="left", padx=(0, 6))
+        self.score_word = tk.Label(
+            score_txt, text="Great", bg="#FFFFFF", fg=C["trip_blue"], font=FONT_UI_BOLD
+        )
+        self.score_word.pack(anchor="e")
+        self.reviews_lbl = tk.Label(
+            score_txt, text="", bg="#FFFFFF", fg=C["muted"], font=("Segoe UI", 8)
+        )
+        self.reviews_lbl.pack(anchor="e")
+        self.score_badge = tk.Label(
+            score_box,
+            text="—",
+            bg="#1B3A6B",
+            fg="#FFFFFF",
+            font=("Segoe UI Semibold", 12),
+            padx=8,
+            pady=4,
+        )
+        self.score_badge.pack(side="right")
+
+        self.location_lbl = tk.Label(
+            info,
+            text="Loc · —",
+            bg="#FFFFFF",
+            fg=C["ink_soft"],
+            font=FONT_SMALL,
+            anchor="w",
+        )
+        self.location_lbl.pack(fill="x", pady=(8, 2))
+        self.features_lbl = tk.Label(
+            info,
+            text="Highlights · —",
+            bg="#FFFFFF",
+            fg=C["ink_soft"],
+            font=FONT_SMALL,
+            anchor="w",
+        )
+        self.features_lbl.pack(fill="x", pady=(0, 8))
+
+        mid = tk.Frame(info, bg="#FFFFFF")
+        mid.pack(fill="x")
+        mid.columnconfigure(0, weight=1)
+
+        room = tk.Frame(mid, bg="#FFFFFF")
+        room.grid(row=0, column=0, sticky="nw")
+        accent = tk.Frame(room, bg="#D8DEE6", width=3)
+        accent.pack(side="left", fill="y", padx=(0, 8))
+        room_txt = tk.Frame(room, bg="#FFFFFF")
+        room_txt.pack(side="left", fill="x")
+        self.room_lbl = tk.Label(
+            room_txt,
+            text="Standard room",
+            bg="#FFFFFF",
+            fg=C["ink"],
+            font=FONT_UI_BOLD,
+            anchor="w",
+        )
+        self.room_lbl.pack(anchor="w")
+        self.beds_lbl = tk.Label(
+            room_txt, text="", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL, anchor="w"
+        )
+        self.beds_lbl.pack(anchor="w")
+        self.social_lbl = tk.Label(
+            room_txt, text="", bg="#FFFFFF", fg="#4A5560", font=("Segoe UI", 8), anchor="w"
+        )
+        self.social_lbl.pack(anchor="w", pady=(4, 0))
+
+        price_col = tk.Frame(mid, bg="#FFFFFF")
+        price_col.grid(row=0, column=1, sticky="ne", padx=(12, 0))
+        self.price_lbl = tk.Label(
+            price_col,
+            text="—",
+            bg="#FFFFFF",
+            fg=C["trip_blue"],
+            font=("Segoe UI Semibold", 16),
+        )
+        self.price_lbl.pack(anchor="e")
+        self.total_lbl = tk.Label(
+            price_col,
+            text="",
+            bg="#FFFFFF",
+            fg=C["muted"],
+            font=("Segoe UI", 8),
+            wraplength=180,
+            justify="right",
+        )
+        self.total_lbl.pack(anchor="e")
+        self.fee_lbl = tk.Label(
+            price_col,
+            text="Additional charges may apply",
+            bg="#FFFFFF",
+            fg="#A0AAB4",
+            font=("Segoe UI", 7),
+        )
+        self.fee_lbl.pack(anchor="e", pady=(2, 6))
+        self.cta = tk.Label(
+            price_col,
+            text="Check Availability  >",
+            bg=C["trip_blue"],
+            fg="#FFFFFF",
+            font=FONT_UI_BOLD,
+            padx=12,
+            pady=8,
+            cursor="hand2",
+        )
+        self.cta.pack(anchor="e")
+        self._url = ""
+        self.cta.bind("<Button-1>", self._open)
+        self.cta.bind("<Enter>", lambda _e: self.cta.configure(bg=C["trip_blue_hover"]))
+        self.cta.bind("<Leave>", lambda _e: self.cta.configure(bg=C["trip_blue"]))
+
+        self.set_loading("Waiting for plan…")
+
+    def _draw_photo_placeholder(self, title: str = "Hotel") -> None:
+        self.photo.delete("all")
+        w, h = 150, 150
+        # Warm night gradient blocks
+        for i in range(12):
+            t = i / 11
+            color = _lerp_hex("#1A2230", "#C47A3A", t * 0.55)
+            self.photo.create_rectangle(0, int(h * i / 12), w, int(h * (i + 1) / 12) + 1, outline="", fill=color)
+        # Building silhouette
+        self.photo.create_rectangle(28, 48, 122, 140, fill="#243041", outline="")
+        self.photo.create_rectangle(40, 60, 55, 75, fill="#F0C878", outline="")
+        self.photo.create_rectangle(70, 60, 85, 75, fill="#F0C878", outline="")
+        self.photo.create_rectangle(100, 60, 115, 75, fill="#E8B86A", outline="")
+        self.photo.create_rectangle(40, 90, 55, 105, fill="#E8B86A", outline="")
+        self.photo.create_rectangle(70, 90, 85, 105, fill="#F0C878", outline="")
+        self.photo.create_rectangle(62, 115, 88, 140, fill="#1A2230", outline="")
+        # Heart circle
+        self.photo.create_oval(118, 8, 142, 32, fill="#FFFFFF", outline="")
+        self.photo.create_text(130, 20, text="♡", fill="#1B3A6B", font=("Segoe UI", 11))
+        # Dots
+        for i, x in enumerate((60, 72, 84, 96)):
+            fill = "#FFFFFF" if i == 0 else "#B0B8C0"
+            self.photo.create_oval(x, 136, x + 6, 142, fill=fill, outline="")
+        self.photo.create_text(
+            75, 28, text=(title[:14] if title else "Hotel"), fill="#FFFFFF", font=("Segoe UI", 8)
+        )
+
+    def _open(self, _e: object | None = None) -> None:
+        if self._url:
+            webbrowser.open(self._url)
+
+    def set_loading(self, message: str) -> None:
+        self._draw_photo_placeholder("…")
+        self.name_lbl.configure(text=message)
+        self.stars_lbl.configure(text="")
+        self.score_badge.configure(text="—")
+        self.score_word.configure(text="")
+        self.reviews_lbl.configure(text="")
+        self.location_lbl.configure(text="Searching Trip.com hotels…")
+        self.features_lbl.configure(text="")
+        self.room_lbl.configure(text="")
+        self.beds_lbl.configure(text="")
+        self.social_lbl.configure(text="")
+        self.price_lbl.configure(text="…")
+        self.total_lbl.configure(text="")
+        self._url = ""
+
+    def set_offer(self, offer: HotelOffer) -> None:
+        self._draw_photo_placeholder(offer.name)
+        self.name_lbl.configure(text=offer.name)
+        self.stars_lbl.configure(text="★" * max(0, min(offer.stars, 5)))
+        self.score_badge.configure(text=offer.score or "—")
+        self.score_word.configure(text=offer.score_label or "")
+        self.reviews_lbl.configure(text=offer.reviews or "")
+        self.location_lbl.configure(text=f"Loc · {offer.location}")
+        self.features_lbl.configure(text=f"Highlights · {offer.features}")
+        self.room_lbl.configure(text=offer.room_type)
+        self.beds_lbl.configure(text=offer.beds)
+        self.social_lbl.configure(text=offer.social_proof)
+        self.price_lbl.configure(text=offer.price_label)
+        self.total_lbl.configure(text=offer.total_label or "Total (incl. taxes & fees): see Trip.com")
+        self._url = offer.url
 
 
 class TravelAgentApp(tk.Tk):
@@ -386,253 +723,324 @@ class TravelAgentApp(tk.Tk):
         self.headless = headless
         self.agent: TravelAgent | None = None
         self._busy = False
+        self._wizard_step = 1
+        self._last_plan = ""
+        self._style_vars: dict[str, tk.BooleanVar] = {}
 
-        self.title("Voyage — Trip.com Travel Agent")
-        self.geometry("1040x760")
-        self.minsize(900, 640)
+        self.title("Voyage — Trip.Planner-style Travel Agent")
+        self.geometry("1100x780")
+        self.minsize(920, 640)
         self.configure(bg=C["paper"])
         try:
-            self.tk.call("tk", "scaling", 1.15)
+            self.tk.call("tk", "scaling", 1.12)
         except tk.TclError:
             pass
 
         self.header = GradientHeader(self, bg=C["sky_top"])
         self.header.pack(fill="x")
 
-        body = tk.Frame(self, bg=C["paper"])
-        body.pack(fill="both", expand=True, padx=28, pady=(18, 22))
-
-        self.pages = tk.Frame(body, bg=C["paper"])
-        self.plan_page = tk.Frame(self.pages, bg=C["paper"])
-        self.chat_page = tk.Frame(self.pages, bg=C["paper"])
-        self._build_planner(self.plan_page)
-        self._build_chat(self.chat_page)
-
-        self.tabs = SegmentedTabs(
-            body,
-            ["Trip planner", "Chat"],
-            on_change=self._show_page,
+        top_bar = tk.Frame(self, bg=C["paper"])
+        top_bar.pack(fill="x", padx=28, pady=(12, 0))
+        PillButton(
+            top_bar,
+            "Open Trip.Planner",
+            command=lambda: webbrowser.open(TRIP_PLANNER_URL),
+            primary=False,
+            width=160,
+        ).pack(side="right")
+        self.step_label = tk.Label(
+            top_bar,
+            text="Step 1 of 3 — Destination",
+            bg=C["paper"],
+            fg=C["muted"],
+            font=FONT_UI,
         )
-        self.tabs.pack(anchor="w", pady=(0, 16))
-        self.pages.pack(fill="both", expand=True)
-        self._show_page(0)
+        self.step_label.pack(side="left")
+
+        self.body = tk.Frame(self, bg=C["paper"])
+        self.body.pack(fill="both", expand=True, padx=28, pady=(10, 18))
+
+        self.wizard = tk.Frame(self.body, bg=C["paper"])
+        self.results = tk.Frame(self.body, bg=C["paper"])
+        self._build_wizard()
+        self._build_results()
+        self._show_wizard_step(1)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._boot_agent)
-        self.after(200, self._intro_motion)
 
-    def _intro_motion(self) -> None:
-        # Gentle entrance: nudge form opacity-like via brief highlight
-        self.header.set_status("Warming up…", C["muted"])
+    # ── Wizard ──────────────────────────────────────────────────────────
 
-    def _sync_return_from_depart(self, *_args: object) -> None:
-        """Keep default trip length at 1 week when depart date changes."""
-        raw = self.depart_var.get().strip()
-        try:
-            depart = date.fromisoformat(raw)
-        except ValueError:
-            return
-        self.return_var.set((depart + timedelta(days=7)).isoformat())
+    def _build_wizard(self) -> None:
+        self.wizard.pack(fill="both", expand=True)
 
-    def _show_page(self, index: int) -> None:
-        if not hasattr(self, "plan_page") or not hasattr(self, "chat_page"):
-            return
-        self.plan_page.pack_forget()
-        self.chat_page.pack_forget()
-        page = self.plan_page if index == 0 else self.chat_page
-        page.pack(fill="both", expand=True)
+        self.step1 = tk.Frame(self.wizard, bg=C["paper"])
+        self.step2 = tk.Frame(self.wizard, bg=C["paper"])
+        self.step3 = tk.Frame(self.wizard, bg=C["paper"])
 
-    def _build_planner(self, parent: tk.Frame) -> None:
-        # Two-column composition: form left, result right on wide screens
-        split = tk.Frame(parent, bg=C["paper"])
-        split.pack(fill="both", expand=True)
-        split.columnconfigure(0, weight=2, minsize=320)
-        split.columnconfigure(1, weight=3, minsize=360)
-        split.rowconfigure(0, weight=1)
-
-        left = tk.Frame(split, bg=C["paper"])
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
-        right = tk.Frame(split, bg=C["paper"])
-        right.grid(row=0, column=1, sticky="nsew")
-
+        # Step 1 — Destination
         tk.Label(
-            left,
+            self.step1,
             text="Where next?",
             bg=C["paper"],
             fg=C["ink"],
-            font=FONT_DISPLAY,
+            font=("Georgia", 26),
             anchor="w",
-        ).pack(fill="x", pady=(0, 4))
+        ).pack(fill="x", pady=(24, 6))
         tk.Label(
-            left,
-            text="Set route, dates, and budget. Voyage searches Trip.com for you.",
+            self.step1,
+            text="One destination. Voyage builds flights, hotels, and a day-by-day plan.",
             bg=C["paper"],
             fg=C["muted"],
             font=FONT_UI,
             anchor="w",
-            wraplength=360,
-            justify="left",
-        ).pack(fill="x", pady=(0, 14))
+        ).pack(fill="x", pady=(0, 20))
 
-        grid = tk.Frame(left, bg=C["paper"])
+        self.dest_var = tk.StringVar()
+        self.origin_var = tk.StringVar(value="Hong Kong")
+        Field(self.step1, "Destination (city)", self.dest_var).pack(fill="x", pady=(0, 12))
+        Field(self.step1, "Flying from", self.origin_var).pack(fill="x", pady=(0, 24))
+        row1 = tk.Frame(self.step1, bg=C["paper"])
+        row1.pack(fill="x")
+        PillButton(row1, "Continue", command=lambda: self._wizard_next(2), width=140).pack(
+            side="left"
+        )
+
+        # Step 2 — Duration
+        tk.Label(
+            self.step2,
+            text="How long?",
+            bg=C["paper"],
+            fg=C["ink"],
+            font=("Georgia", 26),
+            anchor="w",
+        ).pack(fill="x", pady=(24, 6))
+        tk.Label(
+            self.step2,
+            text="Default is tomorrow for 7 nights — same rhythm as Trip.Planner.",
+            bg=C["paper"],
+            fg=C["muted"],
+            font=FONT_UI,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 20))
+
+        self.nights_var = tk.StringVar(value="7")
+        self.depart_var = tk.StringVar(value=_default_depart())
+        self.return_var = tk.StringVar(value=_default_return(7))
+        self.budget_var = tk.StringVar(value="12000")
+        self.depart_var.trace_add("write", self._sync_return)
+        self.nights_var.trace_add("write", self._sync_return)
+
+        grid = tk.Frame(self.step2, bg=C["paper"])
         grid.pack(fill="x")
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
-
-        self.origin_var = tk.StringVar(value="Hong Kong")
-        self.dest_var = tk.StringVar()
-        self.depart_var = tk.StringVar(value=_default_depart())
-        self.return_var = tk.StringVar(value=_default_return())
-        self.budget_var = tk.StringVar(value="12000")
-        self.depart_var.trace_add("write", self._sync_return_from_depart)
-
-        Field(grid, "Origin (city)", self.origin_var).grid(
+        Field(grid, "Nights", self.nights_var).grid(
             row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 12)
         )
-        Field(grid, "Destination (city)", self.dest_var).grid(
+        Field(grid, "Budget (HKD)", self.budget_var).grid(
             row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 12)
         )
         Field(grid, "Depart (YYYY-MM-DD)", self.depart_var).grid(
             row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 12)
         )
-        Field(grid, "Return (1 week trip)", self.return_var).grid(
+        Field(grid, "Return", self.return_var).grid(
             row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 12)
         )
-        Field(grid, "Budget (HKD)", self.budget_var).grid(
-            row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 12)
+
+        row2 = tk.Frame(self.step2, bg=C["paper"])
+        row2.pack(fill="x", pady=(16, 0))
+        PillButton(row2, "Back", command=lambda: self._wizard_next(1), primary=False, width=110).pack(
+            side="left"
+        )
+        PillButton(row2, "Continue", command=lambda: self._wizard_next(3), width=140).pack(
+            side="left", padx=10
         )
 
+        # Step 3 — Travel style
         tk.Label(
-            left,
-            text="TRANSPORT",
+            self.step3,
+            text="Your travel style",
+            bg=C["paper"],
+            fg=C["ink"],
+            font=("Georgia", 26),
+            anchor="w",
+        ).pack(fill="x", pady=(24, 6))
+        tk.Label(
+            self.step3,
+            text="Pick one or more — the itinerary pace and places follow your style.",
             bg=C["paper"],
             fg=C["muted"],
-            font=("Segoe UI", 8),
+            font=FONT_UI,
             anchor="w",
-        ).pack(fill="x", pady=(4, 6))
+        ).pack(fill="x", pady=(0, 18))
 
-        chips = tk.Frame(left, bg=C["paper"])
-        chips.pack(fill="x", pady=(0, 16))
-        self.flights_var = tk.BooleanVar(value=True)
-        self.trains_var = tk.BooleanVar(value=True)
-        self.transfers_var = tk.BooleanVar(value=True)
-        self.car_var = tk.BooleanVar(value=False)
-        for text, var in (
-            ("Flights", self.flights_var),
-            ("Trains", self.trains_var),
-            ("Transfers", self.transfers_var),
-            ("Rental car", self.car_var),
-        ):
-            Chip(chips, text, var).pack(side="left", padx=(0, 8))
+        chips = tk.Frame(self.step3, bg=C["paper"])
+        chips.pack(fill="x", pady=(0, 24))
+        for i, style in enumerate(TRAVEL_STYLES):
+            var = tk.BooleanVar(value=(style == "First-time"))
+            self._style_vars[style] = var
+            Chip(chips, style, var).grid(row=i // 3, column=i % 3, padx=(0, 10), pady=6, sticky="w")
 
-        actions = tk.Frame(left, bg=C["paper"])
-        actions.pack(fill="x", pady=(4, 0))
-        self.plan_btn = PillButton(
-            actions, "Plan trip", command=self._on_plan, primary=True, width=150
+        row3 = tk.Frame(self.step3, bg=C["paper"])
+        row3.pack(fill="x")
+        PillButton(row3, "Back", command=lambda: self._wizard_next(2), primary=False, width=110).pack(
+            side="left"
         )
-        self.plan_btn.pack(side="left")
-        PillButton(
-            actions,
-            "Clear",
-            command=self._clear_plan_result,
-            primary=False,
-            width=100,
-        ).pack(side="left", padx=10)
-        PillButton(
-            actions,
-            "Trip.com",
-            command=lambda: webbrowser.open(
-                f"{settings.trip_base_url}/?locale={settings.trip_locale}"
-                f"&curr={settings.trip_currency}"
-            ),
-            primary=False,
-            width=110,
-        ).pack(side="right")
+        self.generate_btn = PillButton(
+            row3, "Generate itinerary", command=self._on_generate, width=190
+        )
+        self.generate_btn.pack(side="left", padx=10)
 
-        # Result panel
+    def _sync_return(self, *_args: object) -> None:
+        try:
+            depart = date.fromisoformat(self.depart_var.get().strip())
+            nights = max(1, int(self.nights_var.get().strip() or "7"))
+        except ValueError:
+            return
+        self.return_var.set((depart + timedelta(days=nights)).isoformat())
+
+    def _wizard_next(self, step: int) -> None:
+        if step == 2 and not self.dest_var.get().strip():
+            messagebox.showerror("Destination", "Enter a destination city.")
+            return
+        if step == 3:
+            try:
+                float(self.budget_var.get().strip())
+                date.fromisoformat(self.depart_var.get().strip())
+                int(self.nights_var.get().strip())
+            except ValueError:
+                messagebox.showerror("Duration", "Check nights, dates, and budget.")
+                return
+        self._show_wizard_step(step)
+
+    def _show_wizard_step(self, step: int) -> None:
+        self._wizard_step = step
+        self.results.pack_forget()
+        self.wizard.pack(fill="both", expand=True)
+        for fr in (self.step1, self.step2, self.step3):
+            fr.pack_forget()
+        labels = {
+            1: "Step 1 of 3 — Destination",
+            2: "Step 2 of 3 — Duration",
+            3: "Step 3 of 3 — Travel style",
+        }
+        self.step_label.configure(text=labels.get(step, ""))
+        {1: self.step1, 2: self.step2, 3: self.step3}[step].pack(fill="both", expand=True)
+
+    # ── Results board ───────────────────────────────────────────────────
+
+    def _build_results(self) -> None:
+        # Top actions
+        actions = tk.Frame(self.results, bg=C["paper"])
+        actions.pack(fill="x", pady=(0, 10))
+        PillButton(
+            actions, "New trip", command=lambda: self._show_wizard_step(1), primary=False, width=120
+        ).pack(side="left")
+        PillButton(
+            actions, "Show raw plan", command=self._show_raw, primary=False, width=140
+        ).pack(side="left", padx=8)
+        self.regen_btn = PillButton(
+            actions, "Regenerate", command=self._on_generate, primary=False, width=130
+        )
+        self.regen_btn.pack(side="left")
+
+        split = tk.Frame(self.results, bg=C["paper"])
+        split.pack(fill="both", expand=True)
+        split.columnconfigure(0, weight=2, minsize=300)
+        split.columnconfigure(1, weight=3, minsize=360)
+        split.rowconfigure(0, weight=1)
+
+        left = tk.Frame(split, bg=C["paper"])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        right = tk.Frame(split, bg=C["paper"])
+        right.grid(row=0, column=1, sticky="nsew")
+
+        tk.Label(
+            left, text="Bookings", bg=C["paper"], fg=C["ink"], font=FONT_DISPLAY, anchor="w"
+        ).pack(fill="x", pady=(0, 8))
+        self.flight_row = FlightRowCard(left)
+        self.flight_row.pack(fill="x", pady=(0, 12))
+        self.hotel_row = HotelRowCard(left)
+        self.hotel_row.pack(fill="x", pady=(0, 8))
+
         tk.Label(
             right,
-            text="Your plan",
+            text="Day-by-day itinerary",
             bg=C["paper"],
             fg=C["ink"],
             font=FONT_DISPLAY,
             anchor="w",
         ).pack(fill="x", pady=(0, 8))
 
-        result_shell = tk.Frame(right, bg=C["line"], padx=1, pady=1)
-        result_shell.pack(fill="both", expand=True)
-        self.plan_out = scrolledtext.ScrolledText(
-            result_shell,
-            wrap="word",
-            font=FONT_BODY,
-            bg=C["field"],
-            fg=C["ink"],
-            insertbackground=C["ink"],
-            relief="flat",
-            bd=0,
-            padx=18,
-            pady=16,
-            spacing1=2,
-            spacing3=4,
+        days_shell = tk.Frame(right, bg=C["line"], padx=1, pady=1)
+        days_shell.pack(fill="both", expand=True)
+        self.days_canvas = tk.Canvas(days_shell, bg=C["field"], highlightthickness=0)
+        days_scroll = tk.Scrollbar(days_shell, orient="vertical", command=self.days_canvas.yview)
+        self.days_inner = tk.Frame(self.days_canvas, bg=C["field"])
+        self.days_inner.bind(
+            "<Configure>",
+            lambda _e: self.days_canvas.configure(scrollregion=self.days_canvas.bbox("all")),
         )
-        self.plan_out.pack(fill="both", expand=True)
-        self.plan_out.insert(
-            "end",
-            "Fill in your trip details and press Plan trip.\n"
-            "Live fares and hotels will appear here.",
+        self.days_canvas.create_window((0, 0), window=self.days_inner, anchor="nw")
+        self.days_canvas.configure(yscrollcommand=days_scroll.set)
+        self.days_canvas.pack(side="left", fill="both", expand=True)
+        days_scroll.pack(side="right", fill="y")
+        self.days_canvas.bind(
+            "<Configure>",
+            lambda e: self.days_canvas.itemconfigure(
+                self.days_canvas.find_all()[0], width=e.width
+            ),
         )
-        self.plan_out.tag_configure("url", foreground=C["accent"], underline=True)
-        self.plan_out.tag_configure("placeholder", foreground=C["muted"])
-        self.plan_out.tag_add("placeholder", "1.0", "end")
-        self.plan_out.bind("<Button-1>", self._on_click_url)
 
-    def _build_chat(self, parent: tk.Frame) -> None:
+        # Refine chat dock
+        chat_wrap = tk.Frame(self.results, bg=C["paper"])
+        chat_wrap.pack(fill="x", pady=(12, 0))
         tk.Label(
-            parent,
-            text="Ask Voyage",
+            chat_wrap,
+            text="Refine with AI",
             bg=C["paper"],
             fg=C["ink"],
-            font=FONT_DISPLAY,
+            font=FONT_UI_BOLD,
             anchor="w",
-        ).pack(fill="x", pady=(0, 4))
+        ).pack(fill="x")
         tk.Label(
-            parent,
-            text="Compare flights, hotels, or refine a plan in plain language.",
+            chat_wrap,
+            text="Like Trip.Planner’s floating assistant — ask to tweak days, hotels, or flights.",
             bg=C["paper"],
             fg=C["muted"],
-            font=FONT_UI,
+            font=FONT_SMALL,
             anchor="w",
-        ).pack(fill="x", pady=(0, 12))
+        ).pack(fill="x", pady=(0, 6))
 
-        shell = tk.Frame(parent, bg=C["line"], padx=1, pady=1)
-        shell.pack(fill="both", expand=True)
         self.chat_out = scrolledtext.ScrolledText(
-            shell,
+            chat_wrap,
+            height=5,
             wrap="word",
             font=FONT_BODY,
             bg=C["field"],
             fg=C["ink"],
-            insertbackground=C["ink"],
             relief="flat",
-            bd=0,
-            padx=18,
-            pady=16,
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=C["line"],
+            padx=10,
+            pady=8,
             state="disabled",
         )
-        self.chat_out.pack(fill="both", expand=True)
+        self.chat_out.pack(fill="x")
         self.chat_out.tag_configure("you", foreground=C["accent_deep"], font=FONT_UI_BOLD)
         self.chat_out.tag_configure("agent", foreground=C["ok"], font=FONT_UI_BOLD)
-        self.chat_out.tag_configure("sys", foreground=C["muted"], font=FONT_UI)
         self.chat_out.tag_configure("url", foreground=C["accent"], underline=True)
         self.chat_out.bind("<Button-1>", self._on_click_url)
 
-        row = tk.Frame(parent, bg=C["paper"])
-        row.pack(fill="x", pady=(12, 0))
+        row = tk.Frame(chat_wrap, bg=C["paper"])
+        row.pack(fill="x", pady=(8, 0))
         self.chat_var = tk.StringVar()
-        field_shell = tk.Frame(row, bg=C["line"], padx=1, pady=1)
-        field_shell.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        shell = tk.Frame(row, bg=C["line"], padx=1, pady=1)
+        shell.pack(side="left", fill="x", expand=True, padx=(0, 8))
         entry = tk.Entry(
-            field_shell,
+            shell,
             textvariable=self.chat_var,
             font=FONT_INPUT,
             bg=C["field"],
@@ -641,17 +1049,280 @@ class TravelAgentApp(tk.Tk):
             relief="flat",
             bd=0,
         )
-        entry.pack(fill="x", ipady=11, ipadx=12)
-        entry.bind("<Return>", lambda _e: self._on_chat())
-        entry.bind("<FocusIn>", lambda _e: field_shell.configure(bg=C["accent"]))
-        entry.bind("<FocusOut>", lambda _e: field_shell.configure(bg=C["line"]))
+        entry.pack(fill="x", ipady=10, ipadx=10)
+        entry.bind("<Return>", lambda _e: self._on_refine())
+        PillButton(row, "Send", command=self._on_refine, width=100).pack(side="left")
 
-        PillButton(row, "Send", command=self._on_chat, primary=True, width=110).pack(
-            side="left"
+    def _make_card(self, parent: tk.Misc, title: str) -> dict[str, tk.Misc]:
+        shell = tk.Frame(parent, bg=C["line"], padx=1, pady=1)
+        shell.pack(fill="x", pady=(0, 10))
+        card = tk.Frame(shell, bg=C["card"], padx=14, pady=12)
+        card.pack(fill="x")
+        tk.Label(card, text=title, bg=C["card"], fg=C["ink"], font=FONT_UI_BOLD, anchor="w").pack(
+            fill="x"
         )
-        PillButton(
-            row, "Reset", command=self._reset_chat, primary=False, width=100
-        ).pack(side="left", padx=(8, 0))
+        body = tk.Label(
+            card,
+            text="Waiting for plan…",
+            bg=C["card"],
+            fg=C["muted"],
+            font=FONT_BODY,
+            justify="left",
+            anchor="nw",
+            wraplength=320,
+        )
+        body.pack(fill="x", pady=(6, 4))
+        links = tk.Frame(card, bg=C["card"])
+        links.pack(fill="x")
+        return {"shell": shell, "card": card, "body": body, "links": links}
+
+    def _show_results(self) -> None:
+        self.wizard.pack_forget()
+        self.results.pack(fill="both", expand=True)
+        self.step_label.configure(text="Your itinerary")
+
+    def _clear_days(self) -> None:
+        for child in self.days_inner.winfo_children():
+            child.destroy()
+
+    def _fill_card(self, card: dict[str, tk.Misc], text: str, urls: list[str]) -> None:
+        body: tk.Label = card["body"]  # type: ignore[assignment]
+        links: tk.Frame = card["links"]  # type: ignore[assignment]
+        for child in links.winfo_children():
+            child.destroy()
+        preview = text.strip() if text.strip() else "No details returned."
+        if len(preview) > 480:
+            preview = preview[:480] + "…"
+        body.configure(text=preview, fg=C["ink"])
+        for url in urls[:3]:
+            LinkLabel(links, url, wraplength=300).pack(anchor="w", pady=2)
+
+    def _render_parsed(self, parsed: ParsedItinerary) -> None:
+        from travel_agent.itinerary_parse import parse_flight_offer, parse_hotel_offer
+
+        if parsed.flight_offer:
+            self.flight_row.set_offer(parsed.flight_offer)
+        elif parsed.flight:
+            offer = parse_flight_offer(
+                parsed.flight.body,
+                fallback_url=parsed.flight.urls[0] if parsed.flight.urls else "",
+            )
+            self.flight_row.set_offer(offer)
+        else:
+            self.flight_row.set_loading("No flight block found in the plan.")
+
+        if parsed.hotel_offer:
+            self.hotel_row.set_offer(parsed.hotel_offer)
+        elif parsed.hotel:
+            offer = parse_hotel_offer(
+                parsed.hotel.body,
+                fallback_url=parsed.hotel.urls[0] if parsed.hotel.urls else "",
+            )
+            self.hotel_row.set_offer(offer)
+        else:
+            self.hotel_row.set_loading("No hotel block found in the plan.")
+
+        self._clear_days()
+        if not parsed.days:
+            tk.Label(
+                self.days_inner,
+                text=parsed.raw[:2000] or "No day sections found.",
+                bg=C["field"],
+                fg=C["ink"],
+                font=FONT_BODY,
+                justify="left",
+                anchor="nw",
+                wraplength=480,
+            ).pack(fill="x", padx=12, pady=12)
+            return
+
+        for day in parsed.days:
+            frame = tk.Frame(self.days_inner, bg=C["field"], padx=14, pady=10)
+            frame.pack(fill="x", anchor="n")
+            tk.Frame(frame, bg=C["line"], height=1).pack(fill="x", pady=(0, 8))
+            tk.Label(
+                frame, text=day.title, bg=C["field"], fg=C["accent_deep"], font=FONT_UI_BOLD, anchor="w"
+            ).pack(fill="x")
+            tk.Label(
+                frame,
+                text=day.body,
+                bg=C["field"],
+                fg=C["ink"],
+                font=FONT_BODY,
+                justify="left",
+                anchor="nw",
+                wraplength=480,
+            ).pack(fill="x", pady=(4, 0))
+            for url in day.urls[:2]:
+                LinkLabel(frame, url, bg=C["field"], wraplength=460).pack(anchor="w", pady=2)
+
+        if parsed.budget:
+            frame = tk.Frame(self.days_inner, bg=C["accent_glow"], padx=14, pady=12)
+            frame.pack(fill="x", padx=8, pady=12)
+            tk.Label(
+                frame, text="Budget snapshot", bg=C["accent_glow"], fg=C["ink"], font=FONT_UI_BOLD
+            ).pack(anchor="w")
+            tk.Label(
+                frame,
+                text=parsed.budget,
+                bg=C["accent_glow"],
+                fg=C["ink"],
+                font=FONT_BODY,
+                justify="left",
+                wraplength=460,
+            ).pack(anchor="w", pady=(4, 0))
+
+    def _show_raw(self) -> None:
+        if not self._last_plan:
+            return
+        win = tk.Toplevel(self)
+        win.title("Raw plan")
+        win.geometry("720x520")
+        txt = scrolledtext.ScrolledText(win, wrap="word", font=FONT_BODY, padx=12, pady=12)
+        txt.pack(fill="both", expand=True)
+        txt.insert("end", self._last_plan)
+        txt.configure(state="disabled")
+
+    # ── Agent actions ───────────────────────────────────────────────────
+
+    def _selected_styles(self) -> list[str]:
+        return [name for name, var in self._style_vars.items() if var.get()]
+
+    def _on_generate(self) -> None:
+        if self._busy:
+            return
+        if not self.agent:
+            messagebox.showwarning("Not ready", "Browser is still starting.")
+            return
+        destination = self.dest_var.get().strip()
+        if not destination:
+            messagebox.showerror("Destination", "Enter a destination city.")
+            self._show_wizard_step(1)
+            return
+        styles = self._selected_styles()
+        if not styles:
+            messagebox.showerror("Travel style", "Pick at least one travel style.")
+            self._show_wizard_step(3)
+            return
+        try:
+            budget = float(self.budget_var.get().strip())
+            nights = max(1, int(self.nights_var.get().strip() or "7"))
+            depart = self.depart_var.get().strip()
+            ret = self.return_var.get().strip() or None
+            date.fromisoformat(depart)
+            if ret:
+                date.fromisoformat(ret)
+        except ValueError:
+            messagebox.showerror("Duration", "Check nights, dates, and budget.")
+            self._show_wizard_step(2)
+            return
+
+        query = build_plan_query(
+            destination=destination,
+            depart_date=depart,
+            return_date=ret,
+            budget_hkd=budget,
+            origin=self.origin_var.get().strip() or "Hong Kong",
+            travel_styles=styles,
+            nights=nights,
+            include_flights=True,
+            include_trains=True,
+            include_transfers=True,
+            rent_car=False,
+        )
+
+        self._show_results()
+        self.flight_row.set_loading("Comparing flights on Trip.com…")
+        self.hotel_row.set_loading("Comparing hotels on Trip.com…")
+        self._clear_days()
+        tk.Label(
+            self.days_inner,
+            text="Building your itinerary… this can take a few minutes.",
+            bg=C["field"],
+            fg=C["muted"],
+            font=FONT_BODY,
+            padx=12,
+            pady=16,
+        ).pack(anchor="w")
+        self._set_busy(True, "Building Trip.Planner-style itinerary…")
+
+        def work() -> None:
+            try:
+                assert self.agent is not None
+                answer = self.agent.chat(query)
+                self.after(0, lambda: self._apply_plan(answer))
+            except Exception as exc:
+                self.after(0, lambda: self._apply_plan(f"Error: {exc}"))
+            finally:
+                self.after(0, lambda: self._set_busy(False))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_plan(self, text: str) -> None:
+        self._last_plan = text
+        parsed = parse_itinerary(text)
+        self._render_parsed(parsed)
+        self._append_chat("System", "Itinerary ready. Refine below if you like.", "agent")
+
+    def _on_refine(self) -> None:
+        if self._busy:
+            return
+        if not self.agent:
+            messagebox.showwarning("Not ready", "Browser is still starting.")
+            return
+        msg = self.chat_var.get().strip()
+        if not msg:
+            return
+        self.chat_var.set("")
+        self._append_chat("You", msg, "you")
+        refine = (
+            f"{msg}\n\n"
+            "Keep the same headings (Recommended flight / Recommended hotel / "
+            "Day-by-day itinerary / Budget snapshot) so the board can refresh. "
+            "Only use https://hk.trip.com/... URLs from tools."
+        )
+        self._set_busy(True, "Refining itinerary…")
+
+        def work() -> None:
+            try:
+                assert self.agent is not None
+                answer = self.agent.chat(refine)
+                self.after(0, lambda: self._apply_refine(answer))
+            except Exception as exc:
+                self.after(0, lambda: self._append_chat("Error", str(exc), "agent"))
+            finally:
+                self.after(0, lambda: self._set_busy(False))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_refine(self, text: str) -> None:
+        self._last_plan = text
+        self._append_chat("Agent", text[:800] + ("…" if len(text) > 800 else ""), "agent")
+        self._render_parsed(parse_itinerary(text))
+
+    def _append_chat(self, who: str, text: str, tag: str) -> None:
+        self.chat_out.configure(state="normal")
+        self.chat_out.insert("end", f"{who}\n", tag)
+        pos = 0
+        for match in _URL_RE.finditer(text):
+            if match.start() > pos:
+                self.chat_out.insert("end", text[pos : match.start()])
+            url = match.group(0).rstrip(".,;")
+            self.chat_out.insert("end", url, ("url", f"link:{url}"))
+            pos = match.end()
+        if pos < len(text):
+            self.chat_out.insert("end", text[pos:])
+        self.chat_out.insert("end", "\n\n")
+        self.chat_out.configure(state="disabled")
+        self.chat_out.see("end")
+
+    def _on_click_url(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        widget = event.widget
+        index = widget.index(f"@{event.x},{event.y}")
+        for tag in widget.tag_names(index):
+            if tag.startswith("link:"):
+                webbrowser.open(tag[5:])
+                break
 
     def _boot_agent(self) -> None:
         def work() -> None:
@@ -663,15 +1334,10 @@ class TravelAgentApp(tk.Tk):
                 self.agent = agent
                 self.after(
                     0,
-                    lambda: self._set_status(
-                        f"Ready · {self.model} · Trip.com HK", C["ok"]
-                    ),
+                    lambda: self._set_status(f"Ready · {self.model} · Trip.com HK", C["ok"]),
                 )
             except Exception as exc:
-                self.after(
-                    0,
-                    lambda: self._set_status(f"Browser failed: {exc}", C["danger"]),
-                )
+                self.after(0, lambda: self._set_status(f"Browser failed: {exc}", C["danger"]))
                 self.after(
                     0,
                     lambda: messagebox.showerror(
@@ -687,149 +1353,13 @@ class TravelAgentApp(tk.Tk):
 
     def _set_busy(self, busy: bool, label: str = "") -> None:
         self._busy = busy
-        self.plan_btn.configure(state="disabled" if busy else "normal")
+        state = "disabled" if busy else "normal"
+        self.generate_btn.configure(state=state)
+        self.regen_btn.configure(state=state)
         if busy:
-            self._set_status(label or "Searching Trip.com…", C["accent_deep"])
+            self._set_status(label or "Working…", C["accent_deep"])
         elif self.agent:
             self._set_status(f"Ready · {self.model} · Trip.com HK", C["ok"])
-
-    def _on_plan(self) -> None:
-        if self._busy:
-            return
-        if not self.agent:
-            messagebox.showwarning("Not ready", "Browser is still starting.")
-            return
-
-        destination = self.dest_var.get().strip()
-        depart = self.depart_var.get().strip()
-        ret = self.return_var.get().strip() or None
-        origin = self.origin_var.get().strip() or "Hong Kong"
-        try:
-            budget = float(self.budget_var.get().strip())
-        except ValueError:
-            messagebox.showerror("Invalid budget", "Enter a numeric HKD budget.")
-            return
-
-        if not destination:
-            messagebox.showerror("Missing destination", "Enter a destination.")
-            return
-        if not depart:
-            messagebox.showerror("Missing date", "Enter a depart date (YYYY-MM-DD).")
-            return
-        if budget <= 0:
-            messagebox.showerror("Invalid budget", "Budget must be positive.")
-            return
-
-        include_flights = self.flights_var.get()
-        include_trains = self.trains_var.get()
-        if not include_flights and not include_trains:
-            messagebox.showerror("Transport", "Choose at least flights or trains.")
-            return
-
-        query = build_plan_query(
-            destination=destination,
-            depart_date=depart,
-            return_date=ret,
-            budget_hkd=budget,
-            origin=origin,
-            rent_car=self.car_var.get(),
-            include_flights=include_flights,
-            include_trains=include_trains,
-            include_transfers=self.transfers_var.get(),
-        )
-
-        # Update status text while long comparisons run
-        self.plan_out.delete("1.0", "end")
-        self.plan_out.insert(
-            "end",
-            "Building your plan…\n"
-            "Comparing flights and hotels on Trip.com (this can take a few minutes)…\n",
-        )
-        self._set_busy(True, "Comparing flights & hotels…")
-
-        def work() -> None:
-            try:
-                assert self.agent is not None
-                answer = self.agent.chat(query)
-                self.after(0, lambda: self._show_plan(answer))
-            except Exception as exc:
-                self.after(0, lambda: self._show_plan(f"Error: {exc}"))
-            finally:
-                self.after(0, lambda: self._set_busy(False))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _show_plan(self, text: str) -> None:
-        self.plan_out.delete("1.0", "end")
-        self._insert_with_urls(self.plan_out, text)
-
-    def _clear_plan_result(self) -> None:
-        self.plan_out.delete("1.0", "end")
-        self.plan_out.insert(
-            "end",
-            "Fill in your trip details and press Plan trip.\n"
-            "Live fares and hotels will appear here.",
-        )
-        self.plan_out.tag_add("placeholder", "1.0", "end")
-
-    def _on_chat(self) -> None:
-        if self._busy:
-            return
-        if not self.agent:
-            messagebox.showwarning("Not ready", "Browser is still starting.")
-            return
-        msg = self.chat_var.get().strip()
-        if not msg:
-            return
-        self.chat_var.set("")
-        self._append_chat("You", msg, "you")
-        self._set_busy(True, "Thinking…")
-
-        def work() -> None:
-            try:
-                assert self.agent is not None
-                answer = self.agent.chat(msg)
-                self.after(0, lambda: self._append_chat("Agent", answer, "agent"))
-            except Exception as exc:
-                self.after(0, lambda: self._append_chat("Error", str(exc), "sys"))
-            finally:
-                self.after(0, lambda: self._set_busy(False))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _append_chat(self, who: str, text: str, tag: str) -> None:
-        self.chat_out.configure(state="normal")
-        self.chat_out.insert("end", f"{who}\n", tag)
-        self._insert_with_urls(self.chat_out, text + "\n\n")
-        self.chat_out.configure(state="disabled")
-        self.chat_out.see("end")
-
-    def _reset_chat(self) -> None:
-        if self.agent:
-            self.agent.reset()
-        self.chat_out.configure(state="normal")
-        self.chat_out.delete("1.0", "end")
-        self.chat_out.configure(state="disabled")
-        self._append_chat("System", "Conversation reset.", "sys")
-
-    def _insert_with_urls(self, widget: scrolledtext.ScrolledText, text: str) -> None:
-        pos = 0
-        for match in _URL_RE.finditer(text):
-            if match.start() > pos:
-                widget.insert("end", text[pos : match.start()])
-            url = match.group(0).rstrip(".,;")
-            widget.insert("end", url, ("url", f"link:{url}"))
-            pos = match.end()
-        if pos < len(text):
-            widget.insert("end", text[pos:])
-
-    def _on_click_url(self, event: tk.Event) -> None:  # type: ignore[type-arg]
-        widget = event.widget
-        index = widget.index(f"@{event.x},{event.y}")
-        for tag in widget.tag_names(index):
-            if tag.startswith("link:"):
-                webbrowser.open(tag[5:])
-                break
 
     def _on_close(self) -> None:
         try:
@@ -840,29 +1370,10 @@ class TravelAgentApp(tk.Tk):
         self.destroy()
 
 
-def _default_depart() -> str:
-    """Always tomorrow."""
-    return (date.today() + timedelta(days=1)).isoformat()
-
-
-def _default_return() -> str:
-    """One-week trip: return 7 days after tomorrow (8 days from today)."""
-    return (date.today() + timedelta(days=8)).isoformat()
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Voyage desktop travel agent")
-    parser.add_argument(
-        "-m",
-        "--model",
-        default=settings.ollama_model,
-        help=f"Ollama model (default: {settings.ollama_model})",
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Hide the Trip.com Playwright browser window",
-    )
+    parser = argparse.ArgumentParser(description="Voyage Trip.Planner-style desktop agent")
+    parser.add_argument("-m", "--model", default=settings.ollama_model)
+    parser.add_argument("--headless", action="store_true")
     return parser
 
 

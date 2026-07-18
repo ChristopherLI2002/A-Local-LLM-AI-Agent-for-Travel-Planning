@@ -1,15 +1,19 @@
-# Trip.com Travel Agent (Ollama + Desktop App)
+# Voyage — Trip.Planner-style Travel Agent
 
-Local AI travel planner with a **Windows desktop window**. Uses **Ollama** and a Chromium browser on **[Trip.com Hong Kong](https://hk.trip.com/?locale=en_hk&curr=HKD)** for:
+Local AI travel concierge inspired by [Trip.com Trip.Planner](https://hk.trip.com/webapp/tripmap/tripplanner?source=t_online_homepage&locale=en-HK&curr=HKD). Uses **Ollama** plus a Chromium session on **hk.trip.com** for live flights and hotels.
 
-- **Flight price comparison**
-- **Hotel price comparison**
-- **Travel planning** (flights, trains, transfers, hotels, budget, itinerary)
+## Flow (like Trip.Planner)
+
+1. **Destination** — where you’re going (from Hong Kong by default)
+2. **Duration** — nights / dates (default: tomorrow + 7 nights)
+3. **Travel style** — First-time, Culture, Food, Family, Relaxed, Adventure
+4. **Generate itinerary** — recommended flight + hotel with `hk.trip.com` links, plus a day-by-day plan
+5. **Refine with AI** — chat dock to tweak the plan without leaving the board
 
 ## Prerequisites
 
-1. [Ollama](https://ollama.com/) running locally
-2. A tool-capable model, e.g. `qwen2.5:7b`
+1. [Ollama](https://ollama.com/) running locally  
+2. A tool-capable model, e.g. `qwen2.5:7b`  
 3. Python 3.10+
 
 ```bash
@@ -26,58 +30,44 @@ playwright install chromium
 copy .env.example .env
 ```
 
-## Run (desktop window)
+## Run
 
 ```bash
 python -m travel_agent
 ```
 
-Opens the **Voyage** app:
-
-- **Trip planner** — destination, dates, budget, transport options → live plan
-- **Chat** — flight/hotel comparisons and follow-ups
-
-Hide the Trip.com Playwright window:
+Hide the Playwright Trip.com window:
 
 ```bash
 python -m travel_agent --headless
 ```
 
-Other model:
+Header button **Open Trip.Planner** launches the official product:  
+https://hk.trip.com/webapp/tripmap/tripplanner?source=t_online_homepage&locale=en-HK&curr=HKD
 
-```bash
-python -m travel_agent -m qwen3.5:9b
-```
-
-## Terminal (optional)
+Terminal mode:
 
 ```bash
 python -m travel_agent --cli
-python -m travel_agent -q "Compare HKG to TPE flights on 2026-08-20,2026-08-27"
 ```
-
-## How it works
-
-1. You enter trip details (or chat) in the desktop window.
-2. Ollama calls tools (`plan_trip`, `compare_flight_prices`, `compare_hotel_prices`, …).
-3. Playwright searches `hk.trip.com` and returns live page text / prices.
-4. The plan appears as plain text; Trip.com URLs are clickable in the window.
 
 ## Project layout
 
 ```
 travel_agent/
-  gui.py            # Desktop window (tkinter)
-  agent.py          # Ollama tool-calling loop
-  browser_tools.py  # Trip.com Playwright tools
-  planner_query.py  # Trip-plan prompt builder
-  pricing.py        # HKD price parse + comparison tables
-  cli.py            # Default → GUI; --cli for terminal
-  config.py         # Settings from .env
+  gui.py             # Trip.Planner-style wizard + itinerary board
+  agent.py           # Ollama tool-calling loop
+  browser_tools.py   # Trip.com Playwright tools
+  planner_query.py   # Prompt builder (destination / duration / style)
+  itinerary_parse.py # Split plan into flight / hotel / day cards
+  places.py          # City → airport code mapping
+  pricing.py         # HKD price parse + comparisons
+  cli.py             # Default → GUI; --cli for terminal
+  config.py
 ```
 
 ## Notes
 
-- No HTML/web server — the UI is a native window.
-- Live prices come from Trip.com; the model is instructed not to invent fares.
-- Default model: `qwen2.5:7b`. Override with `OLLAMA_MODEL` or `-m`.
+- Live prices and booking links come from Trip.com page/tool output; the model must not invent `www.trip.com` URLs.
+- No embedded map (desktop limitation); use day-by-day cards + Open Trip.Planner / booking links instead.
+- Default model: `qwen2.5:7b` (`OLLAMA_MODEL` or `-m` to override).
