@@ -4,6 +4,9 @@
     departDate: "",
     returnDate: "",
     budget: "",
+    includeFlights: true,
+    includeTrains: true,
+    includeTransfers: true,
     rentCar: false,
   };
 
@@ -19,12 +22,15 @@
   const departInput = document.getElementById("depart-date");
   const returnInput = document.getElementById("return-date");
   const budgetInput = document.getElementById("budget");
+  const includeFlightsInput = document.getElementById("include-flights");
+  const includeTrainsInput = document.getElementById("include-trains");
+  const includeTransfersInput = document.getElementById("include-transfers");
   const rentCarInput = document.getElementById("rent-car");
 
   const sumDestination = document.getElementById("sum-destination");
   const sumDates = document.getElementById("sum-dates");
   const sumBudget = document.getElementById("sum-budget");
-  const sumCar = document.getElementById("sum-car");
+  const sumTransport = document.getElementById("sum-transport");
 
   const planBtn = document.getElementById("plan-btn");
   const restartBtn = document.getElementById("restart-btn");
@@ -78,11 +84,20 @@
     return `${state.departDate} → ${state.returnDate}`;
   }
 
+  function transportSummary() {
+    const modes = [];
+    if (state.includeFlights) modes.push("Flights");
+    if (state.includeTrains) modes.push("Trains");
+    if (state.includeTransfers) modes.push("Airport transfers");
+    if (state.rentCar) modes.push("Rental car");
+    return modes.join(" · ") || "Flights";
+  }
+
   function fillSummary() {
     sumDestination.textContent = state.destination;
     sumDates.textContent = formatDates();
     sumBudget.textContent = formatMoney(state.budget);
-    sumCar.textContent = state.rentCar ? "Yes" : "No";
+    sumTransport.textContent = transportSummary();
   }
 
   function resetWizard() {
@@ -90,11 +105,17 @@
     state.departDate = "";
     state.returnDate = "";
     state.budget = "";
+    state.includeFlights = true;
+    state.includeTrains = true;
+    state.includeTransfers = true;
     state.rentCar = false;
     destinationInput.value = "";
     departInput.value = "";
     returnInput.value = "";
     budgetInput.value = "";
+    includeFlightsInput.checked = true;
+    includeTrainsInput.checked = true;
+    includeTransfersInput.checked = true;
     rentCarInput.checked = false;
     resultBody.hidden = true;
     resultBody.textContent = "";
@@ -148,7 +169,18 @@
     e.preventDefault();
     const budget = budgetInput.value;
     if (!budget || Number(budget) <= 0) return;
+    let includeFlights = Boolean(includeFlightsInput.checked);
+    let includeTrains = Boolean(includeTrainsInput.checked);
+    if (!includeFlights && !includeTrains) {
+      includeFlightsInput.setCustomValidity("Choose at least flights or trains.");
+      includeFlightsInput.reportValidity();
+      return;
+    }
+    includeFlightsInput.setCustomValidity("");
     state.budget = budget;
+    state.includeFlights = includeFlights;
+    state.includeTrains = includeTrains;
+    state.includeTransfers = Boolean(includeTransfersInput.checked);
     state.rentCar = Boolean(rentCarInput.checked);
     fillSummary();
     showStep(4);
@@ -180,6 +212,9 @@
           budget_hkd: Number(state.budget),
           origin: "HKG",
           rent_car: state.rentCar,
+          include_flights: state.includeFlights,
+          include_trains: state.includeTrains,
+          include_transfers: state.includeTransfers,
         }),
       });
       const data = await res.json();
