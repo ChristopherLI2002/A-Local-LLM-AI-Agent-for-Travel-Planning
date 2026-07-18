@@ -28,6 +28,22 @@ copy .env.example .env
 
 ## Run
 
+### HTML trip wizard (recommended)
+
+Guided UI that asks **destination → travel date → budget**, then plans the trip:
+
+```bash
+python -m travel_agent --web
+```
+
+Open [http://127.0.0.1:7860](http://127.0.0.1:7860). Headless browser:
+
+```bash
+python -m travel_agent --web --headless
+```
+
+### Terminal chat
+
 Interactive chat (opens a visible Trip.com browser window):
 
 ```bash
@@ -71,11 +87,16 @@ python -m travel_agent -m qwen3.5:9b
 ## Project layout
 
 ```
+web/
+  index.html        # Multi-step trip wizard UI
+  styles.css
+  app.js
 travel_agent/
   agent.py          # Ollama tool-calling loop
   browser_tools.py  # Trip.com Playwright tools (+ compare/plan)
   pricing.py        # HKD price parse + comparison tables
-  cli.py            # Rich terminal UI
+  cli.py            # Rich terminal UI (+ --web)
+  web_server.py     # Flask server for the HTML wizard
   config.py         # Settings from .env
 ```
 

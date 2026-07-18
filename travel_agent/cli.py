@@ -45,11 +45,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the browser without a visible window",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Open the HTML trip wizard UI (destination → date → budget)",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Web UI bind host")
+    parser.add_argument("--port", type=int, default=7860, help="Web UI bind port")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.web:
+        from travel_agent.web_server import main as web_main
+
+        web_args = ["--host", args.host, "--port", str(args.port), "-m", args.model]
+        if args.headless:
+            web_args.append("--headless")
+        return web_main(web_args)
 
     if args.headless:
         settings.headless = True
