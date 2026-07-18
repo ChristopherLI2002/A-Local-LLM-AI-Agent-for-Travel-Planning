@@ -472,12 +472,14 @@ Hotel city: {hotel_city}
 Interests: {interests_line}
 
 1) FLIGHTS
-- Search URL: {flight_url}
+- Flight search URL: {flight_url}
+- Open results: [View flights on Trip.com]({flight_url})
 - Lowest seen: {"HK${:,.0f}".format(flight_low) if flight_low else "n/a"}
 - Sample prices: {flight_prices.get("prices_hkd", [])[:8]}
 
 2) HOTELS
-- Search URL: {hotel_url}
+- Hotel search URL: {hotel_url}
+- Open results: [View hotels on Trip.com]({hotel_url})
 - Lowest nightly seen: {"HK${:,.0f}".format(hotel_low) if hotel_low else "n/a"}
 - Est. stay total (lowest x nights): {"HK${:,.0f}".format(hotel_total) if hotel_total else "n/a"}
 - Sample prices: {hotel_prices.get("prices_hkd", [])[:8]}
@@ -496,7 +498,9 @@ Interests: {interests_line}
 5) NEXT ACTIONS FOR THE USER
 - Compare nearby departure/return dates with compare_flight_prices
 - Compare hotel areas/dates with compare_hotel_prices
-- Open the flight/hotel URLs above on Trip.com to book
+- Open the flight/hotel links above on Trip.com to book:
+  - Flights: {flight_url}
+  - Hotels: {hotel_url}
 """
         return _clean_text(
             plan
