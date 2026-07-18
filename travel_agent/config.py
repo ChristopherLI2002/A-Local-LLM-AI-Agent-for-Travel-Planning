@@ -19,7 +19,7 @@ class Settings:
     trip_currency: str = os.getenv("TRIP_CURRENCY", "HKD")
     headless: bool = os.getenv("HEADLESS", "false").lower() in {"1", "true", "yes"}
     browser_timeout_ms: int = int(os.getenv("BROWSER_TIMEOUT_MS", "45000"))
-    max_tool_rounds: int = int(os.getenv("MAX_TOOL_ROUNDS", "12"))
+    max_tool_rounds: int = int(os.getenv("MAX_TOOL_ROUNDS", "16"))
 
 
 settings = Settings()

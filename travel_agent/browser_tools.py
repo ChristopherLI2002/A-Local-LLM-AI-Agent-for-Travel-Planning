@@ -13,6 +13,7 @@ from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 from travel_agent.config import settings
 from travel_agent.pricing import (
     format_comparison_table,
+    nearby_dates,
     nights_between,
     summarize_prices,
 )
@@ -608,7 +609,23 @@ class TripBrowser:
 
         flight_url = ""
         flight_low = None
+        flight_compare_text = ""
+        flight_best_label = ""
+        flight_snippets: list[str] = []
+        flight_prices: dict[str, Any] = {}
         if want_flights:
+            # Live date comparison (±3 days) then deep search on the cheapest date
+            date_options = nearby_dates(depart_date, (-3, 0, 3))
+            flight_compare_text = self.compare_flight_prices(
+                origin=origin,
+                destination=destination,
+                dates=",".join(date_options),
+                trip_type="roundtrip",
+                return_date=return_date,
+                adults=adults,
+            )
+            # Prefer the user's requested date search for the primary booking URL,
+            # but surface the full comparison ranking.
             flight_text = self.search_flights(
                 origin=origin,
                 destination=destination,
@@ -619,19 +636,43 @@ class TripBrowser:
             )
             flight_url = self._require_page().url
             flight_prices = summarize_prices(
-                f"Flights {origin.upper()}->{destination.upper()}",
+                f"Flights {origin.upper()}->{destination.upper()} on {depart_date}",
                 flight_text,
                 url=flight_url,
             )
             flight_low = flight_prices.get("lowest_hkd")
+            flight_snippets = flight_prices.get("snippets") or []
+            # Pull cheapest row label from comparison output if present
+            for line in flight_compare_text.splitlines():
+                if "CHEAPEST" in line:
+                    flight_best_label = line.strip()
+                    # Try to use that date's lowest for transport ranking when cheaper
+                    m = re.search(r"lowest HK\$([0-9,]+)", line, re.I)
+                    if m:
+                        try:
+                            cheap = float(m.group(1).replace(",", ""))
+                            if flight_low is None or cheap < flight_low:
+                                flight_low = cheap
+                        except ValueError:
+                            pass
+                    break
             if flight_low is not None:
                 transport_lows.append(("flights", float(flight_low)))
+            snip_block = (
+                "\n".join(f"  · {s}" for s in flight_snippets[:4])
+                or "  · (option names sparse on page — use ranked prices below)"
+            )
             sections.append(
-                f"""{n}) FLIGHTS
+                f"""{n}) FLIGHTS (compared live)
+- Requested dates: {depart_date} -> {return_date}
+- Compared outbound dates: {", ".join(date_options)}
 - Flight search URL: {flight_url}
-- Open results: [View flights on Trip.com]({flight_url})
-- Lowest seen: {_fmt_hkd(flight_low)}
-- Sample prices: {flight_prices.get("prices_hkd", [])[:8]}"""
+- Lowest on requested dates: {_fmt_hkd(flight_prices.get("lowest_hkd"))}
+- Best date from comparison: {flight_best_label or "see ranking below"}
+- Sample options seen:
+{snip_block}
+- Ranking:
+{flight_compare_text.split("Notes:")[0].strip()}"""
             )
             booking_lines.append(f"  - Flights: {flight_url}")
             raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:2200])
@@ -726,13 +767,37 @@ class TripBrowser:
         hotel_total = (
             round(hotel_low * nights, 2) if hotel_low is not None else None
         )
+        hotel_snippets = hotel_prices.get("snippets") or []
+        hotel_alt_checkins = nearby_dates(depart_date, (-7, 0, 7))
+        hotel_compare_text = self.compare_hotel_prices(
+            city=hotel_city,
+            checkin=depart_date,
+            checkout=return_date,
+            adults=adults,
+            rooms=1,
+            alternate_checkins=",".join(hotel_alt_checkins),
+        )
+        hotel_best_label = ""
+        for line in hotel_compare_text.splitlines():
+            if "CHEAPEST" in line:
+                hotel_best_label = line.strip()
+                break
+        snip_hotels = (
+            "\n".join(f"  · {s}" for s in hotel_snippets[:5])
+            or "  · (hotel names sparse on page — use ranked nightly rates below)"
+        )
         sections.append(
-            f"""{n}) HOTELS
+            f"""{n}) HOTELS (compared live)
+- Stay: {depart_date} -> {return_date} ({nights} nights) in {hotel_city}
+- Compared check-in dates: {", ".join(hotel_alt_checkins)}
 - Hotel search URL: {hotel_url}
-- Open results: [View hotels on Trip.com]({hotel_url})
-- Lowest nightly seen: {_fmt_hkd(hotel_low)}
+- Lowest nightly on requested dates: {_fmt_hkd(hotel_low)}
 - Est. stay total (lowest x nights): {_fmt_hkd(hotel_total)}
-- Sample prices: {hotel_prices.get("prices_hkd", [])[:8]}"""
+- Best check-in from comparison: {hotel_best_label or "see ranking below"}
+- Sample hotel options / rates seen:
+{snip_hotels}
+- Ranking:
+{hotel_compare_text.split("Notes:")[0].strip()}"""
         )
         booking_lines.append(f"  - Hotels: {hotel_url}")
         raw_blocks.append("--- Raw hotel excerpt ---\n" + hotel_text[:2200])
@@ -841,13 +906,42 @@ class TripBrowser:
   (Trim/expand days to match the {nights}-night stay.)"""
         )
         n += 1
+
+        pick_lines = [
+            "These comparisons were already run on Trip.com — do not ask the user to compare again.",
+        ]
+        if want_flights:
+            pick_lines.append(
+                f"- Recommended flight path: use the cheapest ranked date "
+                f"({flight_best_label or 'see FLIGHTS ranking'}); "
+                f"requested-date lowest {_fmt_hkd(flight_prices.get('lowest_hkd'))}."
+            )
+            if flight_snippets:
+                pick_lines.append(f"- Top flight-like option seen: {flight_snippets[0]}")
+            pick_lines.append(f"- Book flights: {flight_url}")
+        if want_trains and train_url:
+            pick_lines.append(
+                f"- Trains alternative lowest one-way {_fmt_hkd(train_low)}; "
+                f"est. RT floor {_fmt_hkd(round(train_low * 2, 2) if train_low else None)}. "
+                f"Book: {train_url}"
+            )
+        pick_lines.append(
+            f"- Recommended hotel band: lowest nightly {_fmt_hkd(hotel_low)} "
+            f"(~{_fmt_hkd(hotel_total)} for {nights} nights); "
+            f"best check-in from comparison: {hotel_best_label or 'requested dates'}."
+        )
+        if hotel_snippets:
+            pick_lines.append(f"- Top hotel-like option seen: {hotel_snippets[0]}")
+        pick_lines.append(f"- Book hotels: {hotel_url}")
+        if need_car:
+            pick_lines.append("- Car rental included above — open the Cars URL to reserve.")
+        pick_lines.append("Book on Trip.com:")
+        pick_lines.extend(booking_lines)
+
         sections.append(
-            f"""{n}) NEXT ACTIONS FOR THE USER
-- Compare flights vs trains using the links below
-- Compare hotel areas/dates with compare_hotel_prices
-- Open the Trip.com links above to book:
+            f"""{n}) RECOMMENDED PICKS (agent already compared)
 """
-            + "\n".join(booking_lines)
+            + "\n".join(pick_lines)
         )
 
         header = f"""TRIP PLAN (Trip.com Hong Kong live search)
@@ -862,7 +956,7 @@ Transport modes: {", ".join(modes)}
         plan = header + "\n\n" + "\n\n".join(sections)
         return _clean_text(
             plan + "\n\n" + "\n\n".join(raw_blocks),
-            limit=14000,
+            limit=16000,
         )
 
     def click_text(self, text: str) -> str:
@@ -1219,9 +1313,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "plan_trip",
             "description": (
-                "Create a full travel plan on Trip.com: compare transport modes "
-                "(flights, trains, airport transfers), hotels, optional car rental, "
-                "budget, and day-by-day outline. Prefer this for 'plan my trip' requests."
+                "Create a full travel plan on Trip.com: live-compare flight dates and "
+                "hotel check-in dates, pick recommended flight + hotel with HKD prices, "
+                "compare trains/transfers, optional car rental, budget, and itinerary. "
+                "Prefer this for 'plan my trip' requests. Does the comparisons for the user."
             ),
             "parameters": {
                 "type": "object",

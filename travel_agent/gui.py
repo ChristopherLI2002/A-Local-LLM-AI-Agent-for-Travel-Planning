@@ -470,22 +470,22 @@ class TravelAgentApp(tk.Tk):
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
 
-        self.origin_var = tk.StringVar(value="HKG")
+        self.origin_var = tk.StringVar(value="Hong Kong")
         self.dest_var = tk.StringVar()
         self.depart_var = tk.StringVar(value=_default_depart())
         self.return_var = tk.StringVar(value=_default_return())
         self.budget_var = tk.StringVar(value="12000")
 
-        Field(grid, "Origin", self.origin_var).grid(
+        Field(grid, "Origin (city)", self.origin_var).grid(
             row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 12)
         )
-        Field(grid, "Destination", self.dest_var).grid(
+        Field(grid, "Destination (city)", self.dest_var).grid(
             row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 12)
         )
         Field(grid, "Depart (YYYY-MM-DD)", self.depart_var).grid(
             row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 12)
         )
-        Field(grid, "Return (optional)", self.return_var).grid(
+        Field(grid, "Return (1 week trip)", self.return_var).grid(
             row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 12)
         )
         Field(grid, "Budget (HKD)", self.budget_var).grid(
@@ -693,7 +693,7 @@ class TravelAgentApp(tk.Tk):
         destination = self.dest_var.get().strip()
         depart = self.depart_var.get().strip()
         ret = self.return_var.get().strip() or None
-        origin = self.origin_var.get().strip() or "HKG"
+        origin = self.origin_var.get().strip() or "Hong Kong"
         try:
             budget = float(self.budget_var.get().strip())
         except ValueError:
@@ -728,9 +728,14 @@ class TravelAgentApp(tk.Tk):
             include_transfers=self.transfers_var.get(),
         )
 
+        # Update status text while long comparisons run
         self.plan_out.delete("1.0", "end")
-        self.plan_out.insert("end", "Building your plan…\nSearching Trip.com…\n")
-        self._set_busy(True, "Planning your trip…")
+        self.plan_out.insert(
+            "end",
+            "Building your plan…\n"
+            "Comparing flights and hotels on Trip.com (this can take a few minutes)…\n",
+        )
+        self._set_busy(True, "Comparing flights & hotels…")
 
         def work() -> None:
             try:
@@ -825,12 +830,14 @@ class TravelAgentApp(tk.Tk):
         self.destroy()
 
 
-def _default_depart(days: int = 21) -> str:
-    return (date.today() + timedelta(days=days)).isoformat()
+def _default_depart() -> str:
+    """Always tomorrow."""
+    return (date.today() + timedelta(days=1)).isoformat()
 
 
-def _default_return(days: int = 28) -> str:
-    return (date.today() + timedelta(days=days)).isoformat()
+def _default_return() -> str:
+    """One-week trip: return 7 days after tomorrow (8 days from today)."""
+    return (date.today() + timedelta(days=8)).isoformat()
 
 
 def build_parser() -> argparse.ArgumentParser:

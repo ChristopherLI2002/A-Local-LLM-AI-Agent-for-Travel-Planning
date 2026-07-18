@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 from typing import Any
 
 # HK$1,234 / HKD 1234 / $1,234.00 / from HK$806
@@ -63,6 +64,46 @@ def unique_sorted_prices(prices: list[float], limit: int = 12) -> list[float]:
     return out
 
 
+def nearby_dates(center: str, offsets: tuple[int, ...] = (-3, 0, 3)) -> list[str]:
+    """Return future ISO dates around a center date."""
+    try:
+        base = date.fromisoformat(center)
+    except ValueError:
+        return [center]
+    today = date.today()
+    out: list[str] = []
+    for off in offsets:
+        d = base + timedelta(days=off)
+        if d >= today:
+            out.append(d.isoformat())
+    # Always include center if valid/future
+    if base >= today and center not in out:
+        out.insert(len(out) // 2, center)
+    return out[:4] or [center]
+
+
+def extract_priced_snippets(text: str, limit: int = 5) -> list[str]:
+    """Pull short lines that look like hotel/flight options with prices."""
+    snippets: list[str] = []
+    seen: set[str] = set()
+    for raw_line in (text or "").splitlines():
+        line = " ".join(raw_line.split())
+        if len(line) < 12 or len(line) > 160:
+            continue
+        prices = parse_prices(line)
+        if not prices:
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        low = min(prices)
+        snippets.append(f"{line}  (from HK${low:,.0f})")
+        if len(snippets) >= limit:
+            break
+    return snippets
+
+
 def summarize_prices(label: str, text: str, url: str = "") -> dict[str, Any]:
     prices = unique_sorted_prices(parse_prices(text))
     summary: dict[str, Any] = {
@@ -73,6 +114,7 @@ def summarize_prices(label: str, text: str, url: str = "") -> dict[str, Any]:
         "lowest_hkd": prices[0] if prices else None,
         "highest_hkd": prices[-1] if prices else None,
         "median_hkd": prices[len(prices) // 2] if prices else None,
+        "snippets": extract_priced_snippets(text),
     }
     return summary
 
