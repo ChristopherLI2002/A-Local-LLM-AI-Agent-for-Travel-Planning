@@ -11,7 +11,11 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
-from travel_agent.plan_html import plan_to_html
+from travel_agent.plan_html import (
+    extract_booking_links,
+    plan_to_html,
+    tool_messages_text,
+)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -64,8 +68,13 @@ def _build_query(
         f"budget {budget_hkd:g} HKD. Use live Trip.com prices and stay within budget.\n\n"
         "Format your FINAL answer as clean semantic HTML only (no markdown, no code fences). "
         "Use <article>, <h2>, <h3>, <p>, <ul>, <ol>, <table>, <thead>, <tbody>, <tr>, <th>, <td>, "
-        "<strong>. Structure sections as: Overview, Flights, Hotels, Day-by-day itinerary, "
-        "Budget breakdown, Next steps. Do not include <script>, <style>, or external CSS."
+        "<strong>, <a>. Structure sections as: Overview, Flights, Hotels, Day-by-day itinerary, "
+        "Budget breakdown, Book on Trip.com, Next steps. "
+        "In Flights and Hotels, include the live Trip.com search URLs from the tools as "
+        'clickable links, e.g. <a href="URL" target="_blank" rel="noopener noreferrer">'
+        "View flights on Trip.com</a> and the same for hotels. "
+        "Never invent URLs — only use Search URL / Flight search URL / Hotel search URL "
+        "values from tool output. Do not include <script>, <style>, or external CSS."
     )
 
 
@@ -103,13 +112,20 @@ def plan():
             # Lock already held for start; call chat while holding lock so
             # Playwright stays single-threaded.
             plan_text = agent.chat(query)
+            tool_text = tool_messages_text(agent.messages)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
+    booking_links = extract_booking_links(plan_text, tool_text)
     return jsonify(
         {
             "plan": plan_text,
-            "plan_html": plan_to_html(plan_text),
+            "plan_html": plan_to_html(
+                plan_text,
+                booking_links=booking_links,
+                extra_text=tool_text,
+            ),
+            "booking_links": booking_links,
             "query": query,
         }
     )
