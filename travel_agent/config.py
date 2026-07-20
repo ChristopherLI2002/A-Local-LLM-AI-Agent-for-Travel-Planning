@@ -17,7 +17,7 @@ class Settings:
     trip_base_url: str = os.getenv("TRIP_BASE_URL", "https://hk.trip.com")
     trip_locale: str = os.getenv("TRIP_LOCALE", "en_hk")
     trip_currency: str = os.getenv("TRIP_CURRENCY", "HKD")
-    headless: bool = os.getenv("HEADLESS", "false").lower() in {"1", "true", "yes"}
+    headless: bool = os.getenv("HEADLESS", "true").lower() in {"1", "true", "yes"}
     browser_timeout_ms: int = int(os.getenv("BROWSER_TIMEOUT_MS", "45000"))
     max_tool_rounds: int = int(os.getenv("MAX_TOOL_ROUNDS", "16"))
 

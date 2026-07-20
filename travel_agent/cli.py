@@ -41,7 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Run the Trip.com Playwright browser without a visible window",
+        help="Run Playwright without a visible window (default for the desktop app)",
+    )
+    parser.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="Show the Playwright Chromium window while scraping Trip.com",
     )
     return parser
 
@@ -54,8 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         from travel_agent.gui import main as gui_main
 
         gui_args = ["-m", args.model]
-        if args.headless:
-            gui_args.append("--headless")
+        if args.show_browser:
+            gui_args.append("--show-browser")
         return gui_main(gui_args)
 
     return _run_cli(args)
@@ -72,6 +77,8 @@ def _run_cli(args: argparse.Namespace) -> int:
 
     if args.headless:
         settings.headless = True
+    if getattr(args, "show_browser", False):
+        settings.headless = False
 
     console.print(
         Panel.fit(

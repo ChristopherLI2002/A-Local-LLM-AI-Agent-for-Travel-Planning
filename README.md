@@ -36,10 +36,10 @@ copy .env.example .env
 python -m travel_agent
 ```
 
-Hide the Playwright Trip.com window:
+Trip.com scraping runs **headless** by default (no Chromium popup). To watch the browser:
 
 ```bash
-python -m travel_agent --headless
+python -m travel_agent --show-browser
 ```
 
 Header button **Open Trip.Planner** launches the official product:  

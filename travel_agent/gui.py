@@ -305,29 +305,26 @@ class FlightRowCard(tk.Frame):
         self.badges = tk.Frame(self.card, bg="#FFFFFF")
         self.badges.pack(fill="x", pady=(0, 8))
 
-        self.row = tk.Frame(self.card, bg="#FFFFFF")
-        self.row.pack(fill="x")
-        self.row.columnconfigure(0, weight=2)
-        self.row.columnconfigure(1, weight=1)
-        self.row.columnconfigure(2, weight=2)
-        self.row.columnconfigure(3, weight=2)
-        self.row.columnconfigure(4, weight=2)
-
-        # Airline
-        air = tk.Frame(self.row, bg="#FFFFFF")
-        air.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.logo = tk.Canvas(air, width=36, height=36, bg="#FFFFFF", highlightthickness=0)
+        # Compact stacked layout for the narrow bookings column
+        air = tk.Frame(self.card, bg="#FFFFFF")
+        air.pack(fill="x", pady=(0, 8))
+        self.logo = tk.Canvas(air, width=32, height=32, bg="#FFFFFF", highlightthickness=0)
         self.logo.pack(side="left", padx=(0, 8))
         self.airline_lbl = tk.Label(
             air, text="—", bg="#FFFFFF", fg=C["ink"], font=FONT_UI, anchor="w"
         )
-        self.airline_lbl.pack(side="left")
+        self.airline_lbl.pack(side="left", fill="x", expand=True)
 
-        # Depart
-        dep = tk.Frame(self.row, bg="#FFFFFF")
-        dep.grid(row=0, column=1, sticky="w", padx=4)
+        times = tk.Frame(self.card, bg="#FFFFFF")
+        times.pack(fill="x")
+        times.columnconfigure(0, weight=1)
+        times.columnconfigure(1, weight=2)
+        times.columnconfigure(2, weight=1)
+
+        dep = tk.Frame(times, bg="#FFFFFF")
+        dep.grid(row=0, column=0, sticky="w")
         self.dep_time = tk.Label(
-            dep, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 16)
+            dep, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
         )
         self.dep_time.pack(anchor="w")
         self.dep_airport = tk.Label(
@@ -335,9 +332,8 @@ class FlightRowCard(tk.Frame):
         )
         self.dep_airport.pack(anchor="w")
 
-        # Duration / path
-        mid = tk.Frame(self.row, bg="#FFFFFF")
-        mid.grid(row=0, column=2, sticky="ew", padx=4)
+        mid = tk.Frame(times, bg="#FFFFFF")
+        mid.grid(row=0, column=1, sticky="ew", padx=6)
         self.duration = tk.Label(
             mid, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
         )
@@ -350,44 +346,44 @@ class FlightRowCard(tk.Frame):
         self.stops.pack()
         self.path.bind("<Configure>", lambda _e: self._draw_path())
 
-        # Arrive
-        arr = tk.Frame(self.row, bg="#FFFFFF")
-        arr.grid(row=0, column=3, sticky="w", padx=4)
+        arr = tk.Frame(times, bg="#FFFFFF")
+        arr.grid(row=0, column=2, sticky="e")
         self.arr_time = tk.Label(
-            arr, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 16)
+            arr, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
         )
-        self.arr_time.pack(anchor="w")
+        self.arr_time.pack(anchor="e")
         self.arr_airport = tk.Label(
             arr, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
         )
-        self.arr_airport.pack(anchor="w")
+        self.arr_airport.pack(anchor="e")
 
-        # Price + Select
-        right = tk.Frame(self.row, bg="#FFFFFF")
-        right.grid(row=0, column=4, sticky="e", padx=(8, 0))
+        bottom = tk.Frame(self.card, bg="#FFFFFF")
+        bottom.pack(fill="x", pady=(10, 0))
+        price_col = tk.Frame(bottom, bg="#FFFFFF")
+        price_col.pack(side="left")
         self.price = tk.Label(
-            right,
+            price_col,
             text="—",
             bg="#FFFFFF",
             fg=C["trip_blue"],
             font=("Segoe UI Semibold", 14),
         )
-        self.price.pack(anchor="e")
+        self.price.pack(anchor="w")
         self.trip_lbl = tk.Label(
-            right, text="Return", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+            price_col, text="Return", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
         )
-        self.trip_lbl.pack(anchor="e", pady=(0, 6))
+        self.trip_lbl.pack(anchor="w")
         self.select_btn = tk.Label(
-            right,
+            bottom,
             text="Select",
             bg=C["trip_blue"],
             fg="#FFFFFF",
             font=FONT_UI_BOLD,
-            padx=16,
+            padx=14,
             pady=6,
             cursor="hand2",
         )
-        self.select_btn.pack(anchor="e")
+        self.select_btn.pack(side="right")
         self._url = ""
         self.select_btn.bind("<Button-1>", self._open)
         self.select_btn.bind(
@@ -409,9 +405,9 @@ class FlightRowCard(tk.Frame):
 
     def _draw_logo(self, initials: str) -> None:
         self.logo.delete("all")
-        self.logo.create_polygon(18, 2, 34, 30, 2, 30, fill=C["badge_teal"], outline="")
+        self.logo.create_polygon(16, 2, 30, 28, 2, 28, fill=C["badge_teal"], outline="")
         self.logo.create_text(
-            18, 20, text=(initials or "TP")[:3].upper(), fill="#FFFFFF", font=("Segoe UI", 7, "bold")
+            16, 18, text=(initials or "TP")[:3].upper(), fill="#FFFFFF", font=("Segoe UI", 7, "bold")
         )
 
     def _open(self, _e: object | None = None) -> None:
@@ -505,17 +501,16 @@ class HotelRowCard(tk.Frame):
 
         body = tk.Frame(self.card, bg="#FFFFFF")
         body.pack(fill="x")
-        body.columnconfigure(1, weight=1)
 
-        # Photo placeholder (warm night hotel vibe)
+        # Compact photo on top for the narrow bookings column
         self.photo = tk.Canvas(
-            body, width=150, height=150, bg="#2A3340", highlightthickness=0
+            body, width=260, height=96, bg="#2A3340", highlightthickness=0
         )
-        self.photo.grid(row=0, column=0, sticky="ns")
+        self.photo.pack(fill="x")
         self._draw_photo_placeholder()
 
-        info = tk.Frame(body, bg="#FFFFFF", padx=12, pady=10)
-        info.grid(row=0, column=1, sticky="nsew")
+        info = tk.Frame(body, bg="#FFFFFF", padx=10, pady=10)
+        info.pack(fill="x")
         info.columnconfigure(0, weight=1)
 
         head = tk.Frame(info, bg="#FFFFFF")
@@ -622,7 +617,7 @@ class HotelRowCard(tk.Frame):
             bg="#FFFFFF",
             fg=C["muted"],
             font=("Segoe UI", 8),
-            wraplength=180,
+            wraplength=120,
             justify="right",
         )
         self.total_lbl.pack(anchor="e")
@@ -636,12 +631,12 @@ class HotelRowCard(tk.Frame):
         self.fee_lbl.pack(anchor="e", pady=(2, 6))
         self.cta = tk.Label(
             price_col,
-            text="Check Availability  >",
+            text="Check Availability >",
             bg=C["trip_blue"],
             fg="#FFFFFF",
             font=FONT_UI_BOLD,
-            padx=12,
-            pady=8,
+            padx=10,
+            pady=6,
             cursor="hand2",
         )
         self.cta.pack(anchor="e")
@@ -654,29 +649,24 @@ class HotelRowCard(tk.Frame):
 
     def _draw_photo_placeholder(self, title: str = "Hotel") -> None:
         self.photo.delete("all")
-        w, h = 150, 150
-        # Warm night gradient blocks
-        for i in range(12):
-            t = i / 11
+        w, h = 260, 96
+        for i in range(10):
+            t = i / 9
             color = _lerp_hex("#1A2230", "#C47A3A", t * 0.55)
-            self.photo.create_rectangle(0, int(h * i / 12), w, int(h * (i + 1) / 12) + 1, outline="", fill=color)
-        # Building silhouette
-        self.photo.create_rectangle(28, 48, 122, 140, fill="#243041", outline="")
-        self.photo.create_rectangle(40, 60, 55, 75, fill="#F0C878", outline="")
-        self.photo.create_rectangle(70, 60, 85, 75, fill="#F0C878", outline="")
-        self.photo.create_rectangle(100, 60, 115, 75, fill="#E8B86A", outline="")
-        self.photo.create_rectangle(40, 90, 55, 105, fill="#E8B86A", outline="")
-        self.photo.create_rectangle(70, 90, 85, 105, fill="#F0C878", outline="")
-        self.photo.create_rectangle(62, 115, 88, 140, fill="#1A2230", outline="")
-        # Heart circle
-        self.photo.create_oval(118, 8, 142, 32, fill="#FFFFFF", outline="")
-        self.photo.create_text(130, 20, text="♡", fill="#1B3A6B", font=("Segoe UI", 11))
-        # Dots
-        for i, x in enumerate((60, 72, 84, 96)):
-            fill = "#FFFFFF" if i == 0 else "#B0B8C0"
-            self.photo.create_oval(x, 136, x + 6, 142, fill=fill, outline="")
+            self.photo.create_rectangle(
+                0, int(h * i / 10), w, int(h * (i + 1) / 10) + 1, outline="", fill=color
+            )
+        self.photo.create_rectangle(24, 28, 110, 90, fill="#243041", outline="")
+        self.photo.create_rectangle(34, 38, 46, 50, fill="#F0C878", outline="")
+        self.photo.create_rectangle(56, 38, 68, 50, fill="#F0C878", outline="")
+        self.photo.create_rectangle(78, 38, 90, 50, fill="#E8B86A", outline="")
+        self.photo.create_rectangle(34, 58, 46, 70, fill="#E8B86A", outline="")
+        self.photo.create_rectangle(56, 58, 68, 70, fill="#F0C878", outline="")
+        self.photo.create_rectangle(58, 74, 78, 90, fill="#1A2230", outline="")
+        self.photo.create_oval(228, 8, 250, 30, fill="#FFFFFF", outline="")
+        self.photo.create_text(239, 19, text="♡", fill="#1B3A6B", font=("Segoe UI", 10))
         self.photo.create_text(
-            75, 28, text=(title[:14] if title else "Hotel"), fill="#FFFFFF", font=("Segoe UI", 8)
+            130, 18, text=(title[:18] if title else "Hotel"), fill="#FFFFFF", font=("Segoe UI", 8)
         )
 
     def _open(self, _e: object | None = None) -> None:
@@ -717,9 +707,10 @@ class HotelRowCard(tk.Frame):
 
 
 class TravelAgentApp(tk.Tk):
-    def __init__(self, model: str, headless: bool = False) -> None:
+    def __init__(self, model: str, headless: bool = True) -> None:
         super().__init__()
         self.model = model
+        # Default: scrape Trip.com without a visible Chromium window
         self.headless = headless
         self.agent: TravelAgent | None = None
         self._busy = False
@@ -728,8 +719,8 @@ class TravelAgentApp(tk.Tk):
         self._style_vars: dict[str, tk.BooleanVar] = {}
 
         self.title("Voyage — Trip.Planner-style Travel Agent")
-        self.geometry("1100x780")
-        self.minsize(920, 640)
+        self.geometry("1080x780")
+        self.minsize(880, 600)
         self.configure(bg=C["paper"])
         try:
             self.tk.call("tk", "scaling", 1.12)
@@ -757,8 +748,28 @@ class TravelAgentApp(tk.Tk):
         )
         self.step_label.pack(side="left")
 
-        self.body = tk.Frame(self, bg=C["paper"])
-        self.body.pack(fill="both", expand=True, padx=28, pady=(10, 18))
+        # Page-level scroll container
+        scroll_wrap = tk.Frame(self, bg=C["paper"])
+        scroll_wrap.pack(fill="both", expand=True, padx=28, pady=(10, 18))
+
+        self._page_canvas = tk.Canvas(
+            scroll_wrap, bg=C["paper"], highlightthickness=0, bd=0
+        )
+        self._page_scroll = tk.Scrollbar(
+            scroll_wrap, orient="vertical", command=self._page_canvas.yview
+        )
+        self._page_canvas.configure(yscrollcommand=self._page_scroll.set)
+        self._page_scroll.pack(side="right", fill="y")
+        self._page_canvas.pack(side="left", fill="both", expand=True)
+
+        self.body = tk.Frame(self._page_canvas, bg=C["paper"])
+        self._page_window = self._page_canvas.create_window(
+            (0, 0), window=self.body, anchor="nw"
+        )
+        self.body.bind("<Configure>", self._on_page_body_configure)
+        self._page_canvas.bind("<Configure>", self._on_page_canvas_configure)
+        self._bind_mousewheel(self._page_canvas)
+        self._bind_mousewheel(self.body)
 
         self.wizard = tk.Frame(self.body, bg=C["paper"])
         self.results = tk.Frame(self.body, bg=C["paper"])
@@ -768,6 +779,45 @@ class TravelAgentApp(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._boot_agent)
+        self.after(200, self._enable_page_scroll)
+
+    def _on_page_body_configure(self, _event: object | None = None) -> None:
+        self._page_canvas.configure(scrollregion=self._page_canvas.bbox("all"))
+
+    def _on_page_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        self._page_canvas.itemconfigure(self._page_window, width=event.width)
+
+    def _bind_mousewheel(self, widget: tk.Misc) -> None:
+        def _on_wheel(event: tk.Event) -> str | None:  # type: ignore[type-arg]
+            delta = int(-1 * (event.delta / 120)) if getattr(event, "delta", 0) else 0
+            if delta:
+                self._page_canvas.yview_scroll(delta, "units")
+                return "break"
+            return None
+
+        def _on_linux_up(_event: tk.Event) -> str:  # type: ignore[type-arg]
+            self._page_canvas.yview_scroll(-1, "units")
+            return "break"
+
+        def _on_linux_down(_event: tk.Event) -> str:  # type: ignore[type-arg]
+            self._page_canvas.yview_scroll(1, "units")
+            return "break"
+
+        self._wheel_handlers = (_on_wheel, _on_linux_up, _on_linux_down)
+        widget.bind("<MouseWheel>", _on_wheel, add="+")
+        widget.bind("<Button-4>", _on_linux_up, add="+")
+        widget.bind("<Button-5>", _on_linux_down, add="+")
+
+    def _enable_page_scroll(self) -> None:
+        """Route mouse wheel to the page canvas across nested widgets."""
+        on_wheel, on_up, on_down = self._wheel_handlers
+        self.bind_all("<MouseWheel>", on_wheel)
+        self.bind_all("<Button-4>", on_up)
+        self.bind_all("<Button-5>", on_down)
+
+    def _scroll_to_top(self) -> None:
+        self._page_canvas.yview_moveto(0)
+        self.after(50, self._on_page_body_configure)
 
     # ── Wizard ──────────────────────────────────────────────────────────
 
@@ -927,6 +977,7 @@ class TravelAgentApp(tk.Tk):
         }
         self.step_label.configure(text=labels.get(step, ""))
         {1: self.step1, 2: self.step2, 3: self.step3}[step].pack(fill="both", expand=True)
+        self._scroll_to_top()
 
     # ── Results board ───────────────────────────────────────────────────
 
@@ -946,13 +997,13 @@ class TravelAgentApp(tk.Tk):
         self.regen_btn.pack(side="left")
 
         split = tk.Frame(self.results, bg=C["paper"])
-        split.pack(fill="both", expand=True)
-        split.columnconfigure(0, weight=2, minsize=300)
-        split.columnconfigure(1, weight=3, minsize=360)
-        split.rowconfigure(0, weight=1)
+        split.pack(fill="x", anchor="n")
+        # Narrow bookings column (~32%); itinerary gets the rest
+        split.columnconfigure(0, weight=1, minsize=240)
+        split.columnconfigure(1, weight=3, minsize=440)
 
         left = tk.Frame(split, bg=C["paper"])
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        left.grid(row=0, column=0, sticky="nw", padx=(0, 16))
         right = tk.Frame(split, bg=C["paper"])
         right.grid(row=0, column=1, sticky="nsew")
 
@@ -974,24 +1025,10 @@ class TravelAgentApp(tk.Tk):
         ).pack(fill="x", pady=(0, 8))
 
         days_shell = tk.Frame(right, bg=C["line"], padx=1, pady=1)
-        days_shell.pack(fill="both", expand=True)
-        self.days_canvas = tk.Canvas(days_shell, bg=C["field"], highlightthickness=0)
-        days_scroll = tk.Scrollbar(days_shell, orient="vertical", command=self.days_canvas.yview)
-        self.days_inner = tk.Frame(self.days_canvas, bg=C["field"])
-        self.days_inner.bind(
-            "<Configure>",
-            lambda _e: self.days_canvas.configure(scrollregion=self.days_canvas.bbox("all")),
-        )
-        self.days_canvas.create_window((0, 0), window=self.days_inner, anchor="nw")
-        self.days_canvas.configure(yscrollcommand=days_scroll.set)
-        self.days_canvas.pack(side="left", fill="both", expand=True)
-        days_scroll.pack(side="right", fill="y")
-        self.days_canvas.bind(
-            "<Configure>",
-            lambda e: self.days_canvas.itemconfigure(
-                self.days_canvas.find_all()[0], width=e.width
-            ),
-        )
+        days_shell.pack(fill="x", anchor="n")
+        self.days_inner = tk.Frame(days_shell, bg=C["field"])
+        self.days_inner.pack(fill="x")
+        self.days_inner.bind("<Configure>", lambda _e: self._on_page_body_configure())
 
         # Refine chat dock
         chat_wrap = tk.Frame(self.results, bg=C["paper"])
@@ -1080,6 +1117,7 @@ class TravelAgentApp(tk.Tk):
         self.wizard.pack_forget()
         self.results.pack(fill="both", expand=True)
         self.step_label.configure(text="Your itinerary")
+        self._scroll_to_top()
 
     def _clear_days(self) -> None:
         for child in self.days_inner.winfo_children():
@@ -1134,6 +1172,7 @@ class TravelAgentApp(tk.Tk):
                 anchor="nw",
                 wraplength=480,
             ).pack(fill="x", padx=12, pady=12)
+            self.after(80, self._on_page_body_configure)
             return
 
         for day in parsed.days:
@@ -1151,10 +1190,10 @@ class TravelAgentApp(tk.Tk):
                 font=FONT_BODY,
                 justify="left",
                 anchor="nw",
-                wraplength=480,
+                wraplength=520,
             ).pack(fill="x", pady=(4, 0))
             for url in day.urls[:2]:
-                LinkLabel(frame, url, bg=C["field"], wraplength=460).pack(anchor="w", pady=2)
+                LinkLabel(frame, url, bg=C["field"], wraplength=520).pack(anchor="w", pady=2)
 
         if parsed.budget:
             frame = tk.Frame(self.days_inner, bg=C["accent_glow"], padx=14, pady=12)
@@ -1169,8 +1208,10 @@ class TravelAgentApp(tk.Tk):
                 fg=C["ink"],
                 font=FONT_BODY,
                 justify="left",
-                wraplength=460,
+                wraplength=520,
             ).pack(anchor="w", pady=(4, 0))
+
+        self.after(80, self._on_page_body_configure)
 
     def _show_raw(self) -> None:
         if not self._last_plan:
@@ -1327,14 +1368,16 @@ class TravelAgentApp(tk.Tk):
     def _boot_agent(self) -> None:
         def work() -> None:
             try:
-                if self.headless:
-                    settings.headless = True
+                settings.headless = self.headless
                 agent = TravelAgent(model=self.model)
                 agent.start()
                 self.agent = agent
+                mode = "headless" if self.headless else "browser visible"
                 self.after(
                     0,
-                    lambda: self._set_status(f"Ready · {self.model} · Trip.com HK", C["ok"]),
+                    lambda: self._set_status(
+                        f"Ready · {self.model} · Trip.com HK · {mode}", C["ok"]
+                    ),
                 )
             except Exception as exc:
                 self.after(0, lambda: self._set_status(f"Browser failed: {exc}", C["danger"]))
@@ -1373,13 +1416,17 @@ class TravelAgentApp(tk.Tk):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Voyage Trip.Planner-style desktop agent")
     parser.add_argument("-m", "--model", default=settings.ollama_model)
-    parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="Show Playwright Chromium while scraping Trip.com (hidden by default)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    app = TravelAgentApp(model=args.model, headless=args.headless)
+    app = TravelAgentApp(model=args.model, headless=not args.show_browser)
     app.mainloop()
     return 0
 
