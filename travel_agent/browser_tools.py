@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
 from travel_agent.config import settings
-from travel_agent.places import to_flight_code, to_hotel_city
+from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
 from travel_agent.pricing import (
     format_comparison_table,
     nearby_dates,
@@ -20,6 +20,7 @@ from travel_agent.pricing import (
     pick_cheapest_from_comparison,
     summarize_prices,
 )
+from travel_agent.trip_urls import ensure_locale_curr, normalize_trip_url
 
 TRIP_HOME = f"{settings.trip_base_url}/?locale={settings.trip_locale}&curr={settings.trip_currency}"
 
@@ -242,9 +243,10 @@ class TripBrowser:
         # Prefer full body when it has prices (main selector can miss late-loaded fares)
         content = body if prices and len(body) > 200 else snippet
         final_url = page.url if "trip.com" in page.url else canonical
+        content = body if prices and len(body) > 200 else snippet
         return _clean_text(
-            f"Flight search URL: {final_url}\n"
-            f"Canonical search URL: {canonical}\n"
+            f"Flight search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
+            f"Canonical search URL: {ensure_locale_curr(canonical)}\n"
             f"Origin input: {origin_raw} -> code {origin.upper()}\n"
             f"Destination input: {dest_raw} -> code {destination.upper()}\n"
             f"Depart: {depart_date}"
@@ -265,6 +267,7 @@ class TripBrowser:
         """Search hotels on Trip.com HK for a city name or code."""
         page = self._require_page()
         city_name = to_hotel_city(city)
+        city_id = to_hotel_city_id(city) or to_hotel_city_id(city_name)
         checkin = checkin or _default_depart(14)
         try:
             checkout = checkout or (
@@ -275,10 +278,8 @@ class TripBrowser:
         adults_n = max(1, min(int(adults or 2), 8))
         rooms_n = max(1, min(int(rooms or 1), 8))
 
-        params = {
-            "city": city_name,
-            "cityName": city_name,
-            "keyword": city_name,
+        # Trip.com hotel list requires numeric city= IDs; city names → 0 results.
+        params: dict[str, Any] = {
             "checkin": checkin,
             "checkout": checkout,
             "adult": adults_n,
@@ -286,6 +287,14 @@ class TripBrowser:
             "locale": settings.trip_locale,
             "curr": settings.trip_currency,
         }
+        if city_id:
+            params["city"] = city_id
+            params["cityName"] = city_name
+        else:
+            params["city"] = city_name
+            params["cityName"] = city_name
+            params["keyword"] = city_name
+
         canonical = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
         page.goto(canonical, wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
@@ -295,7 +304,12 @@ class TripBrowser:
             body_probe = page.inner_text("body")
         except Exception:
             body_probe = ""
-        if len(parse_prices(body_probe)) < 1:
+        bad_list = (
+            "No matching" in body_probe
+            or "0 properties" in body_probe
+            or len([p for p in parse_prices(body_probe) if p >= 200]) < 1
+        )
+        if bad_list or not city_id:
             hub = (
                 f"{settings.trip_base_url}/hotels/"
                 f"?locale={settings.trip_locale}&curr={settings.trip_currency}"
@@ -314,7 +328,6 @@ class TripBrowser:
                 probe = page.inner_text("body")
             except Exception:
                 probe = ""
-            # Need more than tiny filter noise prices
             found = [p for p in parse_prices(probe) if p >= 200]
             if found:
                 break
@@ -344,18 +357,40 @@ class TripBrowser:
             else "Parsed prices: NONE — page may still be loading or blocked."
         )
         final_url = page.url if "trip.com" in page.url else canonical
-        detail_links = [
-            u
-            for u in self._extract_detail_links(kinds=("hotel", "hotels"), limit=8)
-            if "/hotels/" in u and "all-cities" not in u and u.rstrip("/").count("/") >= 4
-        ][:3]
+        # Prefer a live list URL that has a numeric city id
+        if re.search(r"[?&]city=\d+", final_url):
+            canonical = ensure_locale_curr(normalize_trip_url(final_url))
+        else:
+            # Rebuild canonical if form fill resolved a city id into the address bar
+            m = re.search(r"[?&]city=(\d+)", final_url)
+            if m:
+                params["city"] = m.group(1)
+                params["cityName"] = city_name
+                params.pop("keyword", None)
+                canonical = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
+            else:
+                canonical = ensure_locale_curr(canonical)
+
+        detail_links = []
+        for u in self._extract_detail_links(kinds=("hotel", "hotels"), limit=12):
+            nu = normalize_trip_url(u)
+            low = nu.lower()
+            if "/hotels/" not in low or "all-cities" in low:
+                continue
+            if "hotelid=" in low or re.search(r"hotel-detail-\d+", low) or re.search(
+                r"/hotels/[^/?]+-\d+", low
+            ):
+                detail_links.append(ensure_locale_curr(nu))
+            if len(detail_links) >= 3:
+                break
         details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
         content = body if prices and len(body) > 400 else snippet
         return _clean_text(
-            f"Hotel search URL: {final_url}\n"
+            f"Hotel search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
             f"Canonical search URL: {canonical}\n"
-            f"City/keyword: {city_name}\n"
-            f"Check-in: {checkin} | Check-out: {checkout}\n"
+            f"City/keyword: {city_name}"
+            + (f" (city id {params.get('city')})" if str(params.get("city", "")).isdigit() else "")
+            + f"\nCheck-in: {checkin} | Check-out: {checkout}\n"
             f"Adults: {adults_n} | Rooms: {rooms_n}\n"
             f"{price_note}\n"
             + (f"{details}\n" if details else "")
@@ -767,8 +802,13 @@ class TripBrowser:
                 recommended_flight_url = canon_m.group(1).rstrip(".,;")
             else:
                 recommended_flight_url = flight_url or recommended_flight_url
+            recommended_flight_url = ensure_locale_curr(
+                normalize_trip_url(recommended_flight_url)
+            )
             if "hk.trip.com" not in recommended_flight_url and canon_m:
-                recommended_flight_url = canon_m.group(1).rstrip(".,;")
+                recommended_flight_url = ensure_locale_curr(
+                    normalize_trip_url(canon_m.group(1).rstrip(".,;"))
+                )
             flight_prices = summarize_prices(
                 f"Flights {origin}->{destination} on {recommended_flight_date}",
                 flight_text,
@@ -912,6 +952,9 @@ class TripBrowser:
             recommended_hotel_url = canon_h.group(1).rstrip(".,;")
         else:
             recommended_hotel_url = hotel_url or recommended_hotel_url
+        recommended_hotel_url = ensure_locale_curr(
+            normalize_trip_url(recommended_hotel_url)
+        )
         hotel_prices = summarize_prices(
             f"Hotels in {hotel_city}",
             hotel_text,
@@ -926,10 +969,16 @@ class TripBrowser:
         hotel_snippets = hotel_prices.get("snippets") or []
         if hotel_snippets:
             recommended_hotel_option = hotel_snippets[0]
-        recommended_hotel_detail_links = self._extract_detail_links(
-            kinds=("hotel", "hotels"),
-            limit=3,
-        )
+        recommended_hotel_detail_links = [
+            ensure_locale_curr(normalize_trip_url(u))
+            for u in self._extract_detail_links(kinds=("hotel", "hotels"), limit=8)
+            if "/hotels/" in u.lower()
+            and (
+                "hotelid=" in u.lower()
+                or re.search(r"hotel-detail-\d+", u, re.I)
+                or re.search(r"/hotels/[^/?]+-\d+", u)
+            )
+        ][:3]
 
         snip_hotels = (
             "\n".join(f"  · {s}" for s in hotel_snippets[:5])
@@ -1249,6 +1298,7 @@ Transport modes: {", ".join(modes)}
                 href = f"{settings.trip_base_url.rstrip('/')}{href}"
             if "trip.com" not in href.lower():
                 continue
+            href = normalize_trip_url(href)
             low = href.lower()
             if not any(k in low for k in kinds):
                 continue

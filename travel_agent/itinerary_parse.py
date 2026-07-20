@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from travel_agent.trip_urls import pick_booking_url
+
+
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
 _DAY_RE = re.compile(r"(?im)^\s*day\s+(\d+)\s*[:.\-]?\s*(.*)$")
 _TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
@@ -117,10 +120,7 @@ def parse_flight_offer(text: str, fallback_url: str = "") -> FlightOffer:
     offer = FlightOffer(raw=blob, url=fallback_url)
 
     urls = [u for u in _urls_in(blob) if "trip.com" in u.lower()]
-    if urls:
-        offer.url = urls[0]
-    elif fallback_url:
-        offer.url = fallback_url
+    offer.url = pick_booking_url(urls, "flight", fallback=fallback_url)
 
     airline_m = _AIRLINE_RE.search(blob)
     if airline_m:
@@ -236,10 +236,7 @@ def parse_hotel_offer(text: str, fallback_url: str = "") -> HotelOffer:
     offer = HotelOffer(raw=blob, url=fallback_url)
 
     urls = [u for u in _urls_in(blob) if "trip.com" in u.lower()]
-    if urls:
-        offer.url = urls[0]
-    elif fallback_url:
-        offer.url = fallback_url
+    offer.url = pick_booking_url(urls, "hotel", fallback=fallback_url)
 
     img = re.search(
         r"(?i)(?:image|photo|cover)\s*[:\-]\s*(https?://\S+\.(?:jpg|jpeg|png|webp)\S*)",
@@ -403,9 +400,12 @@ def parse_itinerary(text: str) -> ParsedItinerary:
                 for u in _urls_in(raw)
                 if "trip.com" in u.lower() and "flight" in u.lower()
             ]
+        best = pick_booking_url(urls, "flight")
+        if best:
+            urls = [best] + [u for u in urls if u != best]
         result.flight = Block(title="Recommended flight", body=flight_body, urls=urls)
         result.flight_offer = parse_flight_offer(
-            flight_body, fallback_url=urls[0] if urls else ""
+            flight_body, fallback_url=best or (urls[0] if urls else "")
         )
 
     if hotel_body:
@@ -419,13 +419,16 @@ def parse_itinerary(text: str) -> ParsedItinerary:
                 for u in _urls_in(raw)
                 if "trip.com" in u.lower() and "hotel" in u.lower()
             ]
+        best = pick_booking_url(urls, "hotel")
+        if best:
+            urls = [best] + [u for u in urls if u != best]
         result.hotel = Block(
             title="Recommended hotel",
             body=hotel_body,
             urls=urls,
         )
         result.hotel_offer = parse_hotel_offer(
-            hotel_body, fallback_url=urls[0] if urls else ""
+            hotel_body, fallback_url=best or (urls[0] if urls else "")
         )
 
     matches = list(_DAY_RE.finditer(raw))

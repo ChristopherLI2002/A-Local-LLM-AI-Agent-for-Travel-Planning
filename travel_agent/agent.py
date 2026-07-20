@@ -9,6 +9,7 @@ import ollama
 
 from travel_agent.browser_tools import TOOL_DEFINITIONS, TripBrowser, dispatch_tool
 from travel_agent.config import settings
+from travel_agent.trip_urls import extract_booking_urls
 
 SYSTEM_PROMPT = """You are Voyage — a Trip.Planner-style AI travel concierge for Trip.com Hong Kong (hk.trip.com, HKD).
 
@@ -54,6 +55,7 @@ class TravelAgent:
         ]
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
+        self.booking_links: dict[str, str] = {"flight": "", "hotel": ""}
 
     def start(self) -> None:
         self.browser.start()
@@ -63,9 +65,11 @@ class TravelAgent:
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.booking_links = {"flight": "", "hotel": ""}
 
     def chat(self, user_message: str) -> str:
         self.messages.append({"role": "user", "content": user_message})
+        self.booking_links = {"flight": "", "hotel": ""}
 
         for _ in range(settings.max_tool_rounds):
             response = self.client.chat(
@@ -96,6 +100,12 @@ class TravelAgent:
                     self.on_tool_start(name, args)
 
                 result = dispatch_tool(self.browser, name, args)
+
+                found = extract_booking_urls(result)
+                if found.get("flight"):
+                    self.booking_links["flight"] = found["flight"]
+                if found.get("hotel"):
+                    self.booking_links["hotel"] = found["hotel"]
 
                 if self.on_tool_end:
                     preview = result if len(result) <= 500 else result[:500] + "..."

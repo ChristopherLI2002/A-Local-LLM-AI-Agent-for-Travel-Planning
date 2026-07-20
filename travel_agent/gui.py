@@ -15,6 +15,11 @@ from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
 from travel_agent.itinerary_parse import FlightOffer, HotelOffer, ParsedItinerary, parse_itinerary
 from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
+from travel_agent.trip_urls import (
+    build_flight_search_url,
+    build_hotel_list_url,
+    resolve_booking_url,
+)
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
 
@@ -411,8 +416,12 @@ class FlightRowCard(tk.Frame):
         )
 
     def _open(self, _e: object | None = None) -> None:
-        if self._url:
+        if self._url and "trip.com" in self._url.lower():
             webbrowser.open(self._url)
+        elif self._url:
+            messagebox.showwarning("Invalid link", "No valid Trip.com booking link is available yet.")
+        else:
+            messagebox.showinfo("No link", "Generate an itinerary first to get a booking link.")
 
     def set_loading(self, message: str) -> None:
         self._clear_badges()
@@ -670,8 +679,12 @@ class HotelRowCard(tk.Frame):
         )
 
     def _open(self, _e: object | None = None) -> None:
-        if self._url:
+        if self._url and "trip.com" in self._url.lower():
             webbrowser.open(self._url)
+        elif self._url:
+            messagebox.showwarning("Invalid link", "No valid Trip.com booking link is available yet.")
+        else:
+            messagebox.showinfo("No link", "Generate an itinerary first to get a booking link.")
 
     def set_loading(self, message: str) -> None:
         self._draw_photo_placeholder("…")
@@ -717,6 +730,7 @@ class TravelAgentApp(tk.Tk):
         self._wizard_step = 1
         self._last_plan = ""
         self._style_vars: dict[str, tk.BooleanVar] = {}
+        self._trip_context: dict[str, str] = {}
 
         self.title("Voyage — Trip.Planner-style Travel Agent")
         self.geometry("1080x780")
@@ -1271,6 +1285,12 @@ class TravelAgentApp(tk.Tk):
             include_transfers=True,
             rent_car=False,
         )
+        self._trip_context = {
+            "origin": self.origin_var.get().strip() or "Hong Kong",
+            "destination": destination,
+            "depart_date": depart,
+            "return_date": ret or "",
+        }
 
         self._show_results()
         self.flight_row.set_loading("Comparing flights on Trip.com…")
@@ -1299,9 +1319,101 @@ class TravelAgentApp(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _built_booking_urls(self) -> tuple[str, str]:
+        ctx = self._trip_context
+        if not ctx.get("destination") or not ctx.get("depart_date"):
+            return "", ""
+        ret = ctx.get("return_date") or None
+        flight = build_flight_search_url(
+            origin=ctx.get("origin", "Hong Kong"),
+            destination=ctx["destination"],
+            depart_date=ctx["depart_date"],
+            return_date=ret,
+        )
+        checkout = ret
+        if not checkout:
+            try:
+                checkout = (
+                    date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
+                ).isoformat()
+            except ValueError:
+                checkout = ctx["depart_date"]
+        hotel = build_hotel_list_url(
+            city=ctx["destination"],
+            checkin=ctx["depart_date"],
+            checkout=checkout,
+        )
+        return flight, hotel
+
+    def _apply_booking_urls(self, parsed: ParsedItinerary) -> ParsedItinerary:
+        """Override LLM-parsed links with tool + built Trip.com search URLs."""
+        tool_flight = ""
+        tool_hotel = ""
+        if self.agent:
+            tool_flight = self.agent.booking_links.get("flight", "")
+            tool_hotel = self.agent.booking_links.get("hotel", "")
+        built_flight, built_hotel = self._built_booking_urls()
+
+        parsed_flight = ""
+        if parsed.flight_offer:
+            parsed_flight = parsed.flight_offer.url
+        elif parsed.flight and parsed.flight.urls:
+            parsed_flight = parsed.flight.urls[0]
+
+        parsed_hotel = ""
+        if parsed.hotel_offer:
+            parsed_hotel = parsed.hotel_offer.url
+        elif parsed.hotel and parsed.hotel.urls:
+            parsed_hotel = parsed.hotel.urls[0]
+
+        flight_url = resolve_booking_url(
+            "flight",
+            tool_url=tool_flight,
+            built_url=built_flight,
+            parsed_url=parsed_flight,
+        )
+        hotel_url = resolve_booking_url(
+            "hotel",
+            tool_url=tool_hotel,
+            built_url=built_hotel,
+            parsed_url=parsed_hotel,
+        )
+
+        if parsed.flight_offer:
+            parsed.flight_offer.url = flight_url
+        elif parsed.flight:
+            from travel_agent.itinerary_parse import parse_flight_offer
+
+            parsed.flight_offer = parse_flight_offer(
+                parsed.flight.body,
+                fallback_url=flight_url,
+            )
+            parsed.flight_offer.url = flight_url
+        elif flight_url:
+            from travel_agent.itinerary_parse import parse_flight_offer
+
+            parsed.flight_offer = parse_flight_offer("", fallback_url=flight_url)
+
+        if parsed.hotel_offer:
+            parsed.hotel_offer.url = hotel_url
+        elif parsed.hotel:
+            from travel_agent.itinerary_parse import parse_hotel_offer
+
+            parsed.hotel_offer = parse_hotel_offer(
+                parsed.hotel.body,
+                fallback_url=hotel_url,
+            )
+            parsed.hotel_offer.url = hotel_url
+        elif hotel_url:
+            from travel_agent.itinerary_parse import parse_hotel_offer
+
+            parsed.hotel_offer = parse_hotel_offer("", fallback_url=hotel_url)
+
+        return parsed
+
     def _apply_plan(self, text: str) -> None:
         self._last_plan = text
-        parsed = parse_itinerary(text)
+        parsed = self._apply_booking_urls(parse_itinerary(text))
         self._render_parsed(parsed)
         self._append_chat("System", "Itinerary ready. Refine below if you like.", "agent")
 
@@ -1339,7 +1451,8 @@ class TravelAgentApp(tk.Tk):
     def _apply_refine(self, text: str) -> None:
         self._last_plan = text
         self._append_chat("Agent", text[:800] + ("…" if len(text) > 800 else ""), "agent")
-        self._render_parsed(parse_itinerary(text))
+        parsed = self._apply_booking_urls(parse_itinerary(text))
+        self._render_parsed(parsed)
 
     def _append_chat(self, who: str, text: str, tag: str) -> None:
         self.chat_out.configure(state="normal")
