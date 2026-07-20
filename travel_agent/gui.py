@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import math
+import queue
 import re
 import threading
 import tkinter as tk
 import webbrowser
+from collections.abc import Callable
 from datetime import date, timedelta
+from typing import Any
 from tkinter import messagebox, scrolledtext
 
 from travel_agent.agent import TravelAgent
@@ -18,6 +21,8 @@ from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
 from travel_agent.trip_urls import (
     build_flight_search_url,
     build_hotel_list_url,
+    fetch_hotel_detail_link,
+    is_trusted_hotel_detail_url,
     resolve_booking_url,
 )
 
@@ -679,8 +684,13 @@ class HotelRowCard(tk.Frame):
         )
 
     def _open(self, _e: object | None = None) -> None:
-        if self._url and "trip.com" in self._url.lower():
+        if self._url and is_trusted_hotel_detail_url(self._url):
             webbrowser.open(self._url)
+        elif self._url and "trip.com" in self._url.lower():
+            messagebox.showwarning(
+                "Invalid link",
+                "This hotel link looks invalid. Regenerate the trip to refresh it.",
+            )
         elif self._url:
             messagebox.showwarning("Invalid link", "No valid Trip.com booking link is available yet.")
         else:
@@ -731,6 +741,9 @@ class TravelAgentApp(tk.Tk):
         self._last_plan = ""
         self._style_vars: dict[str, tk.BooleanVar] = {}
         self._trip_context: dict[str, str] = {}
+        # Playwright sync API is thread-bound: one long-lived worker owns the browser.
+        self._browser_jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
+        self._browser_thread: threading.Thread | None = None
 
         self.title("Voyage — Trip.Planner-style Travel Agent")
         self.geometry("1080x780")
@@ -1291,6 +1304,8 @@ class TravelAgentApp(tk.Tk):
             "depart_date": depart,
             "return_date": ret or "",
         }
+        if self.agent:
+            self.agent.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
 
         self._show_results()
         self.flight_row.set_loading("Comparing flights on Trip.com…")
@@ -1307,17 +1322,40 @@ class TravelAgentApp(tk.Tk):
         ).pack(anchor="w")
         self._set_busy(True, "Building Trip.Planner-style itinerary…")
 
-        def work() -> None:
-            try:
-                assert self.agent is not None
-                answer = self.agent.chat(query)
-                self.after(0, lambda: self._apply_plan(answer))
-            except Exception as exc:
-                self.after(0, lambda: self._apply_plan(f"Error: {exc}"))
-            finally:
-                self.after(0, lambda: self._set_busy(False))
+        def job() -> str:
+            assert self.agent is not None
+            answer = self.agent.chat(query)
+            ctx = self._trip_context
+            checkout = ctx.get("return_date") or ""
+            if not checkout:
+                try:
+                    checkout = (
+                        date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
+                    ).isoformat()
+                except ValueError:
+                    checkout = ctx["depart_date"]
+            if not is_trusted_hotel_detail_url(
+                self.agent.booking_links.get("hotel", "")
+            ):
+                if ctx.get("destination") and ctx.get("depart_date"):
+                    live = fetch_hotel_detail_link(
+                        self.agent.browser,
+                        city=ctx["destination"],
+                        checkin=ctx["depart_date"],
+                        checkout=checkout,
+                    )
+                    if live.get("url"):
+                        self.agent.booking_links["hotel"] = live["url"]
+                    if live.get("name"):
+                        self.agent.booking_links["hotel_name"] = live["name"]
+            return answer
 
-        threading.Thread(target=work, daemon=True).start()
+        self._run_browser_job(
+            job,
+            on_ok=lambda answer: self._apply_plan(answer),
+            on_err=lambda exc: self._apply_plan(f"Error: {exc}"),
+            done=lambda: self._set_busy(False),
+        )
 
     def _built_booking_urls(self) -> tuple[str, str]:
         ctx = self._trip_context
@@ -1346,7 +1384,7 @@ class TravelAgentApp(tk.Tk):
         return flight, hotel
 
     def _apply_booking_urls(self, parsed: ParsedItinerary) -> ParsedItinerary:
-        """Override LLM-parsed links with tool + built Trip.com search URLs."""
+        """Override LLM-parsed links with live Trip.com tool URLs."""
         tool_flight = ""
         tool_hotel = ""
         if self.agent:
@@ -1375,7 +1413,7 @@ class TravelAgentApp(tk.Tk):
         hotel_url = resolve_booking_url(
             "hotel",
             tool_url=tool_hotel,
-            built_url=built_hotel,
+            built_url="",
             parsed_url=parsed_hotel,
         )
 
@@ -1396,6 +1434,8 @@ class TravelAgentApp(tk.Tk):
 
         if parsed.hotel_offer:
             parsed.hotel_offer.url = hotel_url
+            if self.agent and self.agent.booking_links.get("hotel_name"):
+                parsed.hotel_offer.name = self.agent.booking_links["hotel_name"]
         elif parsed.hotel:
             from travel_agent.itinerary_parse import parse_hotel_offer
 
@@ -1404,10 +1444,14 @@ class TravelAgentApp(tk.Tk):
                 fallback_url=hotel_url,
             )
             parsed.hotel_offer.url = hotel_url
+            if self.agent and self.agent.booking_links.get("hotel_name"):
+                parsed.hotel_offer.name = self.agent.booking_links["hotel_name"]
         elif hotel_url:
             from travel_agent.itinerary_parse import parse_hotel_offer
 
             parsed.hotel_offer = parse_hotel_offer("", fallback_url=hotel_url)
+            if self.agent and self.agent.booking_links.get("hotel_name"):
+                parsed.hotel_offer.name = self.agent.booking_links["hotel_name"]
 
         return parsed
 
@@ -1436,17 +1480,40 @@ class TravelAgentApp(tk.Tk):
         )
         self._set_busy(True, "Refining itinerary…")
 
-        def work() -> None:
-            try:
-                assert self.agent is not None
-                answer = self.agent.chat(refine)
-                self.after(0, lambda: self._apply_refine(answer))
-            except Exception as exc:
-                self.after(0, lambda: self._append_chat("Error", str(exc), "agent"))
-            finally:
-                self.after(0, lambda: self._set_busy(False))
+        def job() -> str:
+            assert self.agent is not None
+            answer = self.agent.chat(refine)
+            if not is_trusted_hotel_detail_url(
+                self.agent.booking_links.get("hotel", "")
+            ):
+                ctx = self._trip_context
+                checkout = ctx.get("return_date") or ""
+                if not checkout and ctx.get("depart_date"):
+                    try:
+                        checkout = (
+                            date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
+                        ).isoformat()
+                    except ValueError:
+                        checkout = ctx["depart_date"]
+                if ctx.get("destination") and ctx.get("depart_date"):
+                    live = fetch_hotel_detail_link(
+                        self.agent.browser,
+                        city=ctx["destination"],
+                        checkin=ctx["depart_date"],
+                        checkout=checkout,
+                    )
+                    if live.get("url"):
+                        self.agent.booking_links["hotel"] = live["url"]
+                    if live.get("name"):
+                        self.agent.booking_links["hotel_name"] = live["name"]
+            return answer
 
-        threading.Thread(target=work, daemon=True).start()
+        self._run_browser_job(
+            job,
+            on_ok=lambda answer: self._apply_refine(answer),
+            on_err=lambda exc: self._append_chat("Error", str(exc), "agent"),
+            done=lambda: self._set_busy(False),
+        )
 
     def _apply_refine(self, text: str) -> None:
         self._last_plan = text
@@ -1478,8 +1545,32 @@ class TravelAgentApp(tk.Tk):
                 webbrowser.open(tag[5:])
                 break
 
+    def _run_browser_job(
+        self,
+        job: Callable[[], Any],
+        *,
+        on_ok: Callable[[Any], None] | None = None,
+        on_err: Callable[[BaseException], None] | None = None,
+        done: Callable[[], None] | None = None,
+    ) -> None:
+        """Run job on the Playwright owner thread; marshal UI callbacks back to Tk."""
+
+        def wrapped() -> None:
+            try:
+                result = job()
+                if on_ok is not None:
+                    self.after(0, lambda r=result: on_ok(r))
+            except Exception as exc:
+                if on_err is not None:
+                    self.after(0, lambda e=exc: on_err(e))
+            finally:
+                if done is not None:
+                    self.after(0, done)
+
+        self._browser_jobs.put(wrapped)
+
     def _boot_agent(self) -> None:
-        def work() -> None:
+        def worker_loop() -> None:
             try:
                 settings.headless = self.headless
                 agent = TravelAgent(model=self.model)
@@ -1493,16 +1584,38 @@ class TravelAgentApp(tk.Tk):
                     ),
                 )
             except Exception as exc:
-                self.after(0, lambda: self._set_status(f"Browser failed: {exc}", C["danger"]))
+                self.after(
+                    0, lambda e=exc: self._set_status(f"Browser failed: {e}", C["danger"])
+                )
                 self.after(
                     0,
-                    lambda: messagebox.showerror(
+                    lambda e=exc: messagebox.showerror(
                         "Startup error",
-                        f"{exc}\n\nRun: playwright install chromium",
+                        f"{e}\n\nRun: playwright install chromium",
                     ),
                 )
+                return
 
-        threading.Thread(target=work, daemon=True).start()
+            while True:
+                task = self._browser_jobs.get()
+                if task is None:
+                    break
+                try:
+                    task()
+                except Exception:
+                    pass
+
+            try:
+                if self.agent:
+                    self.agent.close()
+            except Exception:
+                pass
+            self.agent = None
+
+        self._browser_thread = threading.Thread(
+            target=worker_loop, daemon=True, name="voyage-browser"
+        )
+        self._browser_thread.start()
 
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.header.set_status(text, color or C["muted"])
@@ -1519,8 +1632,9 @@ class TravelAgentApp(tk.Tk):
 
     def _on_close(self) -> None:
         try:
-            if self.agent:
-                self.agent.close()
+            self._browser_jobs.put(None)
+            if self._browser_thread and self._browser_thread.is_alive():
+                self._browser_thread.join(timeout=5)
         except Exception:
             pass
         self.destroy()

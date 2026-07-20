@@ -384,11 +384,13 @@ class TripBrowser:
             if len(detail_links) >= 3:
                 break
         details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
+        rec_detail = detail_links[0] if detail_links else ""
         content = body if prices and len(body) > 400 else snippet
         return _clean_text(
             f"Hotel search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
             f"Canonical search URL: {canonical}\n"
-            f"City/keyword: {city_name}"
+            + (f"Recommended hotel detail link: {rec_detail}\n" if rec_detail else "")
+            + f"City/keyword: {city_name}"
             + (f" (city id {params.get('city')})" if str(params.get("city", "")).isdigit() else "")
             + f"\nCheck-in: {checkin} | Check-out: {checkout}\n"
             f"Adults: {adults_n} | Rooms: {rooms_n}\n"
@@ -1003,6 +1005,10 @@ class TripBrowser:
 {hotel_compare_text.split("Notes:")[0].strip()}"""
         )
         booking_lines.append(f"  - Recommended hotels: {recommended_hotel_url}")
+        if recommended_hotel_detail_links:
+            booking_lines.append(
+                f"  - Recommended hotel detail link: {recommended_hotel_detail_links[0]}"
+            )
         for detail in recommended_hotel_detail_links[:2]:
             booking_lines.append(f"  - Hotel option: {detail}")
         raw_blocks.append("--- Raw hotel excerpt ---\n" + hotel_text[:2200])

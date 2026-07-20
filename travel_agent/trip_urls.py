@@ -23,6 +23,20 @@ _HOTEL_BOOK_RE = re.compile(
     r"(?:Book this hotel search|Recommended hotel list link):\s*(\S+)",
     re.I,
 )
+_HOTEL_DETAIL_RE = re.compile(
+    r"(?:Hotel option link|Recommended hotel detail link|Hotel detail link):\s*(\S+)",
+    re.I,
+)
+_FAKE_HOTEL_IDS = frozenset(
+    {
+        "123456",
+        "1234567",
+        "12345678",
+        "999999",
+        "000000",
+        "111111",
+    }
+)
 
 
 def normalize_trip_url(url: str) -> str:
@@ -50,6 +64,99 @@ def _has_numeric_city(url: str) -> bool:
     qs = parse_qs(urlparse(url).query)
     city = (qs.get("city") or [""])[0]
     return bool(re.fullmatch(r"\d{1,6}", city))
+
+
+def _qs(url: str) -> dict[str, str]:
+    parsed = urlparse(url)
+    return {k: v[0] for k, v in parse_qs(parsed.query).items() if v}
+
+
+def _hotel_id_from_url(url: str) -> str:
+    qs = _qs(url)
+    for key in ("hotelId", "hotelid", "masterhotelid"):
+        val = (qs.get(key) or "").strip()
+        if re.fullmatch(r"\d{4,10}", val):
+            return val
+    m = re.search(r"hotel-detail-(\d+)", url, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"/hotels/[^/?]+-(\d+)", url, re.I)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def is_hotel_detail_url(url: str) -> bool:
+    low = (url or "").lower()
+    if not low or "trip.com" not in low:
+        return False
+    if "/hotels/detail" in low:
+        return True
+    return bool(_hotel_id_from_url(url))
+
+
+def is_trusted_hotel_detail_url(url: str) -> bool:
+    """True for real hotel detail pages with a plausible numeric hotelId."""
+    if not is_hotel_detail_url(url):
+        return False
+    hid = _hotel_id_from_url(url)
+    if not hid or hid in _FAKE_HOTEL_IDS:
+        return False
+    return True
+
+
+def canonicalize_hotel_detail_url(
+    url: str,
+    *,
+    checkin: str = "",
+    checkout: str = "",
+    city: str = "",
+) -> str:
+    """Normalize a hotel detail URL and patch missing dates/locale/currency."""
+    if not url:
+        return ""
+    norm = normalize_trip_url(url)
+    if not is_hotel_detail_url(norm):
+        return ensure_locale_curr(norm)
+
+    qs = _qs(norm)
+    hid = _hotel_id_from_url(norm)
+    if hid:
+        qs["hotelId"] = hid
+    for old in ("hotelid", "masterhotelid"):
+        qs.pop(old, None)
+
+    if checkin:
+        qs["checkIn"] = checkin
+        qs.pop("checkin", None)
+    elif "checkin" in qs and "checkIn" not in qs:
+        qs["checkIn"] = qs.pop("checkin")
+
+    if checkout:
+        qs["checkOut"] = checkout
+        qs.pop("checkout", None)
+    elif "checkout" in qs and "checkOut" not in qs:
+        qs["checkOut"] = qs.pop("checkout")
+
+    if city and not qs.get("cityId"):
+        city_id = to_hotel_city_id(city)
+        if city_id:
+            qs["cityId"] = city_id
+            qs.setdefault("cityEnName", to_hotel_city(city))
+
+    qs.setdefault("adult", "2")
+    qs.setdefault("children", "0")
+    qs.setdefault("crn", "1")
+    qs.setdefault("ages", "")
+    qs.setdefault("curr", settings.trip_currency)
+    qs.setdefault("barcurr", settings.trip_currency)
+    qs.setdefault("locale", settings.trip_locale)
+
+    parsed = urlparse(norm)
+    path = parsed.path if "/hotels/detail" in parsed.path else "/hotels/detail/"
+    return urlunparse(
+        ("https", urlparse(settings.trip_base_url).netloc or "hk.trip.com", path, "", urlencode(qs), "")
+    )
 
 
 def score_booking_url(url: str, kind: str) -> int:
@@ -81,18 +188,20 @@ def score_booking_url(url: str, kind: str) -> int:
         if "hotel" in low:
             score -= 60
     elif kind == "hotel":
-        # Stable list URLs work in any browser; session-bound detail links often fail.
-        if "/hotels/list" in low and _has_numeric_city(norm):
-            score += 150
-        elif "/hotels/list" in low:
-            score += 60
+        if is_trusted_hotel_detail_url(norm):
+            score += 220
+            if "checkin=" in low:
+                score += 40
+            if "cityid=" in low:
+                score += 20
         elif re.search(r"hotelid=\d+|hotel-detail-\d+", low):
-            if "hoteluniquekey=" in low:
-                score += 10
-            else:
-                score += 70
-        elif "/hotels/" in low:
+            score += 40
+        elif "/hotels/list" in low and _has_numeric_city(norm):
+            score += 25
+        elif "/hotels/list" in low:
             score += 10
+        elif "/hotels/" in low:
+            score += 5
         if "flight" in low:
             score -= 60
         if re.search(r"hotel-detail(?!-\d)", low) and "hotelid=" not in low:
@@ -107,6 +216,14 @@ def score_booking_url(url: str, kind: str) -> int:
 def pick_booking_url(urls: list[str], kind: str, fallback: str = "") -> str:
     """Choose the best flight/hotel booking URL from candidates."""
     candidates = [u for u in urls if u and "trip.com" in u.lower()]
+    if kind == "hotel":
+        trusted = [u for u in candidates if is_trusted_hotel_detail_url(u)]
+        if fallback and is_trusted_hotel_detail_url(fallback):
+            trusted.append(fallback)
+        if trusted:
+            best = max(trusted, key=lambda u: score_booking_url(u, kind))
+            return _finalize(kind, best)
+        return _finalize(kind, fallback) if is_trusted_hotel_detail_url(fallback) else ""
     if fallback and "trip.com" in fallback.lower():
         candidates.append(fallback)
     if not candidates:
@@ -115,7 +232,16 @@ def pick_booking_url(urls: list[str], kind: str, fallback: str = "") -> str:
     best = max(candidates, key=lambda u: score_booking_url(u, kind))
     if score_booking_url(best, kind) < 0:
         return ensure_locale_curr(fallback) if fallback else ""
-    return ensure_locale_curr(normalize_trip_url(best))
+    return _finalize(kind, best)
+
+
+def _finalize(kind: str, url: str) -> str:
+    if not url:
+        return ""
+    if kind == "hotel" and is_hotel_detail_url(url):
+        cleaned = canonicalize_hotel_detail_url(url)
+        return cleaned or ensure_locale_curr(normalize_trip_url(url))
+    return ensure_locale_curr(normalize_trip_url(url))
 
 
 def ensure_locale_curr(url: str) -> str:
@@ -123,6 +249,9 @@ def ensure_locale_curr(url: str) -> str:
     norm = normalize_trip_url(url)
     if not norm or "trip.com" not in norm.lower():
         return norm
+    if is_hotel_detail_url(norm):
+        cleaned = canonicalize_hotel_detail_url(norm)
+        return cleaned or norm
     parsed = urlparse(norm)
     qs = parse_qs(parsed.query, keep_blank_values=True)
     flat: dict[str, str] = {k: v[0] for k, v in qs.items() if v}
@@ -224,6 +353,16 @@ def extract_booking_urls(text: str) -> dict[str, str]:
         if score_booking_url(url, "hotel") >= score_booking_url(out["hotel"], "hotel"):
             out["hotel"] = url
 
+    for m in _HOTEL_DETAIL_RE.finditer(text):
+        url = _finalize("hotel", m.group(1).rstrip(".,;"))
+        if url and score_booking_url(url, "hotel") >= score_booking_url(
+            out["hotel"], "hotel"
+        ):
+            out["hotel"] = url
+
+    if out["hotel"] and not is_trusted_hotel_detail_url(out["hotel"]):
+        out["hotel"] = ""
+
     return out
 
 
@@ -239,9 +378,19 @@ def resolve_booking_url(
     built_url = ensure_locale_curr(built_url) if built_url else ""
     parsed_url = ensure_locale_curr(parsed_url) if parsed_url else ""
 
-    if kind == "hotel" and built_url and "/hotels/list" in built_url.lower():
-        if not _has_numeric_city(built_url):
-            built_url = ""
+    if kind == "hotel":
+        for cand in (tool_url, parsed_url):
+            if is_trusted_hotel_detail_url(cand):
+                return _finalize(
+                    "hotel",
+                    canonicalize_hotel_detail_url(cand) or cand,
+                )
+        best = pick_booking_url(
+            [u for u in (tool_url, parsed_url) if u],
+            "hotel",
+            fallback="",
+        )
+        return best
 
     if tool_url and score_booking_url(tool_url, kind) >= 50:
         return tool_url
@@ -253,3 +402,40 @@ def resolve_booking_url(
         fallback=built_url,
     )
     return best or built_url
+
+
+def fetch_hotel_detail_link(
+    browser: object,
+    *,
+    city: str,
+    checkin: str,
+    checkout: str,
+    adults: int = 2,
+) -> dict[str, str]:
+    """Scrape a trusted hotel detail URL from Trip.com (must run on browser thread)."""
+    search = getattr(browser, "search_hotels", None)
+    if not search:
+        return {"url": "", "name": ""}
+
+    text = search(city, checkin=checkin, checkout=checkout, adults=adults)
+    found = extract_booking_urls(text)
+    url = found.get("hotel", "")
+    if not is_trusted_hotel_detail_url(url):
+        for m in _HOTEL_DETAIL_RE.finditer(text or ""):
+            cand = _finalize("hotel", m.group(1).rstrip(".,;"))
+            if is_trusted_hotel_detail_url(cand):
+                url = cand
+                break
+    if url:
+        url = canonicalize_hotel_detail_url(
+            url, checkin=checkin, checkout=checkout, city=city
+        )
+
+    name = ""
+    m = re.search(r"(?im)^[\-\*\u2022]?\s*hotel\s*[:\-]\s*(.+)$", text or "")
+    if m:
+        candidate = m.group(1).strip()
+        if candidate and "http" not in candidate.lower() and len(candidate) < 80:
+            name = candidate
+
+    return {"url": url, "name": name}

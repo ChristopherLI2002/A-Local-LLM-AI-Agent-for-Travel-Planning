@@ -9,7 +9,7 @@ import ollama
 
 from travel_agent.browser_tools import TOOL_DEFINITIONS, TripBrowser, dispatch_tool
 from travel_agent.config import settings
-from travel_agent.trip_urls import extract_booking_urls
+from travel_agent.trip_urls import extract_booking_urls, is_trusted_hotel_detail_url, score_booking_url
 
 SYSTEM_PROMPT = """You are Voyage — a Trip.Planner-style AI travel concierge for Trip.com Hong Kong (hk.trip.com, HKD).
 
@@ -26,12 +26,12 @@ Output rules (plain text, no HTML):
 1) Start with "Recommended flight" including airline, from/to airports, depart/arrive times,
    duration, stops, baggage if known, HKD price, and exact hk.trip.com URL
 2) Then "Recommended hotel" with hotel name, stars, score/reviews, location, features,
-   room/beds, nightly + total HKD, and exact hk.trip.com URL
+   room/beds, nightly + total HKD, and exact hk.trip.com hotel DETAIL URL (/hotels/detail/?hotelId=...)
 3) Then "Day-by-day itinerary" with "Day 1:", "Day 2:", ... shaped by travel style
 4) End with "Budget snapshot"
 
 Hard rules:
-- Prefer Canonical search URL / Flight search URL / Hotel search URL from tools.
+- Prefer Recommended hotel detail link / Hotel option link from tools (not list/search URLs).
 - NEVER invent www.trip.com generic /search URLs or fake prices.
 - Only use https://hk.trip.com/... links that appear in tool results.
 - Round-trip flights; hotel stay matches full trip length.
@@ -55,7 +55,7 @@ class TravelAgent:
         ]
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
-        self.booking_links: dict[str, str] = {"flight": "", "hotel": ""}
+        self.booking_links: dict[str, str] = {"flight": "", "hotel": "", "hotel_name": ""}
 
     def start(self) -> None:
         self.browser.start()
@@ -65,11 +65,11 @@ class TravelAgent:
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        self.booking_links = {"flight": "", "hotel": ""}
+        self.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
 
     def chat(self, user_message: str) -> str:
         self.messages.append({"role": "user", "content": user_message})
-        self.booking_links = {"flight": "", "hotel": ""}
+        self.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
 
         for _ in range(settings.max_tool_rounds):
             response = self.client.chat(
@@ -105,7 +105,14 @@ class TravelAgent:
                 if found.get("flight"):
                     self.booking_links["flight"] = found["flight"]
                 if found.get("hotel"):
-                    self.booking_links["hotel"] = found["hotel"]
+                    new_h = found["hotel"]
+                    old_h = self.booking_links.get("hotel", "")
+                    if is_trusted_hotel_detail_url(new_h):
+                        if not is_trusted_hotel_detail_url(old_h) or (
+                            score_booking_url(new_h, "hotel")
+                            >= score_booking_url(old_h, "hotel")
+                        ):
+                            self.booking_links["hotel"] = new_h
 
                 if self.on_tool_end:
                     preview = result if len(result) <= 500 else result[:500] + "..."
