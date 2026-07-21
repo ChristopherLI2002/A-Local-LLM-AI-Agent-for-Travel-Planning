@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from travel_agent.config import settings
 from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
+from travel_agent.airline_names import is_plausible_airline_name
 
 _TRIP_HOST_RE = re.compile(
     r"^(?:www|hk|us|uk|jp|sg|kr|tw|de|fr|es|it|au|my|th|vn|ph|id)\.trip\.com$",
@@ -396,6 +397,8 @@ def extract_booking_urls(text: str) -> dict[str, str]:
             m = re.search(key, block)
             if m:
                 val = m.group(1).strip()
+                if dest == "flight_airline" and not is_plausible_airline_name(val):
+                    continue
                 if val and "night" not in val.lower():
                     out[dest] = val
 
@@ -435,6 +438,12 @@ def extract_booking_urls(text: str) -> dict[str, str]:
         fopt = re.search(r"(?im)^-\s*Option seen:\s*(.+)$", flight_section.group(1))
         if fopt:
             out["flight_option"] = fopt.group(1).strip()[:160]
+        if not out.get("flight_airline"):
+            fair = re.search(r"(?im)^-\s*Airline:\s*(.+)$", flight_section.group(1))
+            if fair:
+                cand = fair.group(1).strip()
+                if is_plausible_airline_name(cand):
+                    out["flight_airline"] = cand
 
     hotel_section = re.search(
         r"(?is)RECOMMENDED HOTEL\b(.*?)(?:ALTERNATIVE|Other Trip\.com|=======|$)",
@@ -562,4 +571,65 @@ def fetch_hotel_detail_link(
     ):
         if found.get(key):
             out[key] = found[key]
+    return out
+
+
+def fetch_flight_card(
+    browser: object,
+    *,
+    origin: str,
+    destination: str,
+    depart_date: str,
+    return_date: str = "",
+    adults: int = 1,
+) -> dict[str, str]:
+    """Scrape airline + times for the cheapest listed flight (browser thread)."""
+    scrape = getattr(browser, "_scrape_top_flight_card", None)
+    search = getattr(browser, "search_flights", None)
+    if not scrape or not search:
+        return {}
+
+    origin_code = to_flight_code(origin).upper()
+    dest_code = to_flight_code(destination).upper()
+    text = search(
+        origin=origin,
+        destination=destination,
+        depart_date=depart_date,
+        return_date=return_date or None,
+        trip_type="roundtrip" if return_date else "oneway",
+        adults=adults,
+    )
+    found = extract_booking_urls(text)
+    card = scrape(origin=origin_code, destination=dest_code)
+    out: dict[str, str] = {}
+    url = found.get("flight") or ""
+    if url:
+        out["flight"] = url
+    for src, dest in (
+        (card.get("airline"), "flight_airline"),
+        (card.get("depart_time"), "flight_depart"),
+        (card.get("arrive_time"), "flight_arrive"),
+        (card.get("depart_airport"), "flight_from"),
+        (card.get("arrive_airport"), "flight_to"),
+        (card.get("duration"), "flight_duration"),
+        (card.get("stops"), "flight_stops"),
+        (card.get("price_label"), "flight_price"),
+    ):
+        if src and (dest != "flight_airline" or is_plausible_airline_name(str(src))):
+            out[dest] = str(src)
+    for key in (
+        "flight_airline",
+        "flight_depart",
+        "flight_arrive",
+        "flight_from",
+        "flight_to",
+        "flight_duration",
+        "flight_stops",
+        "flight_price",
+    ):
+        if found.get(key) and key not in out:
+            val = found[key]
+            if key == "flight_airline" and not is_plausible_airline_name(val):
+                continue
+            out[key] = val
     return out

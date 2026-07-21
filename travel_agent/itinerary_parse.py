@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from travel_agent.trip_urls import pick_booking_url
+from travel_agent.airline_names import _AIRLINE_RE, is_plausible_airline_name
 
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
@@ -19,16 +20,6 @@ _AIRPORT_RE = re.compile(r"\b([A-Z]{3})\b(?:\s*(T\d+))?")
 _PRICE_RE = re.compile(
     r"(?:HK\s*\$|HKD\s*)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+)",
     re.I,
-)
-_AIRLINE_RE = re.compile(
-    r"(?i)\b("
-    r"Greater Bay Airlines|Cathay Pacific|Hong Kong Airlines|China Airlines|"
-    r"EVA Air|Japan Airlines|ANA|All Nippon|Singapore Airlines|Thai Airways|"
-    r"Korean Air|Asiana|Peach|Scoot|Jetstar|Emirates|Qatar Airways|"
-    r"Air France|KLM|Lufthansa|British Airways|Finnair|Turkish Airlines|"
-    r"Air China|China Eastern|China Southern|Hainan Airlines|HK Express|"
-    r"CX|HB|UO"
-    r")\b"
 )
 
 
@@ -129,6 +120,23 @@ def parse_flight_offer(text: str, fallback_url: str = "") -> FlightOffer:
             "CX": "Cathay Pacific",
             "HB": "Greater Bay Airlines",
             "UO": "HK Express",
+            "AF": "Air France",
+            "KL": "KLM",
+            "SQ": "Singapore Airlines",
+            "NH": "ANA",
+            "JL": "Japan Airlines",
+            "CI": "China Airlines",
+            "BR": "EVA Air",
+            "MU": "China Eastern",
+            "CZ": "China Southern",
+            "CA": "Air China",
+            "EK": "Emirates",
+            "QR": "Qatar Airways",
+            "TK": "Turkish Airlines",
+            "AY": "Finnair",
+            "TG": "Thai Airways",
+            "KE": "Korean Air",
+            "OZ": "Asiana",
         }
         offer.airline = code_map.get(offer.airline.upper(), offer.airline)
 
@@ -210,6 +218,9 @@ def parse_flight_offer(text: str, fallback_url: str = "") -> FlightOffer:
         offer.trip_label = "One-way"
     else:
         offer.trip_label = "Return"
+
+    if not is_plausible_airline_name(offer.airline):
+        offer.airline = ""
 
     if not offer.airline:
         offer.airline = "Trip.com fare"

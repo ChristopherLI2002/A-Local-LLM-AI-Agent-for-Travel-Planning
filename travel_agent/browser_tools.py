@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
 from travel_agent.config import settings
+from travel_agent.airline_names import expand_airline_code, is_plausible_airline_name
 from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
 from travel_agent.pricing import (
     format_comparison_table,
@@ -83,6 +84,146 @@ def _clean_text(text: str, limit: int = 6000) -> str:
     if len(text) > limit:
         return text[:limit] + "\n\n[...truncated...]"
     return text
+
+
+_TIME_LINE_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+_AIRPORT_LINE_RE = re.compile(r"^[A-Z]{3}$")
+_DURATION_LINE_RE = re.compile(
+    r"^\d+\s*h(?:ours?)?(?:\s*\d+\s*m(?:ins?)?)?|\d+h\s*\d+m",
+    re.I,
+)
+_FLIGHT_ROW_SKIP = frozenset(
+    {
+        "recommended",
+        "cheapest",
+        "direct first",
+        "sort by",
+        "return",
+        "select",
+        "create price alert",
+        "show more",
+        "alliance",
+        "airlines",
+        "times",
+        "duration",
+        "stops",
+        "airports",
+        "cabin",
+        "economy",
+        "business",
+        "first",
+        "any",
+        "direct",
+        "<9 left",
+        "cheapest direct",
+    }
+)
+
+
+def _is_filter_time(time_str: str) -> bool:
+    """Sidebar filter placeholders — not real flight clock times."""
+    return time_str in {"00:00", "24:00"}
+
+
+def parse_trip_com_flight_rows(
+    body: str,
+    *,
+    origin: str = "",
+    destination: str = "",
+) -> list[dict[str, str]]:
+    """Parse Trip.com flight result rows from visible page text."""
+    lines = [ln.strip() for ln in (body or "").splitlines()]
+    start = 0
+    for i, ln in enumerate(lines):
+        if re.search(r"\d+\s+flights found", ln, re.I) or re.search(
+            r"Departures to\b", ln, re.I
+        ):
+            start = i
+            break
+
+    rows: list[dict[str, str]] = []
+    i = start
+    while i < len(lines) - 5:
+        ln = lines[i]
+        low = ln.lower()
+        if (
+            not ln
+            or low in _FLIGHT_ROW_SKIP
+            or ln.startswith("HK$")
+            or ln.startswith("<")
+            or re.match(r"^\+?\d+$", ln)
+        ):
+            i += 1
+            continue
+        if (
+            i + 2 < len(lines)
+            and _TIME_LINE_RE.match(lines[i + 1])
+            and not _is_filter_time(lines[i + 1])
+            and _AIRPORT_LINE_RE.match(lines[i + 2])
+        ):
+            airline = expand_airline_code(ln)
+            if not is_plausible_airline_name(airline):
+                i += 1
+                continue
+            dep = lines[i + 1]
+            from_ap = lines[i + 2]
+            duration = ""
+            stops = "Direct"
+            arr = ""
+            to_ap = ""
+            price = ""
+            j = i + 3
+            while j < len(lines) and j < i + 16:
+                cur = lines[j]
+                if cur.startswith("HK$"):
+                    price = cur.replace(" ", "")
+                    break
+                if _DURATION_LINE_RE.match(cur) and not duration:
+                    duration = re.sub(r"\s+", " ", cur).strip()
+                elif re.search(r"(?i)\bdirect\b", cur):
+                    stops = "Direct"
+                elif re.search(r"(?i)\d+\s*stop", cur):
+                    stop_m = re.search(r"(?i)(\d+)\s*stop", cur)
+                    stops = f"{stop_m.group(1)} stop" if stop_m else "1 stop"
+                elif " in " in cur.lower() and "stop" not in stops.lower():
+                    stops = "1 stop"
+                elif _TIME_LINE_RE.match(cur) and not _is_filter_time(cur) and not arr:
+                    arr = cur
+                elif _AIRPORT_LINE_RE.match(cur) and arr and not to_ap:
+                    to_ap = cur
+                j += 1
+            if arr and dep:
+                rows.append(
+                    {
+                        "airline": airline,
+                        "depart_time": dep,
+                        "arrive_time": arr,
+                        "depart_airport": from_ap or origin.upper(),
+                        "arrive_airport": to_ap or destination.upper(),
+                        "duration": duration,
+                        "stops": stops,
+                        "price_label": price,
+                    }
+                )
+            i = max(i + 1, j)
+            continue
+        i += 1
+    return rows
+
+
+def _pick_flight_row(
+    rows: list[dict[str, str]], *, lowest: float | None = None
+) -> dict[str, str] | None:
+    if not rows:
+        return None
+    priced: list[tuple[dict[str, str], float]] = []
+    for row in rows:
+        prices = parse_prices(row.get("price_label", ""))
+        if prices:
+            priced.append((row, prices[0]))
+    if priced:
+        return min(priced, key=lambda x: x[1])[0]
+    return rows[0]
 
 
 class TripBrowser:
@@ -210,13 +351,16 @@ class TripBrowser:
         page.goto(canonical, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         self._dismiss_popups()
-        # Fares hydrate after calendar/API calls — wait until prices appear
-        for _ in range(16):
+        # Fares hydrate after calendar/API calls — wait until listing rows appear
+        for _ in range(24):
             try:
                 probe = page.inner_text("body")
             except Exception:
                 probe = ""
-            if parse_prices(probe) or api_prices:
+            rows = parse_trip_com_flight_rows(
+                probe, origin=origin.upper(), destination=destination.upper()
+            )
+            if rows and (parse_prices(probe) or api_prices):
                 break
             page.wait_for_timeout(1000)
         page.mouse.wheel(0, 1800)
@@ -250,10 +394,11 @@ class TripBrowser:
         )
         card_block = ""
         if card:
+            airline_line = card.get("airline") or ""
             card_block = (
                 "Structured flight card:\n"
-                f"- Airline: {card.get('airline', '')}\n"
-                f"- Depart: {card.get('depart_time', '')}\n"
+                + (f"- Airline: {airline_line}\n" if airline_line else "")
+                + f"- Depart: {card.get('depart_time', '')}\n"
                 f"- Arrive: {card.get('arrive_time', '')}\n"
                 f"- From: {card.get('depart_airport', origin.upper())}\n"
                 f"- To: {card.get('arrive_airport', destination.upper())}\n"
@@ -865,17 +1010,31 @@ class TripBrowser:
             flight_snippets = flight_prices.get("snippets") or []
             if flight_snippets:
                 recommended_flight_option = flight_snippets[0]
+            recommended_flight_airline = ""
+            airline_m = re.search(
+                r"(?im)^-\s*Airline:\s*(.+)$",
+                flight_text or "",
+            )
+            if airline_m:
+                cand = airline_m.group(1).strip()
+                if is_plausible_airline_name(cand):
+                    recommended_flight_airline = cand
             if flight_low is not None:
                 transport_lows.append(("flights", float(flight_low)))
             snip_block = (
                 "\n".join(f"  · {s}" for s in flight_snippets[:4])
                 or "  · (option names sparse on page — use ranked prices below)"
             )
+            airline_line = (
+                f"- Airline: {recommended_flight_airline}\n"
+                if recommended_flight_airline
+                else ""
+            )
             sections.append(
                 f"""{n}) FLIGHTS (compared live)
 - Recommended depart date: {recommended_flight_date}
 - Recommended flight link: {recommended_flight_url}
-- Lowest seen for that date: {_fmt_hkd(recommended_flight_price)}
+{airline_line}- Lowest seen for that date: {_fmt_hkd(recommended_flight_price)}
 - Compared outbound dates: {", ".join(date_options)}
 - Best row: {flight_best_label or "see ranking below"}
 - Sample options seen:
@@ -1190,6 +1349,8 @@ class TripBrowser:
             pick_lines.append(
                 f"- Route: {origin} -> {destination} (round-trip)"
             )
+            if recommended_flight_airline:
+                pick_lines.append(f"- Airline: {recommended_flight_airline}")
             pick_lines.append(f"- Depart date: {recommended_flight_date}")
             pick_lines.append(f"- Return date: {return_date}")
             pick_lines.append(f"- Lowest seen: {_fmt_hkd(recommended_flight_price)}")
@@ -1355,7 +1516,7 @@ Transport modes: {", ".join(modes)}
             body = page.inner_text("body")
         except Exception:
             body = ""
-        blob = body[:8000]
+        blob = body[:20000]
         card: dict[str, str] = {
             "airline": "",
             "depart_time": "",
@@ -1366,48 +1527,224 @@ Transport modes: {", ".join(modes)}
             "stops": "Direct",
             "price_label": "",
         }
-        airline_m = re.search(
-            r"(?i)\b("
-            r"Greater Bay Airlines|Cathay Pacific|Hong Kong Airlines|China Airlines|"
-            r"EVA Air|Japan Airlines|ANA|All Nippon|Singapore Airlines|Thai Airways|"
-            r"Korean Air|Asiana|Peach|Scoot|Jetstar|Emirates|Qatar Airways|"
-            r"Air France|KLM|Lufthansa|British Airways|Finnair|Turkish Airlines|"
-            r"Air China|China Eastern|China Southern|Hainan Airlines|HK Express"
-            r")\b",
-            blob,
-        )
-        if airline_m:
-            card["airline"] = airline_m.group(1)
 
-        times = re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", blob)
+        rows = parse_trip_com_flight_rows(
+            blob, origin=origin, destination=destination
+        )
+        picked = _pick_flight_row(rows, lowest=lowest)
+        if picked:
+            card.update({k: v for k, v in picked.items() if v})
+            if lowest is not None and not card.get("price_label"):
+                card["price_label"] = f"HK${lowest:,.0f}"
+            return card
+
+        airline = self._extract_airline_from_text(blob)
+        if not airline:
+            airline = self._extract_airline_from_dom()
+        if airline and not self._is_alliance_or_junk(airline):
+            card["airline"] = airline
+
+        # Prefer times near the first priced result block (skip filter sidebar)
+        result_chunk = blob
+        for m in re.finditer(r"(?i)HK\s*\$\s*[0-9,]+", blob):
+            start = max(0, m.start() - 500)
+            end = min(len(blob), m.end() + 240)
+            candidate = blob[start:end]
+            if re.search(r"\d+\s+flights found", candidate, re.I):
+                result_chunk = candidate
+                break
+            if "flights found" in blob.lower():
+                idx = blob.lower().find("flights found")
+                result_chunk = blob[idx:]
+                break
+
+        times = [
+            f"{int(h):02d}:{mm}"
+            for h, mm in re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", result_chunk)
+            if f"{int(h):02d}:{mm}" not in {"00:00", "24:00"}
+        ]
+        if len(times) < 2:
+            times = [
+                f"{int(h):02d}:{mm}"
+                for h, mm in re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", blob)
+                if f"{int(h):02d}:{mm}" not in {"00:00", "24:00"}
+            ]
         if len(times) >= 2:
-            card["depart_time"] = f"{int(times[0][0]):02d}:{times[0][1]}"
-            card["arrive_time"] = f"{int(times[1][0]):02d}:{times[1][1]}"
+            card["depart_time"] = times[0]
+            card["arrive_time"] = times[1]
+        else:
+            dep, arr = self._scrape_flight_times_from_dom()
+            if dep and arr:
+                card["depart_time"] = dep
+                card["arrive_time"] = arr
 
         dur_m = re.search(
             r"\b(\d+\s*h(?:ours?)?(?:\s*\d+\s*m(?:ins?)?)?|\d+h\s*\d+m)\b",
-            blob,
+            result_chunk or blob,
             re.I,
         )
         if dur_m and "night" not in dur_m.group(1).lower():
             card["duration"] = re.sub(r"\s+", " ", dur_m.group(1)).strip()
 
-        if re.search(r"(?i)\b\d+\s*stop", blob):
-            stop_m = re.search(r"(?i)(\d+)\s*stop", blob)
+        if re.search(r"(?i)\b\d+\s*stop", result_chunk or blob):
+            stop_m = re.search(r"(?i)(\d+)\s*stop", result_chunk or blob)
             card["stops"] = f"{stop_m.group(1)} stop" if stop_m else "1 stop"
-        elif re.search(r"(?i)\bdirect\b|\bnon[- ]?stop\b", blob):
+        elif re.search(r"(?i)\bdirect\b|\bnon[- ]?stop\b", result_chunk or blob):
             card["stops"] = "Direct"
 
         if lowest is not None:
             card["price_label"] = f"HK${lowest:,.0f}"
-        else:
-            prices = [p for p in parse_prices(blob) if p >= 200]
+        elif not card.get("price_label"):
+            prices = [p for p in parse_prices(result_chunk or blob) if p >= 200]
             if prices:
                 card["price_label"] = f"HK${min(prices):,.0f}"
 
-        if not card["airline"]:
-            card["airline"] = "Trip.com fare"
         return card
+
+    def _extract_airline_from_dom(self) -> str:
+        """Read airline name from logos / labels on the flight results page."""
+        page = self._require_page()
+        candidates: list[str] = []
+
+        # Airline-specific DOM first (avoid QR codes / generic icons)
+        for sel in (
+            "[class*='airline' i] img[alt]",
+            "[class*='Airline' i] img[alt]",
+            "[class*='carrier' i] img[alt]",
+            "[class*='airline' i]",
+            "[class*='Airline' i]",
+            "[aria-label*='Airlines' i]",
+        ):
+            try:
+                loc = page.locator(sel)
+                count = min(loc.count(), 25)
+            except Exception:
+                continue
+            for i in range(count):
+                try:
+                    el = loc.nth(i)
+                    for attr in ("alt", "title", "aria-label"):
+                        raw = (el.get_attribute(attr) or "").strip()
+                        name = self._normalize_airline_name(raw)
+                        if name:
+                            candidates.append(name)
+                    text = (el.inner_text(timeout=300) or "").strip()
+                    name = self._normalize_airline_name(text)
+                    if name:
+                        candidates.append(name)
+                except Exception:
+                    continue
+
+        for name in candidates:
+            if is_plausible_airline_name(name):
+                return name
+        return ""
+
+    def _extract_airline_from_text(self, blob: str) -> str:
+        """Fallback airline detection from visible page text / flight codes."""
+        airline_m = re.search(
+            r"(?i)\b("
+            r"Greater Bay Airlines|Cathay Pacific|Hong Kong Airlines|China Airlines|"
+            r"EVA Air|Japan Airlines|All Nippon Airways|All Nippon|ANA|"
+            r"Singapore Airlines|Thai Airways|Thai AirAsia|AirAsia|"
+            r"Korean Air|Asiana|Peach|Scoot|Jetstar|Emirates|Qatar Airways|"
+            r"Air France|KLM|Lufthansa|British Airways|Finnair|Turkish Airlines|"
+            r"Air China|China Eastern|China Southern|Hainan Airlines|HK Express|"
+            r"Virgin Atlantic|Etihad|Swiss International|Swiss|Austrian|"
+            r"Iberia|Delta Air Lines|Delta|United Airlines|American Airlines|"
+            r"Qantas|Vietnam Airlines|Philippine Airlines|Malaysia Airlines|"
+            r"Cebu Pacific"
+            r")\b",
+            blob or "",
+        )
+        if airline_m:
+            name = self._normalize_airline_name(airline_m.group(1)) or airline_m.group(1)
+            if is_plausible_airline_name(name):
+                return name
+
+        # Flight number like CX 880 / AF187
+        code_map = {
+            "CX": "Cathay Pacific",
+            "KA": "Hong Kong Airlines",
+            "HX": "Hong Kong Airlines",
+            "UO": "HK Express",
+            "HB": "Greater Bay Airlines",
+            "AF": "Air France",
+            "KL": "KLM",
+            "LH": "Lufthansa",
+            "BA": "British Airways",
+            "SQ": "Singapore Airlines",
+            "NH": "ANA",
+            "JL": "Japan Airlines",
+            "CI": "China Airlines",
+            "BR": "EVA Air",
+            "MU": "China Eastern",
+            "CZ": "China Southern",
+            "CA": "Air China",
+            "EK": "Emirates",
+            "QR": "Qatar Airways",
+            "TK": "Turkish Airlines",
+            "AY": "Finnair",
+            "TG": "Thai Airways",
+            "KE": "Korean Air",
+            "OZ": "Asiana",
+        }
+        code_m = re.search(
+            r"\b(" + "|".join(code_map.keys()) + r")\s?-?\s?\d{2,4}\b",
+            blob or "",
+            re.I,
+        )
+        if code_m:
+            return code_map[code_m.group(1).upper()]
+        return ""
+
+    @staticmethod
+    def _is_alliance_or_junk(name: str) -> bool:
+        return not is_plausible_airline_name(name)
+
+    @staticmethod
+    def _normalize_airline_name(raw: str) -> str:
+        text = re.sub(r"\s+", " ", (raw or "").strip())
+        if not text or len(text) < 2 or len(text) > 60:
+            return ""
+        expanded = expand_airline_code(text)
+        if expanded != text:
+            text = expanded
+        if not is_plausible_airline_name(text):
+            return ""
+        return text
+
+    def _scrape_flight_times_from_dom(self) -> tuple[str, str]:
+        """Pull the first departure/arrival clock times from result cards."""
+        page = self._require_page()
+        times: list[str] = []
+        selectors = (
+            "[class*='time' i]",
+            "[class*='Time' i]",
+            "[class*='depart' i]",
+            "[class*='arrive' i]",
+            "[class*='flight' i]",
+        )
+        for sel in selectors:
+            try:
+                loc = page.locator(sel)
+                count = min(loc.count(), 40)
+            except Exception:
+                continue
+            for i in range(count):
+                try:
+                    text = (loc.nth(i).inner_text(timeout=300) or "").strip()
+                except Exception:
+                    continue
+                for m in re.finditer(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text):
+                    t = f"{int(m.group(1)):02d}:{m.group(2)}"
+                    if t in {"00:00", "24:00"}:
+                        continue
+                    if t not in times:
+                        times.append(t)
+                if len(times) >= 2:
+                    return times[0], times[1]
+        return "", ""
 
     def _scrape_top_hotel_card(
         self,

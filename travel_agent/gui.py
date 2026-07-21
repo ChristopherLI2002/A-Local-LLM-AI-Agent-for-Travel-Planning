@@ -16,12 +16,14 @@ from tkinter import messagebox, scrolledtext
 
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
+from travel_agent.airline_names import is_plausible_airline_name
 from travel_agent.itinerary_parse import FlightOffer, HotelOffer, ParsedItinerary, parse_itinerary
 from travel_agent.places import to_flight_code, to_hotel_city
 from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
 from travel_agent.trip_urls import (
     build_flight_search_url,
     build_hotel_list_url,
+    fetch_flight_card,
     fetch_hotel_detail_link,
     is_trusted_hotel_detail_url,
     resolve_booking_url,
@@ -1356,6 +1358,21 @@ class TravelAgentApp(tk.Tk):
                         checkout=checkout,
                     )
                     self._merge_live_hotel(live)
+            links = self.agent.booking_links
+            sparse_flight = (
+                not is_plausible_airline_name(links.get("flight_airline", ""))
+                or not links.get("flight_depart")
+                or not links.get("flight_arrive")
+            )
+            if sparse_flight and ctx.get("origin") and ctx.get("destination"):
+                live_flight = fetch_flight_card(
+                    self.agent.browser,
+                    origin=ctx["origin"],
+                    destination=ctx["destination"],
+                    depart_date=ctx["depart_date"],
+                    return_date=ctx.get("return_date") or checkout,
+                )
+                self._merge_live_flight(live_flight)
             return answer
 
         self._run_browser_job(
@@ -1380,6 +1397,25 @@ class TravelAgentApp(tk.Tk):
             "hotel_score",
             "hotel_location",
             "hotel_reviews",
+        ):
+            if live.get(key):
+                self.agent.booking_links[key] = live[key]
+
+    def _merge_live_flight(self, live: dict[str, str]) -> None:
+        """Copy scraped flight card fields into agent.booking_links."""
+        if not self.agent:
+            return
+        if live.get("flight"):
+            self.agent.booking_links["flight"] = live["flight"]
+        for key in (
+            "flight_airline",
+            "flight_depart",
+            "flight_arrive",
+            "flight_from",
+            "flight_to",
+            "flight_duration",
+            "flight_stops",
+            "flight_price",
         ):
             if live.get(key):
                 self.agent.booking_links[key] = live[key]
@@ -1493,8 +1529,9 @@ class TravelAgentApp(tk.Tk):
 
         if self.agent:
             links = self.agent.booking_links
-            if links.get("flight_airline"):
-                offer.airline = links["flight_airline"]
+            airline = links.get("flight_airline", "")
+            if is_plausible_airline_name(airline):
+                offer.airline = airline
             if links.get("flight_depart"):
                 offer.depart_time = links["flight_depart"]
             if links.get("flight_arrive"):
@@ -1509,13 +1546,11 @@ class TravelAgentApp(tk.Tk):
                 offer.stops = links["flight_stops"]
             if links.get("flight_price"):
                 offer.price_label = links["flight_price"]
-            elif offer.price_label in {"", "See Trip.com"} and links.get("flight_price"):
-                offer.price_label = links["flight_price"]
             if links.get("flight_option") and (
-                offer.airline == "Trip.com fare" or offer.depart_time == "--:--"
+                offer.airline in {"", "Trip.com fare"} or offer.depart_time == "--:--"
             ):
                 opt = parse_flight_offer(links["flight_option"], fallback_url=offer.url)
-                if offer.airline == "Trip.com fare" and opt.airline != "Trip.com fare":
+                if offer.airline in {"", "Trip.com fare"} and is_plausible_airline_name(opt.airline):
                     offer.airline = opt.airline
                 if offer.depart_time == "--:--" and opt.depart_time != "--:--":
                     offer.depart_time = opt.depart_time
@@ -1535,7 +1570,7 @@ class TravelAgentApp(tk.Tk):
         sparse = (
             offer.depart_time == "--:--"
             or offer.arrive_time == "--:--"
-            or offer.airline == "Trip.com fare"
+            or offer.airline in {"", "Trip.com fare"}
             or offer.price_label == "See Trip.com"
         )
         if sparse and parsed.raw:
@@ -1552,7 +1587,7 @@ class TravelAgentApp(tk.Tk):
                 offer.depart_time = alt.depart_time
             if offer.arrive_time == "--:--" and alt.arrive_time != "--:--":
                 offer.arrive_time = alt.arrive_time
-            if offer.airline == "Trip.com fare" and alt.airline != "Trip.com fare":
+            if offer.airline in {"", "Trip.com fare"} and is_plausible_airline_name(alt.airline):
                 offer.airline = alt.airline
             if offer.price_label == "See Trip.com" and alt.price_label != "See Trip.com":
                 offer.price_label = alt.price_label
@@ -1570,6 +1605,12 @@ class TravelAgentApp(tk.Tk):
             offer.depart_airport = origin
         if dest and offer.arrive_airport in {"", "—"}:
             offer.arrive_airport = dest
+        # Friendly label when airline still unknown but we have a live fare
+        if not is_plausible_airline_name(offer.airline) or offer.airline in {"", "Trip.com fare"}:
+            if origin and dest:
+                offer.airline = f"{origin} → {dest} flight"
+            else:
+                offer.airline = "Recommended flight"
         if offer.badge in {"", "Recommended"} and offer.price_label not in {"", "See Trip.com"}:
             offer.badge = "Live Trip.com fare"
 

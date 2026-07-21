@@ -54,6 +54,10 @@ Recommended hotel detail link: https://hk.trip.com/hotels/detail/?hotelId=215130
 def main() -> int:
     found = extract_booking_urls(TOOL_TEXT)
     assert found.get("flight_airline") == "Air France", found
+    junk = extract_booking_urls(
+        "Structured flight card:\n- Airline: qrcode\n- Price: HK$4,990\n"
+    )
+    assert "flight_airline" not in junk, junk
     assert found.get("flight_depart") == "09:15", found
     assert found.get("hotel_name") == "Le Meurice Paris", found
     assert "4,800" in found.get("hotel_price", ""), found
