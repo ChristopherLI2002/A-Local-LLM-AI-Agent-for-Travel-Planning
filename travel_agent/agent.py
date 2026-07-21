@@ -113,6 +113,31 @@ class TravelAgent:
                             >= score_booking_url(old_h, "hotel")
                         ):
                             self.booking_links["hotel"] = new_h
+                if found.get("hotel_name"):
+                    self.booking_links["hotel_name"] = found["hotel_name"]
+                if found.get("flight_price"):
+                    self.booking_links["flight_price"] = found["flight_price"]
+                if found.get("flight_option"):
+                    self.booking_links["flight_option"] = found["flight_option"]
+                if found.get("hotel_price"):
+                    self.booking_links["hotel_price"] = found["hotel_price"]
+                if found.get("hotel_total"):
+                    self.booking_links["hotel_total"] = found["hotel_total"]
+                for key in (
+                    "flight_airline",
+                    "flight_depart",
+                    "flight_arrive",
+                    "flight_from",
+                    "flight_to",
+                    "flight_duration",
+                    "flight_stops",
+                    "hotel_stars",
+                    "hotel_score",
+                    "hotel_location",
+                    "hotel_reviews",
+                ):
+                    if found.get(key):
+                        self.booking_links[key] = found[key]
 
                 if self.on_tool_end:
                     preview = result if len(result) <= 500 else result[:500] + "..."

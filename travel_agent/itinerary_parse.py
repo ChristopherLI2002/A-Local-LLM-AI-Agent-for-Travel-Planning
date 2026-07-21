@@ -153,7 +153,16 @@ def parse_flight_offer(text: str, fallback_url: str = "") -> FlightOffer:
 
     dur_m = _DURATION_RE.search(blob)
     if dur_m and not offer.duration:
-        offer.duration = re.sub(r"\s+", " ", dur_m.group(1)).strip()
+        cand = re.sub(r"\s+", " ", dur_m.group(1)).strip()
+        # Reject hotel-stay phrasing that sometimes leaks into flight blocks
+        if "night" not in cand.lower() and "july" not in cand.lower():
+            offer.duration = cand
+
+    # Labeled duration can also be polluted — re-check
+    if offer.duration and (
+        "night" in offer.duration.lower() or re.search(r"(?i)july|aug|sep|oct|nov|dec", offer.duration)
+    ):
+        offer.duration = ""
 
     route_m = re.search(
         r"\b([A-Z]{3})(?:\s*(T\d+))?\s*(?:→|->|to)\s*([A-Z]{3})(?:\s*(T\d+))?",
@@ -246,15 +255,41 @@ def parse_hotel_offer(text: str, fallback_url: str = "") -> HotelOffer:
         offer.image_url = img.group(1).rstrip(".,;)")
 
     offer.name = _labeled(blob, "hotel", "name", "property")
+    if offer.name and (
+        offer.name.startswith("#")
+        or "day-by-day" in offer.name.lower()
+        or "sample hotel" in offer.name.lower()
+        or "rates range" in offer.name.lower()
+        or "option" in offer.name.lower() and "hotel" in offer.name.lower()
+        or len(offer.name) > 70
+    ):
+        offer.name = ""
     if not offer.name:
         # First non-bullet line that looks like a title
         for line in blob.splitlines():
-            s = line.strip(" -*\t")
+            s = line.strip(" -*\t#")
             if not s or s.lower().startswith(
-                ("link", "price", "check", "room", "location", "feature", "score", "star", "total", "bed")
+                (
+                    "link",
+                    "price",
+                    "check",
+                    "room",
+                    "location",
+                    "feature",
+                    "score",
+                    "star",
+                    "total",
+                    "bed",
+                    "nightly",
+                    "hotel:",
+                )
             ):
                 continue
-            if "http" in s.lower():
+            if "http" in s.lower() or "day-by-day" in s.lower() or "itinerary" in s.lower():
+                continue
+            if "sample hotel" in s.lower() or "rates range" in s.lower():
+                continue
+            if len(s) > 70:
                 continue
             if len(s) > 3:
                 offer.name = s[:80]
@@ -351,47 +386,52 @@ def parse_itinerary(text: str) -> ParsedItinerary:
     raw = text or ""
     result = ParsedItinerary(raw=raw)
 
+    flight_ends = [
+        r"^#{0,6}\s*recommended\s+hotel\b",
+        r"^#{0,6}\s*day-by-day",
+        r"^#{0,6}\s*day\s+\d+",
+        r"^day\s+\d+",
+        r"^budget\b",
+        r"^overview\b",
+        r"^transport\b",
+    ]
+    hotel_ends = [
+        r"^#{0,6}\s*day-by-day",
+        r"^#{0,6}\s*day\s+\d+",
+        r"^day\s+\d+",
+        r"^budget\b",
+        r"^overview\b",
+        r"^transport\b",
+        r"^suggested\s+day",
+    ]
+
     flight_body = _slice_section(
         raw,
-        r"recommended\s+flight\b.*",
-        [
-            r"^recommended\s+hotel\b",
-            r"^day\s+\d+",
-            r"^day-by-day",
-            r"^budget\b",
-            r"^overview\b",
-            r"^transport\b",
-        ],
+        r"^#{0,6}\s*recommended\s+flight\b.*",
+        flight_ends,
     )
-    if not flight_body:
-        flight_body = _slice_section(
-            raw,
-            r"^recommended\s+flight\s*$",
-            [r"^recommended\s+hotel\b", r"^day\s+\d+", r"^budget\b"],
-        )
     if not flight_body:
         flight_body = _slice_section(
             raw,
             r"recommended\s+flight\b",
-            [r"recommended\s+hotel\b", r"^day\s+\d+", r"=======", r"^budget\b"],
+            flight_ends + [r"=======", r"recommended\s+hotel\b"],
         )
 
     hotel_body = _slice_section(
         raw,
-        r"recommended\s+hotel\b.*",
-        [
-            r"^day-by-day",
-            r"^day\s+\d+",
-            r"^budget\b",
-            r"^overview\b",
-            r"^transport\b",
-            r"^suggested\s+day",
-        ],
+        r"^#{0,6}\s*recommended\s+hotel\b.*",
+        hotel_ends,
     )
+    if not hotel_body:
+        hotel_body = _slice_section(
+            raw,
+            r"recommended\s+hotel\b",
+            hotel_ends,
+        )
 
     if flight_body:
         flight_body = re.sub(
-            r"(?i)^recommended\s+flight\s*[:.\-]?\s*", "", flight_body
+            r"(?i)^#{0,6}\s*recommended\s+flight\s*[:.\-]?\s*", "", flight_body
         ).strip()
         urls = [u for u in _urls_in(flight_body) if "trip.com" in u.lower()]
         if not urls:
@@ -410,7 +450,7 @@ def parse_itinerary(text: str) -> ParsedItinerary:
 
     if hotel_body:
         hotel_body = re.sub(
-            r"(?i)^recommended\s+hotel\s*[:.\-]?\s*", "", hotel_body
+            r"(?i)^#{0,6}\s*recommended\s+hotel\s*[:.\-]?\s*", "", hotel_body
         ).strip()
         urls = [u for u in _urls_in(hotel_body) if "trip.com" in u.lower()]
         if not urls:
@@ -431,6 +471,26 @@ def parse_itinerary(text: str) -> ParsedItinerary:
             hotel_body, fallback_url=best or (urls[0] if urls else "")
         )
 
+    # Fallback: LLM skipped headings — still try to fill cards from whole plan
+    if not result.flight_offer:
+        offer = parse_flight_offer(raw)
+        if (
+            offer.airline != "Trip.com fare"
+            or offer.depart_time != "--:--"
+            or offer.price_label != "See Trip.com"
+            or any("flight" in u.lower() for u in _urls_in(raw))
+        ):
+            result.flight_offer = offer
+            result.flight = Block(title="Recommended flight", body=raw[:800], urls=_urls_in(raw))
+
+    if not result.hotel_offer:
+        offer = parse_hotel_offer(raw)
+        if offer.name != "Recommended hotel" or any(
+            "hotel" in u.lower() for u in _urls_in(raw)
+        ):
+            result.hotel_offer = offer
+            result.hotel = Block(title="Recommended hotel", body=raw[:800], urls=_urls_in(raw))
+
     matches = list(_DAY_RE.finditer(raw))
     for i, m in enumerate(matches):
         day_num = m.group(1)
@@ -450,10 +510,10 @@ def parse_itinerary(text: str) -> ParsedItinerary:
 
     budget = _slice_section(
         raw,
-        r"^budget(?:\s+snapshot|\s+breakdown|\s+vs)?\b.*",
+        r"^#{0,6}\s*budget(?:\s+snapshot|\s+breakdown|\s+vs)?\b.*",
         [r"^next\b", r"^book\b", r"^overview\b"],
     )
     if budget:
-        result.budget = re.sub(r"(?i)^budget[^\n]*\n?", "", budget).strip() or budget
+        result.budget = re.sub(r"(?i)^#{0,6}\s*budget[^\n]*\n?", "", budget).strip() or budget
 
     return result

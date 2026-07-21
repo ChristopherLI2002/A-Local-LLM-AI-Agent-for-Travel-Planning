@@ -27,6 +27,10 @@ _HOTEL_DETAIL_RE = re.compile(
     r"(?:Hotel option link|Recommended hotel detail link|Hotel detail link):\s*(\S+)",
     re.I,
 )
+_HOTEL_NAME_RE = re.compile(
+    r"(?:Recommended hotel name|Hotel name)\s*:\s*(.+)$",
+    re.I | re.M,
+)
 _FAKE_HOTEL_IDS = frozenset(
     {
         "123456",
@@ -327,7 +331,7 @@ def build_hotel_list_url(
 
 def extract_booking_urls(text: str) -> dict[str, str]:
     """Pull flight/hotel booking URLs from plan_trip or search tool output."""
-    out = {"flight": "", "hotel": ""}
+    out = {"flight": "", "hotel": "", "hotel_name": ""}
     if not text:
         return out
 
@@ -359,6 +363,109 @@ def extract_booking_urls(text: str) -> dict[str, str]:
             out["hotel"], "hotel"
         ):
             out["hotel"] = url
+
+    name_m = _HOTEL_NAME_RE.search(text)
+    if name_m:
+        name = name_m.group(1).strip().strip("·-|")
+        if (
+            name
+            and "http" not in name.lower()
+            and len(name) < 90
+            and "sample hotel" not in name.lower()
+            and "rates range" not in name.lower()
+        ):
+            out["hotel_name"] = name
+
+    # Structured cards emitted by search_flights / search_hotels
+    flight_card = re.search(
+        r"(?is)Structured flight card:\s*(.*?)(?:\n\n|Structured hotel|Canonical|City/keyword|Hotel search|Flight search|$)",
+        text,
+    )
+    if flight_card:
+        block = flight_card.group(1)
+        for key, dest in (
+            (r"(?im)^-\s*Airline:\s*(.+)$", "flight_airline"),
+            (r"(?im)^-\s*Depart:\s*([0-2]?\d:[0-5]\d)", "flight_depart"),
+            (r"(?im)^-\s*Arrive:\s*([0-2]?\d:[0-5]\d)", "flight_arrive"),
+            (r"(?im)^-\s*From:\s*(.+)$", "flight_from"),
+            (r"(?im)^-\s*To:\s*(.+)$", "flight_to"),
+            (r"(?im)^-\s*Duration:\s*(.+)$", "flight_duration"),
+            (r"(?im)^-\s*Stops:\s*(.+)$", "flight_stops"),
+            (r"(?im)^-\s*Price:\s*(.+)$", "flight_price"),
+        ):
+            m = re.search(key, block)
+            if m:
+                val = m.group(1).strip()
+                if val and "night" not in val.lower():
+                    out[dest] = val
+
+    hotel_card = re.search(
+        r"(?is)Structured hotel card:\s*(.*?)(?:\n\n|City/keyword|Canonical|Hotel search|Structured flight|$)",
+        text,
+    )
+    if hotel_card:
+        block = hotel_card.group(1)
+        for key, dest in (
+            (r"(?im)^-\s*Hotel:\s*(.+)$", "hotel_name"),
+            (r"(?im)^-\s*Stars:\s*(\d)", "hotel_stars"),
+            (r"(?im)^-\s*Score:\s*(.+)$", "hotel_score"),
+            (r"(?im)^-\s*Location:\s*(.+)$", "hotel_location"),
+            (r"(?im)^-\s*Nightly:\s*(.+)$", "hotel_price"),
+            (r"(?im)^-\s*Reviews:\s*(.+)$", "hotel_reviews"),
+        ):
+            m = re.search(key, block)
+            if m:
+                val = m.group(1).strip()
+                if dest == "hotel_name" and (
+                    "sample hotel" in val.lower() or "rates range" in val.lower()
+                ):
+                    continue
+                if val:
+                    out[dest] = val
+
+    fp = re.search(r"(?i)Lowest seen[^\n]*?HK\s*\$?\s*([0-9,]+(?:\.[0-9]+)?)", text)
+    if fp and not out.get("flight_price"):
+        out["flight_price"] = f"HK${fp.group(1)}"
+    # Prefer Option seen under RECOMMENDED FLIGHT (first match before hotel section)
+    flight_section = re.search(
+        r"(?is)RECOMMENDED FLIGHT\b(.*?)(?:RECOMMENDED HOTEL\b|$)",
+        text,
+    )
+    if flight_section:
+        fopt = re.search(r"(?im)^-\s*Option seen:\s*(.+)$", flight_section.group(1))
+        if fopt:
+            out["flight_option"] = fopt.group(1).strip()[:160]
+
+    hotel_section = re.search(
+        r"(?is)RECOMMENDED HOTEL\b(.*?)(?:ALTERNATIVE|Other Trip\.com|=======|$)",
+        text,
+    )
+    if hotel_section:
+        hp = re.search(
+            r"(?i)Lowest nightly[^\n]*?HK\s*\$?\s*([0-9,]+(?:\.[0-9]+)?)",
+            hotel_section.group(1),
+        )
+        if hp and not out.get("hotel_price"):
+            out["hotel_price"] = f"HK${hp.group(1)}"
+        ht = re.search(
+            r"(?i)Est\.?\s*stay total[^\n]*?HK\s*\$?\s*([0-9,]+(?:\.[0-9]+)?)",
+            hotel_section.group(1),
+        )
+        if ht:
+            out["hotel_total"] = f"HK${ht.group(1)}"
+        if not out.get("hotel_name"):
+            hopt = re.search(r"(?im)^-\s*Option seen:\s*(.+)$", hotel_section.group(1))
+            if hopt:
+                cand = hopt.group(1).strip()
+                if cand and "http" not in cand.lower() and "sample" not in cand.lower():
+                    # Often "Name — HK$..." style snippets
+                    name_part = re.split(r"\s+[—\-]\s+|:\s*", cand)[0].strip()
+                    if (
+                        3 < len(name_part) < 90
+                        and "rate" not in name_part.lower()
+                        and "sample" not in name_part.lower()
+                    ):
+                        out["hotel_name"] = name_part
 
     if out["hotel"] and not is_trusted_hotel_detail_url(out["hotel"]):
         out["hotel"] = ""
@@ -431,11 +538,28 @@ def fetch_hotel_detail_link(
             url, checkin=checkin, checkout=checkout, city=city
         )
 
-    name = ""
-    m = re.search(r"(?im)^[\-\*\u2022]?\s*hotel\s*[:\-]\s*(.+)$", text or "")
-    if m:
-        candidate = m.group(1).strip()
-        if candidate and "http" not in candidate.lower() and len(candidate) < 80:
-            name = candidate
+    name = found.get("hotel_name", "")
+    if not name or "sample" in name.lower() or "rates range" in name.lower():
+        name_m = _HOTEL_NAME_RE.search(text or "")
+        if name_m:
+            candidate = name_m.group(1).strip()
+            if (
+                candidate
+                and "http" not in candidate.lower()
+                and len(candidate) < 90
+                and "sample" not in candidate.lower()
+            ):
+                name = candidate
 
-    return {"url": url, "name": name}
+    out = {"url": url, "name": name}
+    for key in (
+        "hotel_price",
+        "hotel_total",
+        "hotel_stars",
+        "hotel_score",
+        "hotel_location",
+        "hotel_reviews",
+    ):
+        if found.get(key):
+            out[key] = found[key]
+    return out

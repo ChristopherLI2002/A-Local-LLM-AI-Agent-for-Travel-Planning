@@ -17,6 +17,7 @@ from tkinter import messagebox, scrolledtext
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
 from travel_agent.itinerary_parse import FlightOffer, HotelOffer, ParsedItinerary, parse_itinerary
+from travel_agent.places import to_flight_code, to_hotel_city
 from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
 from travel_agent.trip_urls import (
     build_flight_search_url,
@@ -1174,7 +1175,12 @@ class TravelAgentApp(tk.Tk):
             )
             self.flight_row.set_offer(offer)
         else:
-            self.flight_row.set_loading("No flight block found in the plan.")
+            # Still show a context-based stub rather than an empty loading row
+            stub = parse_flight_offer(parsed.raw or "")
+            ctx = self._trip_context
+            stub.depart_airport = to_flight_code(ctx.get("origin", "Hong Kong") or "Hong Kong").upper() or "HKG"
+            stub.arrive_airport = to_flight_code(ctx.get("destination", "") or "").upper() or "—"
+            self.flight_row.set_offer(stub)
 
         if parsed.hotel_offer:
             self.hotel_row.set_offer(parsed.hotel_offer)
@@ -1185,7 +1191,12 @@ class TravelAgentApp(tk.Tk):
             )
             self.hotel_row.set_offer(offer)
         else:
-            self.hotel_row.set_loading("No hotel block found in the plan.")
+            stub = parse_hotel_offer(parsed.raw or "")
+            dest = to_hotel_city(self._trip_context.get("destination", "") or "")
+            if dest and stub.name in {"", "Recommended hotel"}:
+                stub.name = f"Hotels in {dest}"
+                stub.location = dest
+            self.hotel_row.set_offer(stub)
 
         self._clear_days()
         if not parsed.days:
@@ -1344,10 +1355,7 @@ class TravelAgentApp(tk.Tk):
                         checkin=ctx["depart_date"],
                         checkout=checkout,
                     )
-                    if live.get("url"):
-                        self.agent.booking_links["hotel"] = live["url"]
-                    if live.get("name"):
-                        self.agent.booking_links["hotel_name"] = live["name"]
+                    self._merge_live_hotel(live)
             return answer
 
         self._run_browser_job(
@@ -1356,6 +1364,25 @@ class TravelAgentApp(tk.Tk):
             on_err=lambda exc: self._apply_plan(f"Error: {exc}"),
             done=lambda: self._set_busy(False),
         )
+
+    def _merge_live_hotel(self, live: dict[str, str]) -> None:
+        """Copy scraped hotel detail fields into agent.booking_links."""
+        if not self.agent:
+            return
+        if live.get("url"):
+            self.agent.booking_links["hotel"] = live["url"]
+        if live.get("name"):
+            self.agent.booking_links["hotel_name"] = live["name"]
+        for key in (
+            "hotel_price",
+            "hotel_total",
+            "hotel_stars",
+            "hotel_score",
+            "hotel_location",
+            "hotel_reviews",
+        ):
+            if live.get(key):
+                self.agent.booking_links[key] = live[key]
 
     def _built_booking_urls(self) -> tuple[str, str]:
         ctx = self._trip_context
@@ -1384,13 +1411,17 @@ class TravelAgentApp(tk.Tk):
         return flight, hotel
 
     def _apply_booking_urls(self, parsed: ParsedItinerary) -> ParsedItinerary:
-        """Override LLM-parsed links with live Trip.com tool URLs."""
+        """Override LLM-parsed links with live Trip.com tool URLs and enrich cards."""
+        from travel_agent.itinerary_parse import parse_flight_offer, parse_hotel_offer
+
         tool_flight = ""
         tool_hotel = ""
+        hotel_name = ""
         if self.agent:
             tool_flight = self.agent.booking_links.get("flight", "")
             tool_hotel = self.agent.booking_links.get("hotel", "")
-        built_flight, built_hotel = self._built_booking_urls()
+            hotel_name = self.agent.booking_links.get("hotel_name", "")
+        built_flight, _built_hotel = self._built_booking_urls()
 
         parsed_flight = ""
         if parsed.flight_offer:
@@ -1420,40 +1451,219 @@ class TravelAgentApp(tk.Tk):
         if parsed.flight_offer:
             parsed.flight_offer.url = flight_url
         elif parsed.flight:
-            from travel_agent.itinerary_parse import parse_flight_offer
-
             parsed.flight_offer = parse_flight_offer(
                 parsed.flight.body,
                 fallback_url=flight_url,
             )
             parsed.flight_offer.url = flight_url
-        elif flight_url:
-            from travel_agent.itinerary_parse import parse_flight_offer
-
-            parsed.flight_offer = parse_flight_offer("", fallback_url=flight_url)
+        elif flight_url or self._trip_context:
+            parsed.flight_offer = parse_flight_offer(
+                parsed.raw or "", fallback_url=flight_url
+            )
+            parsed.flight_offer.url = flight_url
 
         if parsed.hotel_offer:
             parsed.hotel_offer.url = hotel_url
-            if self.agent and self.agent.booking_links.get("hotel_name"):
-                parsed.hotel_offer.name = self.agent.booking_links["hotel_name"]
         elif parsed.hotel:
-            from travel_agent.itinerary_parse import parse_hotel_offer
-
             parsed.hotel_offer = parse_hotel_offer(
                 parsed.hotel.body,
                 fallback_url=hotel_url,
             )
             parsed.hotel_offer.url = hotel_url
-            if self.agent and self.agent.booking_links.get("hotel_name"):
-                parsed.hotel_offer.name = self.agent.booking_links["hotel_name"]
-        elif hotel_url:
-            from travel_agent.itinerary_parse import parse_hotel_offer
+        elif hotel_url or hotel_name or self._trip_context:
+            parsed.hotel_offer = parse_hotel_offer(
+                parsed.raw or "", fallback_url=hotel_url
+            )
+            parsed.hotel_offer.url = hotel_url
 
-            parsed.hotel_offer = parse_hotel_offer("", fallback_url=hotel_url)
-            if self.agent and self.agent.booking_links.get("hotel_name"):
-                parsed.hotel_offer.name = self.agent.booking_links["hotel_name"]
-
+        self._enrich_flight_offer(parsed)
+        self._enrich_hotel_offer(parsed, hotel_name=hotel_name)
         return parsed
+
+    def _enrich_flight_offer(self, parsed: ParsedItinerary) -> None:
+        """Prefer tool-scraped structured flight fields over LLM prose."""
+        from travel_agent.itinerary_parse import parse_flight_offer
+
+        offer = parsed.flight_offer
+        if not offer:
+            return
+        ctx = self._trip_context
+        origin = to_flight_code(ctx.get("origin", "Hong Kong") or "Hong Kong").upper()
+        dest = to_flight_code(ctx.get("destination", "") or "").upper()
+
+        if self.agent:
+            links = self.agent.booking_links
+            if links.get("flight_airline"):
+                offer.airline = links["flight_airline"]
+            if links.get("flight_depart"):
+                offer.depart_time = links["flight_depart"]
+            if links.get("flight_arrive"):
+                offer.arrive_time = links["flight_arrive"]
+            if links.get("flight_from"):
+                offer.depart_airport = links["flight_from"]
+            if links.get("flight_to"):
+                offer.arrive_airport = links["flight_to"]
+            if links.get("flight_duration") and "night" not in links["flight_duration"].lower():
+                offer.duration = links["flight_duration"]
+            if links.get("flight_stops"):
+                offer.stops = links["flight_stops"]
+            if links.get("flight_price"):
+                offer.price_label = links["flight_price"]
+            elif offer.price_label in {"", "See Trip.com"} and links.get("flight_price"):
+                offer.price_label = links["flight_price"]
+            if links.get("flight_option") and (
+                offer.airline == "Trip.com fare" or offer.depart_time == "--:--"
+            ):
+                opt = parse_flight_offer(links["flight_option"], fallback_url=offer.url)
+                if offer.airline == "Trip.com fare" and opt.airline != "Trip.com fare":
+                    offer.airline = opt.airline
+                if offer.depart_time == "--:--" and opt.depart_time != "--:--":
+                    offer.depart_time = opt.depart_time
+                if offer.arrive_time == "--:--" and opt.arrive_time != "--:--":
+                    offer.arrive_time = opt.arrive_time
+                if offer.duration in {"", "—"} and opt.duration not in {"", "—"}:
+                    if "night" not in opt.duration.lower():
+                        offer.duration = opt.duration
+
+        # Never keep hotel-stay phrasing in flight duration
+        if offer.duration and (
+            "night" in offer.duration.lower()
+            or re.search(r"(?i)july|aug|sep|oct|nov|dec", offer.duration)
+        ):
+            offer.duration = "—"
+
+        sparse = (
+            offer.depart_time == "--:--"
+            or offer.arrive_time == "--:--"
+            or offer.airline == "Trip.com fare"
+            or offer.price_label == "See Trip.com"
+        )
+        if sparse and parsed.raw:
+            # Prefer the Recommended flight section only
+            section = ""
+            m = re.search(
+                r"(?is)recommended\s+flight\b(.*?)(?:recommended\s+hotel\b|day-by-day|$)",
+                parsed.raw,
+            )
+            if m:
+                section = m.group(1)
+            alt = parse_flight_offer(section or parsed.raw, fallback_url=offer.url)
+            if offer.depart_time == "--:--" and alt.depart_time != "--:--":
+                offer.depart_time = alt.depart_time
+            if offer.arrive_time == "--:--" and alt.arrive_time != "--:--":
+                offer.arrive_time = alt.arrive_time
+            if offer.airline == "Trip.com fare" and alt.airline != "Trip.com fare":
+                offer.airline = alt.airline
+            if offer.price_label == "See Trip.com" and alt.price_label != "See Trip.com":
+                offer.price_label = alt.price_label
+            if offer.duration in {"", "—"} and alt.duration not in {"", "—"}:
+                if "night" not in alt.duration.lower():
+                    offer.duration = alt.duration
+            if alt.stops and alt.stops != "Direct":
+                offer.stops = alt.stops
+            if alt.depart_airport and alt.depart_airport not in {"", "—"}:
+                offer.depart_airport = alt.depart_airport
+            if alt.arrive_airport and alt.arrive_airport not in {"", "—"}:
+                offer.arrive_airport = alt.arrive_airport
+
+        if origin and offer.depart_airport in {"", "—", "HKG"}:
+            offer.depart_airport = origin
+        if dest and offer.arrive_airport in {"", "—"}:
+            offer.arrive_airport = dest
+        if offer.badge in {"", "Recommended"} and offer.price_label not in {"", "See Trip.com"}:
+            offer.badge = "Live Trip.com fare"
+
+    def _enrich_hotel_offer(self, parsed: ParsedItinerary, *, hotel_name: str = "") -> None:
+        """Prefer tool-scraped hotel name/price/score over LLM prose."""
+        from travel_agent.itinerary_parse import parse_hotel_offer
+
+        offer = parsed.hotel_offer
+        if not offer:
+            return
+        ctx = self._trip_context
+        dest = to_hotel_city(ctx.get("destination", "") or "") or ctx.get("destination", "")
+
+        def _bad_name(name: str) -> bool:
+            low = (name or "").lower()
+            return (
+                not name
+                or name in {"Recommended hotel", "Hotel"}
+                or name.startswith("#")
+                or "day-by-day" in low
+                or "sample hotel" in low
+                or "rates range" in low
+                or ("option" in low and "hotel" in low and len(name) > 40)
+                or len(name) > 70
+            )
+
+        if self.agent:
+            links = self.agent.booking_links
+            if links.get("hotel_name") and not _bad_name(links["hotel_name"]):
+                offer.name = links["hotel_name"]
+            elif hotel_name and not _bad_name(hotel_name):
+                offer.name = hotel_name
+            if links.get("hotel_price"):
+                offer.price_label = links["hotel_price"]
+            if links.get("hotel_total"):
+                offer.total_label = f"Total (incl. taxes & fees): {links['hotel_total']}"
+            if links.get("hotel_location"):
+                offer.location = links["hotel_location"]
+            if links.get("hotel_score"):
+                offer.score = links["hotel_score"]
+                try:
+                    val = float(offer.score)
+                    offer.score_label = (
+                        "Great" if val >= 9 else "Very Good" if val >= 8 else "Good"
+                    )
+                except ValueError:
+                    offer.score_label = "Guest rating"
+            if links.get("hotel_stars"):
+                try:
+                    offer.stars = int(links["hotel_stars"])
+                except ValueError:
+                    pass
+            if links.get("hotel_reviews"):
+                offer.reviews = links["hotel_reviews"]
+
+        if _bad_name(offer.name) or offer.price_label == "See Trip.com":
+            section = ""
+            m = re.search(
+                r"(?is)recommended\s+hotel\b(.*?)(?:day-by-day|day\s+\d+|budget|$)",
+                parsed.raw or "",
+            )
+            if m:
+                section = m.group(1)
+            alt = parse_hotel_offer(section or (parsed.raw or ""), fallback_url=offer.url)
+            if _bad_name(offer.name) and not _bad_name(alt.name):
+                offer.name = alt.name
+            if offer.price_label == "See Trip.com" and alt.price_label != "See Trip.com":
+                offer.price_label = alt.price_label
+            if not offer.total_label and alt.total_label:
+                offer.total_label = alt.total_label
+            if offer.location in {"", "See map on Trip.com"} and alt.location not in {
+                "",
+                "See map on Trip.com",
+            }:
+                offer.location = alt.location
+            if offer.room_type == "Standard room" and alt.room_type != "Standard room":
+                offer.room_type = alt.room_type
+            if offer.score in {"", "—"} and alt.score not in {"", "—"}:
+                offer.score = alt.score
+                offer.score_label = alt.score_label
+            if offer.stars <= 0 and alt.stars > 0:
+                offer.stars = alt.stars
+
+        if hotel_name and _bad_name(offer.name) and not _bad_name(hotel_name):
+            offer.name = hotel_name
+
+        if dest and offer.location in {"", "See map on Trip.com"}:
+            offer.location = dest
+        if _bad_name(offer.name):
+            offer.name = f"Hotels in {dest}" if dest else "Recommended hotel"
+        if offer.stars <= 0:
+            offer.stars = 4
+        if not offer.social_proof:
+            offer.social_proof = "Live rates from Trip.com Hong Kong"
 
     def _apply_plan(self, text: str) -> None:
         self._last_plan = text
@@ -1502,10 +1712,7 @@ class TravelAgentApp(tk.Tk):
                         checkin=ctx["depart_date"],
                         checkout=checkout,
                     )
-                    if live.get("url"):
-                        self.agent.booking_links["hotel"] = live["url"]
-                    if live.get("name"):
-                        self.agent.booking_links["hotel_name"] = live["name"]
+                    self._merge_live_hotel(live)
             return answer
 
         self._run_browser_job(

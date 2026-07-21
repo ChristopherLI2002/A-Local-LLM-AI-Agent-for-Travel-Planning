@@ -243,7 +243,24 @@ class TripBrowser:
         # Prefer full body when it has prices (main selector can miss late-loaded fares)
         content = body if prices and len(body) > 200 else snippet
         final_url = page.url if "trip.com" in page.url else canonical
-        content = body if prices and len(body) > 200 else snippet
+        card = self._scrape_top_flight_card(
+            origin=origin.upper(),
+            destination=destination.upper(),
+            lowest=prices[0] if prices else None,
+        )
+        card_block = ""
+        if card:
+            card_block = (
+                "Structured flight card:\n"
+                f"- Airline: {card.get('airline', '')}\n"
+                f"- Depart: {card.get('depart_time', '')}\n"
+                f"- Arrive: {card.get('arrive_time', '')}\n"
+                f"- From: {card.get('depart_airport', origin.upper())}\n"
+                f"- To: {card.get('arrive_airport', destination.upper())}\n"
+                f"- Duration: {card.get('duration', '')}\n"
+                f"- Stops: {card.get('stops', 'Direct')}\n"
+                f"- Price: {card.get('price_label', '')}\n"
+            )
         return _clean_text(
             f"Flight search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
             f"Canonical search URL: {ensure_locale_curr(canonical)}\n"
@@ -253,7 +270,9 @@ class TripBrowser:
             + (f" | Return: {params.get('rdate')}" if is_round else "")
             + f"\nTrip type: {'roundtrip' if is_round else 'oneway'}\n"
             + f"Adults: {adults_n}\n"
-            + f"{price_note}\n\n{content}"
+            + f"{price_note}\n"
+            + (f"{card_block}\n" if card_block else "")
+            + f"\n{content}"
         )
 
     def search_hotels(
@@ -372,7 +391,8 @@ class TripBrowser:
                 canonical = ensure_locale_curr(canonical)
 
         detail_links = []
-        for u in self._extract_detail_links(kinds=("hotel", "hotels"), limit=12):
+        hotel_names: list[str] = []
+        for u, label in self._extract_hotel_detail_options(limit=8):
             nu = normalize_trip_url(u)
             low = nu.lower()
             if "/hotels/" not in low or "all-cities" in low:
@@ -381,15 +401,38 @@ class TripBrowser:
                 r"/hotels/[^/?]+-\d+", low
             ):
                 detail_links.append(ensure_locale_curr(nu))
+                if label and label not in hotel_names:
+                    hotel_names.append(label)
             if len(detail_links) >= 3:
                 break
         details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
         rec_detail = detail_links[0] if detail_links else ""
+        rec_name = hotel_names[0] if hotel_names else ""
+        hotel_card = self._scrape_top_hotel_card(
+            city=city_name,
+            fallback_name=rec_name,
+            lowest=prices[0] if prices else None,
+        )
+        if hotel_card.get("name") and not rec_name:
+            rec_name = hotel_card["name"]
+        card_block = ""
+        if hotel_card:
+            card_block = (
+                "Structured hotel card:\n"
+                f"- Hotel: {hotel_card.get('name', rec_name)}\n"
+                f"- Stars: {hotel_card.get('stars', '')}\n"
+                f"- Score: {hotel_card.get('score', '')}\n"
+                f"- Location: {hotel_card.get('location', city_name)}\n"
+                f"- Nightly: {hotel_card.get('price_label', '')}\n"
+                f"- Reviews: {hotel_card.get('reviews', '')}\n"
+            )
         content = body if prices and len(body) > 400 else snippet
         return _clean_text(
             f"Hotel search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
             f"Canonical search URL: {canonical}\n"
             + (f"Recommended hotel detail link: {rec_detail}\n" if rec_detail else "")
+            + (f"Recommended hotel name: {rec_name}\n" if rec_name else "")
+            + (f"{card_block}" if card_block else "")
             + f"City/keyword: {city_name}"
             + (f" (city id {params.get('city')})" if str(params.get("city", "")).isdigit() else "")
             + f"\nCheck-in: {checkin} | Check-out: {checkout}\n"
@@ -971,16 +1014,32 @@ class TripBrowser:
         hotel_snippets = hotel_prices.get("snippets") or []
         if hotel_snippets:
             recommended_hotel_option = hotel_snippets[0]
-        recommended_hotel_detail_links = [
-            ensure_locale_curr(normalize_trip_url(u))
-            for u in self._extract_detail_links(kinds=("hotel", "hotels"), limit=8)
-            if "/hotels/" in u.lower()
-            and (
-                "hotelid=" in u.lower()
-                or re.search(r"hotel-detail-\d+", u, re.I)
-                or re.search(r"/hotels/[^/?]+-\d+", u)
-            )
-        ][:3]
+        recommended_hotel_detail_links = []
+        recommended_hotel_names: list[str] = []
+        for u, label in self._extract_hotel_detail_options(limit=8):
+            nu = ensure_locale_curr(normalize_trip_url(u))
+            low = nu.lower()
+            if "/hotels/" not in low:
+                continue
+            if not (
+                "hotelid=" in low
+                or re.search(r"hotel-detail-\d+", low, re.I)
+                or re.search(r"/hotels/[^/?]+-\d+", low)
+            ):
+                continue
+            recommended_hotel_detail_links.append(nu)
+            if (
+                label
+                and label not in recommended_hotel_names
+                and "sample" not in label.lower()
+                and "rates range" not in label.lower()
+            ):
+                recommended_hotel_names.append(label)
+            if len(recommended_hotel_detail_links) >= 3:
+                break
+        # Prefer real hotel title over generic price snippets
+        if recommended_hotel_names:
+            recommended_hotel_option = recommended_hotel_names[0]
 
         snip_hotels = (
             "\n".join(f"  · {s}" for s in hotel_snippets[:5])
@@ -990,11 +1049,16 @@ class TripBrowser:
             "\n".join(f"  · {u}" for u in recommended_hotel_detail_links)
             or f"  · {recommended_hotel_url}"
         )
+        name_line = (
+            f"- Recommended hotel name: {recommended_hotel_names[0]}\n"
+            if recommended_hotel_names
+            else ""
+        )
         sections.append(
             f"""{n}) HOTELS (compared live)
 - Recommended check-in: {recommended_hotel_checkin} ({nights} nights)
 - Recommended hotel list link: {recommended_hotel_url}
-- Hotel detail links found:
+{name_line}- Hotel detail links found:
 {detail_block}
 - Lowest nightly seen: {_fmt_hkd(hotel_low)}
 - Est. stay total (lowest x nights): {_fmt_hkd(hotel_total)}
@@ -1277,6 +1341,201 @@ Transport modes: {", ".join(modes)}
         if search_btn.count():
             search_btn.first.click()
             page.wait_for_timeout(3000)
+
+    def _scrape_top_flight_card(
+        self,
+        *,
+        origin: str = "",
+        destination: str = "",
+        lowest: float | None = None,
+    ) -> dict[str, str]:
+        """Best-effort parse of the first visible flight result on the current page."""
+        page = self._require_page()
+        try:
+            body = page.inner_text("body")
+        except Exception:
+            body = ""
+        blob = body[:8000]
+        card: dict[str, str] = {
+            "airline": "",
+            "depart_time": "",
+            "arrive_time": "",
+            "depart_airport": origin or "",
+            "arrive_airport": destination or "",
+            "duration": "",
+            "stops": "Direct",
+            "price_label": "",
+        }
+        airline_m = re.search(
+            r"(?i)\b("
+            r"Greater Bay Airlines|Cathay Pacific|Hong Kong Airlines|China Airlines|"
+            r"EVA Air|Japan Airlines|ANA|All Nippon|Singapore Airlines|Thai Airways|"
+            r"Korean Air|Asiana|Peach|Scoot|Jetstar|Emirates|Qatar Airways|"
+            r"Air France|KLM|Lufthansa|British Airways|Finnair|Turkish Airlines|"
+            r"Air China|China Eastern|China Southern|Hainan Airlines|HK Express"
+            r")\b",
+            blob,
+        )
+        if airline_m:
+            card["airline"] = airline_m.group(1)
+
+        times = re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", blob)
+        if len(times) >= 2:
+            card["depart_time"] = f"{int(times[0][0]):02d}:{times[0][1]}"
+            card["arrive_time"] = f"{int(times[1][0]):02d}:{times[1][1]}"
+
+        dur_m = re.search(
+            r"\b(\d+\s*h(?:ours?)?(?:\s*\d+\s*m(?:ins?)?)?|\d+h\s*\d+m)\b",
+            blob,
+            re.I,
+        )
+        if dur_m and "night" not in dur_m.group(1).lower():
+            card["duration"] = re.sub(r"\s+", " ", dur_m.group(1)).strip()
+
+        if re.search(r"(?i)\b\d+\s*stop", blob):
+            stop_m = re.search(r"(?i)(\d+)\s*stop", blob)
+            card["stops"] = f"{stop_m.group(1)} stop" if stop_m else "1 stop"
+        elif re.search(r"(?i)\bdirect\b|\bnon[- ]?stop\b", blob):
+            card["stops"] = "Direct"
+
+        if lowest is not None:
+            card["price_label"] = f"HK${lowest:,.0f}"
+        else:
+            prices = [p for p in parse_prices(blob) if p >= 200]
+            if prices:
+                card["price_label"] = f"HK${min(prices):,.0f}"
+
+        if not card["airline"]:
+            card["airline"] = "Trip.com fare"
+        return card
+
+    def _scrape_top_hotel_card(
+        self,
+        *,
+        city: str = "",
+        fallback_name: str = "",
+        lowest: float | None = None,
+    ) -> dict[str, str]:
+        """Best-effort parse of the first hotel listing on the current page."""
+        page = self._require_page()
+        try:
+            body = page.inner_text("body")
+        except Exception:
+            body = ""
+        blob = body[:10000]
+        card: dict[str, str] = {
+            "name": fallback_name or "",
+            "stars": "",
+            "score": "",
+            "score_label": "",
+            "reviews": "",
+            "location": city or "",
+            "price_label": "",
+        }
+
+        # Prefer anchor text from detail links
+        if not card["name"] or "sample" in card["name"].lower():
+            for _url, label in self._extract_hotel_detail_options(limit=5):
+                if (
+                    label
+                    and "sample" not in label.lower()
+                    and "rates range" not in label.lower()
+                    and 3 < len(label) < 80
+                ):
+                    card["name"] = label
+                    break
+
+        score_m = re.search(r"\b([89](?:\.\d)?|10(?:\.0)?)\b", blob)
+        if score_m:
+            card["score"] = score_m.group(1)
+            try:
+                val = float(card["score"])
+                card["score_label"] = (
+                    "Great" if val >= 9 else "Very Good" if val >= 8 else "Good"
+                )
+            except ValueError:
+                card["score_label"] = "Guest rating"
+
+        stars_m = re.search(r"(?i)([1-5])\s*[- ]?star", blob)
+        if stars_m:
+            card["stars"] = stars_m.group(1)
+        else:
+            glyphs = blob.count("★") + blob.count("⭐")
+            if 1 <= glyphs <= 5:
+                card["stars"] = str(glyphs)
+
+        rev_m = re.search(r"(?i)(\d[\d,]*)\s*reviews?", blob)
+        if rev_m:
+            card["reviews"] = f"{rev_m.group(1)} reviews"
+
+        if lowest is not None:
+            card["price_label"] = f"HK${lowest:,.0f}"
+        else:
+            prices = [p for p in parse_prices(blob) if p >= 200]
+            if prices:
+                card["price_label"] = f"HK${min(prices):,.0f}"
+
+        if not card["name"] or "sample" in card["name"].lower():
+            card["name"] = f"Hotels in {city}" if city else "Recommended hotel"
+        return card
+
+    def _extract_hotel_detail_options(self, limit: int = 8) -> list[tuple[str, str]]:
+        """Return (url, hotel_name) pairs from hotel list page anchors."""
+        page = self._require_page()
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        try:
+            anchors = page.locator("a[href]")
+            count = min(anchors.count(), 160)
+        except Exception:
+            return found
+
+        for i in range(count):
+            try:
+                a = anchors.nth(i)
+                href = (a.get_attribute("href") or "").strip()
+            except Exception:
+                continue
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = f"{settings.trip_base_url.rstrip('/')}{href}"
+            if "trip.com" not in href.lower():
+                continue
+            href = normalize_trip_url(href)
+            low = href.lower()
+            if "/hotels/" not in low or "all-cities" in low:
+                continue
+            if not (
+                "hotelid=" in low
+                or re.search(r"hotel-detail-\d+", low)
+                or re.search(r"/hotels/[^/?]+-\d+", low)
+            ):
+                continue
+            if href in seen:
+                continue
+            label = ""
+            try:
+                raw_label = (a.inner_text(timeout=500) or "").strip()
+                raw_label = re.sub(r"\s+", " ", raw_label)
+                # Prefer short title-like labels; drop CTA-only text
+                if (
+                    raw_label
+                    and 3 < len(raw_label) < 90
+                    and "http" not in raw_label.lower()
+                    and not re.fullmatch(
+                        r"(?i)(see details?|book|select|view|check availability|>)+",
+                        raw_label,
+                    )
+                ):
+                    label = raw_label
+            except Exception:
+                label = ""
+            seen.add(href)
+            found.append((href, label))
+            if len(found) >= limit:
+                break
+        return found
 
     def _extract_detail_links(
         self,
