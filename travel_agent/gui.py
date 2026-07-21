@@ -338,11 +338,18 @@ class FlightRowCard(tk.Frame):
 
         times = tk.Frame(self.card, bg="#FFFFFF")
         times.pack(fill="x")
-        times.columnconfigure(0, weight=1)
-        times.columnconfigure(1, weight=2)
-        times.columnconfigure(2, weight=1)
+        self.leg_out_lbl = tk.Label(
+            times, text="Outbound", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL, anchor="w"
+        )
+        self.leg_out_lbl.pack(fill="x", pady=(0, 2))
 
-        dep = tk.Frame(times, bg="#FFFFFF")
+        out_row = tk.Frame(times, bg="#FFFFFF")
+        out_row.pack(fill="x")
+        out_row.columnconfigure(0, weight=1)
+        out_row.columnconfigure(1, weight=2)
+        out_row.columnconfigure(2, weight=1)
+
+        dep = tk.Frame(out_row, bg="#FFFFFF")
         dep.grid(row=0, column=0, sticky="w")
         self.dep_time = tk.Label(
             dep, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
@@ -353,7 +360,7 @@ class FlightRowCard(tk.Frame):
         )
         self.dep_airport.pack(anchor="w")
 
-        mid = tk.Frame(times, bg="#FFFFFF")
+        mid = tk.Frame(out_row, bg="#FFFFFF")
         mid.grid(row=0, column=1, sticky="ew", padx=6)
         self.duration = tk.Label(
             mid, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
@@ -367,7 +374,7 @@ class FlightRowCard(tk.Frame):
         self.stops.pack()
         self.path.bind("<Configure>", lambda _e: self._draw_path())
 
-        arr = tk.Frame(times, bg="#FFFFFF")
+        arr = tk.Frame(out_row, bg="#FFFFFF")
         arr.grid(row=0, column=2, sticky="e")
         self.arr_time = tk.Label(
             arr, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
@@ -377,6 +384,69 @@ class FlightRowCard(tk.Frame):
             arr, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
         )
         self.arr_airport.pack(anchor="e")
+
+        self.return_block = tk.Frame(times, bg="#FFFFFF")
+        self.return_block.pack(fill="x", pady=(10, 0))
+        self.leg_ret_lbl = tk.Label(
+            self.return_block,
+            text="Return",
+            bg="#FFFFFF",
+            fg=C["muted"],
+            font=FONT_SMALL,
+            anchor="w",
+        )
+        self.leg_ret_lbl.pack(fill="x", pady=(0, 2))
+        self.return_airline_lbl = tk.Label(
+            self.return_block,
+            text="",
+            bg="#FFFFFF",
+            fg=C["ink"],
+            font=FONT_SMALL,
+            anchor="w",
+        )
+        self.return_airline_lbl.pack(fill="x", pady=(0, 2))
+
+        ret_row = tk.Frame(self.return_block, bg="#FFFFFF")
+        ret_row.pack(fill="x")
+        ret_row.columnconfigure(0, weight=1)
+        ret_row.columnconfigure(1, weight=2)
+        ret_row.columnconfigure(2, weight=1)
+
+        rdep = tk.Frame(ret_row, bg="#FFFFFF")
+        rdep.grid(row=0, column=0, sticky="w")
+        self.ret_dep_time = tk.Label(
+            rdep, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
+        )
+        self.ret_dep_time.pack(anchor="w")
+        self.ret_dep_airport = tk.Label(
+            rdep, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.ret_dep_airport.pack(anchor="w")
+
+        rmid = tk.Frame(ret_row, bg="#FFFFFF")
+        rmid.grid(row=0, column=1, sticky="ew", padx=6)
+        self.ret_duration = tk.Label(
+            rmid, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.ret_duration.pack()
+        self.ret_path = tk.Canvas(rmid, height=14, bg="#FFFFFF", highlightthickness=0)
+        self.ret_path.pack(fill="x", pady=2)
+        self.ret_stops = tk.Label(
+            rmid, text="Direct", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.ret_stops.pack()
+        self.ret_path.bind("<Configure>", lambda _e: self._draw_ret_path())
+
+        rarr = tk.Frame(ret_row, bg="#FFFFFF")
+        rarr.grid(row=0, column=2, sticky="e")
+        self.ret_arr_time = tk.Label(
+            rarr, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
+        )
+        self.ret_arr_time.pack(anchor="e")
+        self.ret_arr_airport = tk.Label(
+            rarr, text="—", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
+        )
+        self.ret_arr_airport.pack(anchor="e")
 
         bottom = tk.Frame(self.card, bg="#FFFFFF")
         bottom.pack(fill="x", pady=(10, 0))
@@ -423,6 +493,14 @@ class FlightRowCard(tk.Frame):
         self.path.create_line(8, y, w - 8, y, fill="#C5CDD6", width=2)
         self.path.create_oval(4, y - 3, 10, y + 3, fill="#C5CDD6", outline="")
         self.path.create_oval(w - 10, y - 3, w - 4, y + 3, fill="#C5CDD6", outline="")
+
+    def _draw_ret_path(self) -> None:
+        self.ret_path.delete("all")
+        w = max(self.ret_path.winfo_width(), 40)
+        y = 7
+        self.ret_path.create_line(8, y, w - 8, y, fill="#C5CDD6", width=2)
+        self.ret_path.create_oval(4, y - 3, 10, y + 3, fill="#C5CDD6", outline="")
+        self.ret_path.create_oval(w - 10, y - 3, w - 4, y + 3, fill="#C5CDD6", outline="")
 
     def _draw_logo(self, initials: str) -> None:
         self._logo_photo = None
@@ -487,6 +565,14 @@ class FlightRowCard(tk.Frame):
         self.arr_airport.configure(text="—")
         self.duration.configure(text="—")
         self.stops.configure(text="—")
+        self.ret_dep_time.configure(text="--:--")
+        self.ret_arr_time.configure(text="--:--")
+        self.ret_dep_airport.configure(text="—")
+        self.ret_arr_airport.configure(text="—")
+        self.ret_duration.configure(text="—")
+        self.ret_stops.configure(text="—")
+        self.return_airline_lbl.configure(text="")
+        self.return_block.pack_forget()
         self.price.configure(text="…")
         self.trip_lbl.configure(text="")
         self._url = ""
@@ -539,6 +625,25 @@ class FlightRowCard(tk.Frame):
         self.trip_lbl.configure(text=offer.trip_label)
         self._url = offer.url
         self.after(30, self._draw_path)
+
+        has_return = bool(offer.return_depart_time and offer.return_depart_time != "--:--")
+        if has_return:
+            if not self.return_block.winfo_ismapped():
+                self.return_block.pack(fill="x", pady=(10, 0))
+            ret_name = offer.return_airline or ""
+            if ret_name and ret_name.lower() != (offer.airline or "").lower():
+                self.return_airline_lbl.configure(text=ret_name)
+            else:
+                self.return_airline_lbl.configure(text="")
+            self.ret_dep_time.configure(text=offer.return_depart_time)
+            self.ret_arr_time.configure(text=offer.return_arrive_time or "--:--")
+            self.ret_dep_airport.configure(text=offer.return_depart_airport or "—")
+            self.ret_arr_airport.configure(text=offer.return_arrive_airport or "—")
+            self.ret_duration.configure(text=offer.return_duration or "—")
+            self.ret_stops.configure(text=offer.return_stops or "Direct")
+            self.after(30, self._draw_ret_path)
+        else:
+            self.return_block.pack_forget()
 
 
 class HotelRowCard(tk.Frame):
@@ -1407,6 +1512,10 @@ class TravelAgentApp(tk.Tk):
                 not is_plausible_airline_name(links.get("flight_airline", ""))
                 or not links.get("flight_depart")
                 or not links.get("flight_arrive")
+                or (
+                    bool(ctx.get("return_date"))
+                    and not links.get("flight_return_depart")
+                )
             )
             if sparse_flight and ctx.get("origin") and ctx.get("destination"):
                 live_flight = fetch_flight_card(
@@ -1461,6 +1570,14 @@ class TravelAgentApp(tk.Tk):
             "flight_stops",
             "flight_price",
             "flight_airline_logo",
+            "flight_return_airline",
+            "flight_return_depart",
+            "flight_return_arrive",
+            "flight_return_from",
+            "flight_return_to",
+            "flight_return_duration",
+            "flight_return_stops",
+            "flight_return_airline_logo",
         ):
             if live.get(key):
                 self.agent.booking_links[key] = live[key]
@@ -1595,6 +1712,26 @@ class TravelAgentApp(tk.Tk):
                 offer.airline_logo = links["flight_airline_logo"]
             elif is_plausible_airline_name(offer.airline):
                 offer.airline_logo = airline_logo_url(offer.airline)
+            if is_plausible_airline_name(links.get("flight_return_airline", "")):
+                offer.return_airline = links["flight_return_airline"]
+            if links.get("flight_return_depart"):
+                offer.return_depart_time = links["flight_return_depart"]
+            if links.get("flight_return_arrive"):
+                offer.return_arrive_time = links["flight_return_arrive"]
+            if links.get("flight_return_from"):
+                offer.return_depart_airport = links["flight_return_from"]
+            if links.get("flight_return_to"):
+                offer.return_arrive_airport = links["flight_return_to"]
+            if links.get("flight_return_duration") and "night" not in links[
+                "flight_return_duration"
+            ].lower():
+                offer.return_duration = links["flight_return_duration"]
+            if links.get("flight_return_stops"):
+                offer.return_stops = links["flight_return_stops"]
+            if links.get("flight_return_airline_logo"):
+                offer.return_airline_logo = links["flight_return_airline_logo"]
+            elif is_plausible_airline_name(offer.return_airline):
+                offer.return_airline_logo = airline_logo_url(offer.return_airline)
             if links.get("flight_option") and (
                 offer.airline in {"", "Trip.com fare"} or offer.depart_time == "--:--"
             ):
@@ -1664,6 +1801,10 @@ class TravelAgentApp(tk.Tk):
             offer.badge = "Live Trip.com fare"
         if is_plausible_airline_name(offer.airline) and not offer.airline_logo:
             offer.airline_logo = airline_logo_url(offer.airline)
+        if offer.return_depart_time:
+            offer.trip_label = "Round-trip"
+            if is_plausible_airline_name(offer.return_airline) and not offer.return_airline_logo:
+                offer.return_airline_logo = airline_logo_url(offer.return_airline)
 
     def _enrich_hotel_offer(self, parsed: ParsedItinerary, *, hotel_name: str = "") -> None:
         """Prefer tool-scraped hotel name/price/score over LLM prose."""

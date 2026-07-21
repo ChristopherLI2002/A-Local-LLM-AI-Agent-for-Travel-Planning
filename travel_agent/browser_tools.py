@@ -134,12 +134,17 @@ def parse_trip_com_flight_rows(
     """Parse Trip.com flight result rows from visible page text."""
     lines = [ln.strip() for ln in (body or "").splitlines()]
     start = 0
+    # Prefer inbound ("Returning to") header when present; else last "flights found"
     for i, ln in enumerate(lines):
-        if re.search(r"\d+\s+flights found", ln, re.I) or re.search(
-            r"Departures to\b", ln, re.I
-        ):
+        if re.search(r"(?i)Returning\s+to\b", ln):
             start = i
             break
+    else:
+        for i, ln in enumerate(lines):
+            if re.search(r"\d+\s+flights found", ln, re.I) or re.search(
+                r"(?i)Departures\s+to\b", ln
+            ):
+                start = i
 
     rows: list[dict[str, str]] = []
     i = start
@@ -152,32 +157,42 @@ def parse_trip_com_flight_rows(
             or ln.startswith("HK$")
             or ln.startswith("<")
             or re.match(r"^\+?\d+$", ln)
+            or re.search(r"(?i)^operated by\b", ln)
+            or re.search(r"(?i)^checked baggage\b", ln)
         ):
             i += 1
             continue
+
+        # Airline may be followed by "Operated by …" before the clock time
+        k = i + 1
+        while k < len(lines) and re.search(r"(?i)^operated by\b", lines[k]):
+            k += 1
         if (
-            i + 2 < len(lines)
-            and _TIME_LINE_RE.match(lines[i + 1])
-            and not _is_filter_time(lines[i + 1])
-            and _AIRPORT_LINE_RE.match(lines[i + 2])
+            k + 1 < len(lines)
+            and _TIME_LINE_RE.match(lines[k])
+            and not _is_filter_time(lines[k])
+            and _AIRPORT_LINE_RE.match(lines[k + 1])
         ):
             airline = expand_airline_code(ln)
             if not is_plausible_airline_name(airline):
                 i += 1
                 continue
-            dep = lines[i + 1]
-            from_ap = lines[i + 2]
+            dep = lines[k]
+            from_ap = lines[k + 1]
             duration = ""
             stops = "Direct"
             arr = ""
             to_ap = ""
             price = ""
-            j = i + 3
-            while j < len(lines) and j < i + 16:
+            j = k + 2
+            while j < len(lines) and j < k + 18:
                 cur = lines[j]
                 if cur.startswith("HK$"):
                     price = cur.replace(" ", "")
                     break
+                if re.search(r"(?i)^operated by\b", cur):
+                    j += 1
+                    continue
                 if _DURATION_LINE_RE.match(cur) and not duration:
                     duration = re.sub(r"\s+", " ", cur).strip()
                 elif re.search(r"(?i)\bdirect\b", cur):
@@ -392,6 +407,21 @@ class TripBrowser:
             destination=destination.upper(),
             lowest=prices[0] if prices else None,
         )
+        if is_round and card.get("depart_time"):
+            ret_card = self._scrape_return_flight_card(
+                outbound=card,
+                origin=destination.upper(),
+                destination=origin.upper(),
+            )
+            if ret_card:
+                for key, val in ret_card.items():
+                    if val:
+                        card[f"return_{key}"] = val
+                # Keep round-trip package price from outbound list when available
+                if card.get("price_label"):
+                    pass
+                elif ret_card.get("price_label"):
+                    card["price_label"] = ret_card["price_label"]
         card_block = ""
         if card:
             airline_line = card.get("airline") or ""
@@ -408,6 +438,18 @@ class TripBrowser:
                 f"- Stops: {card.get('stops', 'Direct')}\n"
                 f"- Price: {card.get('price_label', '')}\n"
             )
+            if card.get("return_depart_time"):
+                card_block += (
+                    f"- Return airline: {card.get('return_airline', '')}\n"
+                    f"- Return depart: {card.get('return_depart_time', '')}\n"
+                    f"- Return arrive: {card.get('return_arrive_time', '')}\n"
+                    f"- Return from: {card.get('return_depart_airport', destination.upper())}\n"
+                    f"- Return to: {card.get('return_arrive_airport', origin.upper())}\n"
+                    f"- Return duration: {card.get('return_duration', '')}\n"
+                    f"- Return stops: {card.get('return_stops', '')}\n"
+                )
+                if card.get("return_airline_logo"):
+                    card_block += f"- Return airline logo: {card['return_airline_logo']}\n"
         return _clean_text(
             f"Flight search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
             f"Canonical search URL: {ensure_locale_curr(canonical)}\n"
@@ -1504,6 +1546,114 @@ Transport modes: {", ".join(modes)}
         if search_btn.count():
             search_btn.first.click()
             page.wait_for_timeout(3000)
+
+    def _click_outbound_select(self, outbound: dict[str, str]) -> bool:
+        """Click the Select control for a specific outbound flight row."""
+        page = self._require_page()
+        dep = (outbound.get("depart_time") or "").strip()
+        airline = (outbound.get("airline") or "").strip()
+        price = (outbound.get("price_label") or "").replace(" ", "")
+        price_digits = re.sub(r"[^\d]", "", price)
+
+        selects = page.get_by_text(re.compile(r"^Select$", re.I))
+        count = min(selects.count(), 40)
+        best_i = -1
+        best_score = -1
+        for i in range(count):
+            el = selects.nth(i)
+            try:
+                if not el.is_visible(timeout=400):
+                    continue
+                blob = el.evaluate(
+                    """(node) => {
+                        let n = node;
+                        for (let k = 0; k < 8 && n; k++) {
+                          n = n.parentElement;
+                          if (!n) break;
+                          const t = (n.innerText || '');
+                          if (t.length > 40 && t.length < 1200) return t;
+                        }
+                        return (node.parentElement && node.parentElement.innerText) || '';
+                    }"""
+                )
+            except Exception:
+                continue
+            text = (blob or "").replace("\xa0", " ")
+            score = 0
+            if dep and dep in text:
+                score += 3
+            if airline and airline.lower() in text.lower():
+                score += 2
+            if price_digits and price_digits in re.sub(r"[^\d]", "", text):
+                score += 2
+            if score > best_score:
+                best_score = score
+                best_i = i
+        if best_i < 0 or best_score < 3:
+            # Fallback: first visible Select in the results list
+            for i in range(count):
+                try:
+                    el = selects.nth(i)
+                    if el.is_visible(timeout=300):
+                        el.click(timeout=4000)
+                        return True
+                except Exception:
+                    continue
+            return False
+        try:
+            selects.nth(best_i).click(timeout=4000)
+            return True
+        except Exception:
+            return False
+
+    def _scrape_return_flight_card(
+        self,
+        *,
+        outbound: dict[str, str],
+        origin: str = "",
+        destination: str = "",
+    ) -> dict[str, str]:
+        """After outbound list, open return options and scrape the cheapest inbound."""
+        page = self._require_page()
+        if not self._click_outbound_select(outbound):
+            return {}
+        # Wait for inbound results page
+        for _ in range(20):
+            page.wait_for_timeout(1000)
+            try:
+                body = page.inner_text("body")
+            except Exception:
+                body = ""
+            if re.search(r"(?i)Returning\s+to\b", body) or (
+                "showfarenext" in (page.url or "").lower()
+                and re.search(r"\d+\s+flights found", body, re.I)
+            ):
+                break
+        self._dismiss_popups()
+        try:
+            body = page.inner_text("body")
+        except Exception:
+            body = ""
+        rows = parse_trip_com_flight_rows(
+            body[:25000], origin=origin, destination=destination
+        )
+        # Prefer inbound rows (arrive back at trip origin / leave destination city)
+        out_from = (outbound.get("depart_airport") or "").upper()
+        filtered = [
+            r
+            for r in rows
+            if (r.get("arrive_airport") or "").upper() == destination.upper()
+            or (
+                out_from
+                and (r.get("depart_airport") or "").upper() != out_from
+            )
+        ] or rows
+        picked = _pick_flight_row(filtered)
+        if not picked:
+            return {}
+        if picked.get("airline") and not picked.get("airline_logo"):
+            picked["airline_logo"] = airline_logo_url(picked["airline"])
+        return picked
 
     def _scrape_top_flight_card(
         self,

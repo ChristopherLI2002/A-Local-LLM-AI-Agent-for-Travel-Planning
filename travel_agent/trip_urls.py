@@ -394,11 +394,19 @@ def extract_booking_urls(text: str) -> dict[str, str]:
             (r"(?im)^-\s*Duration:\s*(.+)$", "flight_duration"),
             (r"(?im)^-\s*Stops:\s*(.+)$", "flight_stops"),
             (r"(?im)^-\s*Price:\s*(.+)$", "flight_price"),
+            (r"(?im)^-\s*Return airline:\s*(.+)$", "flight_return_airline"),
+            (r"(?im)^-\s*Return airline logo:\s*(\S+)", "flight_return_airline_logo"),
+            (r"(?im)^-\s*Return depart:\s*([0-2]?\d:[0-5]\d)", "flight_return_depart"),
+            (r"(?im)^-\s*Return arrive:\s*([0-2]?\d:[0-5]\d)", "flight_return_arrive"),
+            (r"(?im)^-\s*Return from:\s*(.+)$", "flight_return_from"),
+            (r"(?im)^-\s*Return to:\s*(.+)$", "flight_return_to"),
+            (r"(?im)^-\s*Return duration:\s*(.+)$", "flight_return_duration"),
+            (r"(?im)^-\s*Return stops:\s*(.+)$", "flight_return_stops"),
         ):
             m = re.search(key, block)
             if m:
                 val = m.group(1).strip()
-                if dest == "flight_airline" and not is_plausible_airline_name(val):
+                if dest in {"flight_airline", "flight_return_airline"} and not is_plausible_airline_name(val):
                     continue
                 if val and "night" not in val.lower():
                     out[dest] = val
@@ -584,14 +592,11 @@ def fetch_flight_card(
     return_date: str = "",
     adults: int = 1,
 ) -> dict[str, str]:
-    """Scrape airline + times for the cheapest listed flight (browser thread)."""
-    scrape = getattr(browser, "_scrape_top_flight_card", None)
+    """Scrape airline + times for outbound (and return) flights (browser thread)."""
     search = getattr(browser, "search_flights", None)
-    if not scrape or not search:
+    if not search:
         return {}
 
-    origin_code = to_flight_code(origin).upper()
-    dest_code = to_flight_code(destination).upper()
     text = search(
         origin=origin,
         destination=destination,
@@ -601,26 +606,10 @@ def fetch_flight_card(
         adults=adults,
     )
     found = extract_booking_urls(text)
-    card = scrape(origin=origin_code, destination=dest_code)
     out: dict[str, str] = {}
     url = found.get("flight") or ""
     if url:
         out["flight"] = url
-    for src, dest in (
-        (card.get("airline"), "flight_airline"),
-        (card.get("depart_time"), "flight_depart"),
-        (card.get("arrive_time"), "flight_arrive"),
-        (card.get("depart_airport"), "flight_from"),
-        (card.get("arrive_airport"), "flight_to"),
-        (card.get("duration"), "flight_duration"),
-        (card.get("stops"), "flight_stops"),
-        (card.get("airline_logo"), "flight_airline_logo"),
-        (card.get("price_label"), "flight_price"),
-    ):
-        if src and (dest != "flight_airline" or is_plausible_airline_name(str(src))):
-            out[dest] = str(src)
-    if out.get("flight_airline") and not out.get("flight_airline_logo"):
-        out["flight_airline_logo"] = airline_logo_url(out["flight_airline"])
     for key in (
         "flight_airline",
         "flight_depart",
@@ -631,10 +620,24 @@ def fetch_flight_card(
         "flight_stops",
         "flight_price",
         "flight_airline_logo",
+        "flight_return_airline",
+        "flight_return_depart",
+        "flight_return_arrive",
+        "flight_return_from",
+        "flight_return_to",
+        "flight_return_duration",
+        "flight_return_stops",
+        "flight_return_airline_logo",
     ):
-        if found.get(key) and key not in out:
+        if found.get(key):
             val = found[key]
-            if key == "flight_airline" and not is_plausible_airline_name(val):
+            if key in {"flight_airline", "flight_return_airline"} and not is_plausible_airline_name(
+                val
+            ):
                 continue
             out[key] = val
+    if out.get("flight_airline") and not out.get("flight_airline_logo"):
+        out["flight_airline_logo"] = airline_logo_url(out["flight_airline"])
+    if out.get("flight_return_airline") and not out.get("flight_return_airline_logo"):
+        out["flight_return_airline_logo"] = airline_logo_url(out["flight_return_airline"])
     return out
