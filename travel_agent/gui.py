@@ -12,8 +12,11 @@ import urllib.request
 import webbrowser
 from collections.abc import Callable
 from datetime import date, timedelta
+from io import BytesIO
 from typing import Any
 from tkinter import messagebox, scrolledtext
+
+from PIL import Image, ImageTk
 
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
@@ -300,6 +303,8 @@ class LinkLabel(tk.Label):
 class FlightRowCard(tk.Frame):
     """Trip.com-style flight result row (badges, times, duration, price, Select)."""
 
+    _LOGO_SIZE = 48
+
     def __init__(self, master: tk.Misc, **kwargs) -> None:
         super().__init__(master, bg=C["paper"], **kwargs)
         tk.Label(
@@ -322,8 +327,9 @@ class FlightRowCard(tk.Frame):
         # Compact stacked layout for the narrow bookings column
         air = tk.Frame(self.card, bg="#FFFFFF")
         air.pack(fill="x", pady=(0, 8))
-        self.logo = tk.Canvas(air, width=32, height=32, bg="#FFFFFF", highlightthickness=0)
-        self.logo.pack(side="left", padx=(0, 8))
+        sz = self._LOGO_SIZE
+        self.logo = tk.Canvas(air, width=sz, height=sz, bg="#FFFFFF", highlightthickness=0)
+        self.logo.pack(side="left", padx=(0, 10))
         self._logo_photo: tk.PhotoImage | None = None
         self.airline_lbl = tk.Label(
             air, text="—", bg="#FFFFFF", fg=C["ink"], font=FONT_UI, anchor="w"
@@ -421,9 +427,18 @@ class FlightRowCard(tk.Frame):
     def _draw_logo(self, initials: str) -> None:
         self._logo_photo = None
         self.logo.delete("all")
-        self.logo.create_polygon(16, 2, 30, 28, 2, 28, fill=C["badge_teal"], outline="")
+        sz = self._LOGO_SIZE
+        cx = sz // 2
+        pad = max(2, sz // 16)
+        self.logo.create_polygon(
+            cx, pad, sz - pad, sz - pad, pad, sz - pad, fill=C["badge_teal"], outline=""
+        )
         self.logo.create_text(
-            16, 18, text=(initials or "TP")[:3].upper(), fill="#FFFFFF", font=("Segoe UI", 7, "bold")
+            cx,
+            cx + pad,
+            text=(initials or "TP")[:3].upper(),
+            fill="#FFFFFF",
+            font=("Segoe UI", max(8, sz // 5), "bold"),
         )
 
     def _set_airline_logo(self, offer: FlightOffer) -> None:
@@ -434,15 +449,21 @@ class FlightRowCard(tk.Frame):
             return
         try:
             data = urllib.request.urlopen(url, timeout=8).read()
-            photo = tk.PhotoImage(data=data)
-            target = 32
-            factor = max(photo.width() // target, photo.height() // target, 1)
-            if factor > 1:
-                photo = photo.subsample(factor, factor)
+            target = self._LOGO_SIZE
+            img = Image.open(BytesIO(data)).convert("RGBA")
+            # Cover the logo box exactly (scale up/down, center-crop if needed)
+            scale = max(target / max(img.width, 1), target / max(img.height, 1))
+            new_w = max(1, round(img.width * scale))
+            new_h = max(1, round(img.height * scale))
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            left = (new_w - target) // 2
+            top = (new_h - target) // 2
+            fitted = resized.crop((left, top, left + target, top + target))
+            photo = ImageTk.PhotoImage(fitted)
             self._logo_photo = photo
             self.logo.delete("all")
-            w, h = photo.width(), photo.height()
-            self.logo.create_image(16, 16, image=photo)
+            cx = target // 2
+            self.logo.create_image(cx, cx, image=photo)
         except Exception:
             initials = "".join(w[0] for w in offer.airline.split()[:3] if w) or "TP"
             self._draw_logo(initials)
