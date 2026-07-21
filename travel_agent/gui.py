@@ -8,6 +8,7 @@ import queue
 import re
 import threading
 import tkinter as tk
+import urllib.request
 import webbrowser
 from collections.abc import Callable
 from datetime import date, timedelta
@@ -16,7 +17,7 @@ from tkinter import messagebox, scrolledtext
 
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
-from travel_agent.airline_names import is_plausible_airline_name
+from travel_agent.airline_names import airline_logo_url, is_plausible_airline_name
 from travel_agent.itinerary_parse import FlightOffer, HotelOffer, ParsedItinerary, parse_itinerary
 from travel_agent.places import to_flight_code, to_hotel_city
 from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
@@ -323,6 +324,7 @@ class FlightRowCard(tk.Frame):
         air.pack(fill="x", pady=(0, 8))
         self.logo = tk.Canvas(air, width=32, height=32, bg="#FFFFFF", highlightthickness=0)
         self.logo.pack(side="left", padx=(0, 8))
+        self._logo_photo: tk.PhotoImage | None = None
         self.airline_lbl = tk.Label(
             air, text="—", bg="#FFFFFF", fg=C["ink"], font=FONT_UI, anchor="w"
         )
@@ -417,11 +419,33 @@ class FlightRowCard(tk.Frame):
         self.path.create_oval(w - 10, y - 3, w - 4, y + 3, fill="#C5CDD6", outline="")
 
     def _draw_logo(self, initials: str) -> None:
+        self._logo_photo = None
         self.logo.delete("all")
         self.logo.create_polygon(16, 2, 30, 28, 2, 28, fill=C["badge_teal"], outline="")
         self.logo.create_text(
             16, 18, text=(initials or "TP")[:3].upper(), fill="#FFFFFF", font=("Segoe UI", 7, "bold")
         )
+
+    def _set_airline_logo(self, offer: FlightOffer) -> None:
+        url = (offer.airline_logo or airline_logo_url(offer.airline)).strip()
+        if not url or not is_plausible_airline_name(offer.airline):
+            initials = "".join(w[0] for w in offer.airline.split()[:3] if w) or "TP"
+            self._draw_logo(initials)
+            return
+        try:
+            data = urllib.request.urlopen(url, timeout=8).read()
+            photo = tk.PhotoImage(data=data)
+            target = 32
+            factor = max(photo.width() // target, photo.height() // target, 1)
+            if factor > 1:
+                photo = photo.subsample(factor, factor)
+            self._logo_photo = photo
+            self.logo.delete("all")
+            w, h = photo.width(), photo.height()
+            self.logo.create_image(16, 16, image=photo)
+        except Exception:
+            initials = "".join(w[0] for w in offer.airline.split()[:3] if w) or "TP"
+            self._draw_logo(initials)
 
     def _open(self, _e: object | None = None) -> None:
         if self._url and "trip.com" in self._url.lower():
@@ -482,8 +506,7 @@ class FlightRowCard(tk.Frame):
         if offer.baggage:
             self._add_badge(offer.baggage, filled=False)
 
-        initials = "".join(w[0] for w in offer.airline.split()[:3] if w) or "TP"
-        self._draw_logo(initials)
+        self._set_airline_logo(offer)
         self.airline_lbl.configure(text=offer.airline)
         self.dep_time.configure(text=offer.depart_time)
         self.arr_time.configure(text=offer.arrive_time)
@@ -1416,6 +1439,7 @@ class TravelAgentApp(tk.Tk):
             "flight_duration",
             "flight_stops",
             "flight_price",
+            "flight_airline_logo",
         ):
             if live.get(key):
                 self.agent.booking_links[key] = live[key]
@@ -1546,6 +1570,10 @@ class TravelAgentApp(tk.Tk):
                 offer.stops = links["flight_stops"]
             if links.get("flight_price"):
                 offer.price_label = links["flight_price"]
+            if links.get("flight_airline_logo"):
+                offer.airline_logo = links["flight_airline_logo"]
+            elif is_plausible_airline_name(offer.airline):
+                offer.airline_logo = airline_logo_url(offer.airline)
             if links.get("flight_option") and (
                 offer.airline in {"", "Trip.com fare"} or offer.depart_time == "--:--"
             ):
@@ -1613,6 +1641,8 @@ class TravelAgentApp(tk.Tk):
                 offer.airline = "Recommended flight"
         if offer.badge in {"", "Recommended"} and offer.price_label not in {"", "See Trip.com"}:
             offer.badge = "Live Trip.com fare"
+        if is_plausible_airline_name(offer.airline) and not offer.airline_logo:
+            offer.airline_logo = airline_logo_url(offer.airline)
 
     def _enrich_hotel_offer(self, parsed: ParsedItinerary, *, hotel_name: str = "") -> None:
         """Prefer tool-scraped hotel name/price/score over LLM prose."""

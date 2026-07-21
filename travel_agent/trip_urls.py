@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from travel_agent.config import settings
 from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
-from travel_agent.airline_names import is_plausible_airline_name
+from travel_agent.airline_names import is_plausible_airline_name, airline_logo_url
 
 _TRIP_HOST_RE = re.compile(
     r"^(?:www|hk|us|uk|jp|sg|kr|tw|de|fr|es|it|au|my|th|vn|ph|id)\.trip\.com$",
@@ -386,6 +386,7 @@ def extract_booking_urls(text: str) -> dict[str, str]:
         block = flight_card.group(1)
         for key, dest in (
             (r"(?im)^-\s*Airline:\s*(.+)$", "flight_airline"),
+            (r"(?im)^-\s*Airline logo:\s*(\S+)", "flight_airline_logo"),
             (r"(?im)^-\s*Depart:\s*([0-2]?\d:[0-5]\d)", "flight_depart"),
             (r"(?im)^-\s*Arrive:\s*([0-2]?\d:[0-5]\d)", "flight_arrive"),
             (r"(?im)^-\s*From:\s*(.+)$", "flight_from"),
@@ -613,10 +614,13 @@ def fetch_flight_card(
         (card.get("arrive_airport"), "flight_to"),
         (card.get("duration"), "flight_duration"),
         (card.get("stops"), "flight_stops"),
+        (card.get("airline_logo"), "flight_airline_logo"),
         (card.get("price_label"), "flight_price"),
     ):
         if src and (dest != "flight_airline" or is_plausible_airline_name(str(src))):
             out[dest] = str(src)
+    if out.get("flight_airline") and not out.get("flight_airline_logo"):
+        out["flight_airline_logo"] = airline_logo_url(out["flight_airline"])
     for key in (
         "flight_airline",
         "flight_depart",
@@ -626,6 +630,7 @@ def fetch_flight_card(
         "flight_duration",
         "flight_stops",
         "flight_price",
+        "flight_airline_logo",
     ):
         if found.get(key) and key not in out:
             val = found[key]

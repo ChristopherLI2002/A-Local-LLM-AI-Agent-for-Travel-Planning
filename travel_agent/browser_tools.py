@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
 from travel_agent.config import settings
-from travel_agent.airline_names import expand_airline_code, is_plausible_airline_name
+from travel_agent.airline_names import expand_airline_code, airline_logo_url, is_plausible_airline_name
 from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
 from travel_agent.pricing import (
     format_comparison_table,
@@ -395,9 +395,11 @@ class TripBrowser:
         card_block = ""
         if card:
             airline_line = card.get("airline") or ""
+            logo_line = card.get("airline_logo") or ""
             card_block = (
                 "Structured flight card:\n"
                 + (f"- Airline: {airline_line}\n" if airline_line else "")
+                + (f"- Airline logo: {logo_line}\n" if logo_line else "")
                 + f"- Depart: {card.get('depart_time', '')}\n"
                 f"- Arrive: {card.get('arrive_time', '')}\n"
                 f"- From: {card.get('depart_airport', origin.upper())}\n"
@@ -1526,6 +1528,7 @@ Transport modes: {", ".join(modes)}
             "duration": "",
             "stops": "Direct",
             "price_label": "",
+            "airline_logo": "",
         }
 
         rows = parse_trip_com_flight_rows(
@@ -1536,6 +1539,8 @@ Transport modes: {", ".join(modes)}
             card.update({k: v for k, v in picked.items() if v})
             if lowest is not None and not card.get("price_label"):
                 card["price_label"] = f"HK${lowest:,.0f}"
+            if card.get("airline") and not card.get("airline_logo"):
+                card["airline_logo"] = airline_logo_url(card["airline"])
             return card
 
         airline = self._extract_airline_from_text(blob)
@@ -1598,6 +1603,9 @@ Transport modes: {", ".join(modes)}
             prices = [p for p in parse_prices(result_chunk or blob) if p >= 200]
             if prices:
                 card["price_label"] = f"HK${min(prices):,.0f}"
+
+        if card.get("airline") and not card.get("airline_logo"):
+            card["airline_logo"] = airline_logo_url(card["airline"])
 
         return card
 

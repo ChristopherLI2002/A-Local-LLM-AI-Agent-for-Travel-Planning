@@ -111,3 +111,70 @@ def expand_airline_code(name: str) -> str:
     if len(text) == 2 and text.upper() in AIRLINE_CODE_MAP:
         return AIRLINE_CODE_MAP[text.upper()]
     return text
+
+
+_AIRLINE_NAME_ALIASES: dict[str, str] = {
+    "etihad airways": "EY",
+    "etihad": "EY",
+    "swiss": "LX",
+    "swiss international air lines": "LX",
+    "klm royal dutch airlines": "KL",
+    "china eastern airlines": "MU",
+    "china southern airlines": "CZ",
+    "air china": "CA",
+    "turkish airlines": "TK",
+    "qatar airways": "QR",
+    "singapore airlines": "SQ",
+    "cathay pacific": "CX",
+    "air france": "AF",
+    "british airways": "BA",
+    "lufthansa": "LH",
+    "eva air": "BR",
+    "ana": "NH",
+    "all nippon airways": "NH",
+    "all nippon": "NH",
+    "japan airlines": "JL",
+    "korean air": "KE",
+    "asiana": "OZ",
+    "emirates": "EK",
+    "finnair": "AY",
+    "thai airways": "TG",
+    "vietnam airlines": "VN",
+    "malaysia airlines": "MH",
+    "greater bay airlines": "HB",
+    "hk express": "UO",
+    "hong kong airlines": "HX",
+}
+
+
+def airline_name_to_code(name: str) -> str:
+    """Best-effort IATA code for Trip.com logo URLs."""
+    text = expand_airline_code((name or "").strip())
+    if not text:
+        return ""
+    if len(text) == 2 and text.upper() in AIRLINE_CODE_MAP:
+        return text.upper()
+    low = text.lower()
+    if low in _AIRLINE_NAME_ALIASES:
+        return _AIRLINE_NAME_ALIASES[low]
+    for code, full in AIRLINE_CODE_MAP.items():
+        if full.lower() == low:
+            return code
+    if _AIRLINE_RE.search(text):
+        token = _AIRLINE_RE.search(text)
+        if token:
+            cand = token.group(1).upper()
+            if len(cand) == 2 and cand in AIRLINE_CODE_MAP:
+                return cand
+    return ""
+
+
+def airline_logo_url(airline: str) -> str:
+    """Trip.com CDN URL for a carrier logo (PNG, 3x)."""
+    code = airline_name_to_code(airline)
+    if not code:
+        return ""
+    return (
+        "https://static.tripcdn.com/packages/flight/airline-logo/latest/"
+        f"airline_logo/3x/{code.lower()}.png"
+    )

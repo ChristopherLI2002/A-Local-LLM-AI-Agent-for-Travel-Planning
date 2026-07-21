@@ -45,6 +45,7 @@ class FlightOffer:
     trip_label: str = "Return"
     badge: str = ""
     baggage: str = ""
+    airline_logo: str = ""
     url: str = ""
     raw: str = ""
 

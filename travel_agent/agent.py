@@ -131,6 +131,7 @@ class TravelAgent:
                     "flight_to",
                     "flight_duration",
                     "flight_stops",
+                    "flight_airline_logo",
                     "hotel_stars",
                     "hotel_score",
                     "hotel_location",
