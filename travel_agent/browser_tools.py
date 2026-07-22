@@ -63,60 +63,27 @@ def _default_return_from(depart: str, nights: int = 7) -> str:
         return _default_return(days_ahead=28)
 
 
-def _build_suggested_day_flow(nights: int, *, interests: str = "") -> str:
-    """Emit one Day N block per trip day for the LLM / UI parser."""
-    n = max(1, int(nights or 1))
-    style = (interests or "First-time").split(",")[0].strip() or "First-time"
-    low = style.lower()
-    if "food" in low:
-        mid = "food markets, signature restaurants, and neighborhood cafes"
-        eve = "a standout dinner reservation or street-food crawl"
-    elif "culture" in low:
-        mid = "museums, temples/shrines, and historic districts"
-        eve = "an evening cultural show or heritage neighborhood stroll"
-    elif "family" in low:
-        mid = "parks, kid-friendly attractions, and easy transport hops"
-        eve = "a relaxed family dinner near the hotel"
-    elif "adventure" in low:
-        mid = "an active outing (hike, day trip, or viewpoint)"
-        eve = "recovery dinner and early night"
-    elif "relax" in low:
-        mid = "cafes, parks, and unhurried neighborhood exploring"
-        eve = "a calm dinner and downtime at the hotel"
-    else:
-        mid = "top city highlights and a local food stop"
-        eve = "neighborhood walk and easy dinner"
+def _build_suggested_day_flow(
+    nights: int,
+    *,
+    interests: str = "",
+    destination: str = "",
+) -> str:
+    """Emit one Day N block per trip day with named sights and meals."""
+    from travel_agent.destination_guides import (
+        day_ideas_for,
+        format_day_body,
+        format_day_title,
+    )
 
+    n = max(1, int(nights or 1))
+    styles = [s.strip() for s in (interests or "First-time").split(",") if s.strip()]
+    ideas = day_ideas_for(destination, n, styles=styles or None)
     lines: list[str] = []
-    for i in range(1, n + 1):
-        if i == 1:
-            bullets = [
-                "Arrive via chosen transport",
-                "Hotel check-in and settle in",
-                "Light neighborhood walk",
-                f"Easy dinner nearby ({style} pace)",
-            ]
-        elif i == n:
-            bullets = [
-                "Morning buffer / last highlights",
-                "Hotel checkout",
-                "Ground transfer to airport or station",
-                "Depart",
-            ]
-        elif i == 2:
-            bullets = [
-                f"Morning: {mid}",
-                "Afternoon: continue highlights",
-                f"Evening: {eve}",
-            ]
-        else:
-            bullets = [
-                f"Morning: secondary area or deeper {style.lower()} picks",
-                "Afternoon: flexible free time or day-trip option",
-                f"Evening: {eve}",
-            ]
-        lines.append(f"Day {i}:")
-        lines.extend(f"- {b}" for b in bullets)
+    for i, idea in enumerate(ideas, start=1):
+        lines.append(format_day_title(idea, i) + ":")
+        for bullet in format_day_body(idea).splitlines():
+            lines.append(bullet.replace("• ", "- ", 1) if bullet.startswith("• ") else f"- {bullet}")
     return "\n".join(lines)
 
 
@@ -1561,7 +1528,11 @@ class TripBrowser:
 - {budget_note}"""
         )
         n += 1
-        day_lines = _build_suggested_day_flow(nights, interests=interests or "")
+        day_lines = _build_suggested_day_flow(
+            nights,
+            interests=interests or "",
+            destination=hotel_city or destination,
+        )
         sections.append(
             f"""{n}) SUGGESTED DAY FLOW
 {day_lines}"""

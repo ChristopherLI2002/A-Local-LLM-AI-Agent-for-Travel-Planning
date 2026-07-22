@@ -1030,6 +1030,7 @@ class TravelAgentApp(tk.Tk):
         # Playwright sync API is thread-bound: one long-lived worker owns the browser.
         self._browser_jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self._browser_thread: threading.Thread | None = None
+        self._timetable_thumb_cache: dict[str, tk.PhotoImage] = {}
 
         self.title("Voyage — Trip.Planner-style Travel Agent")
         self.geometry("1080x780")
@@ -1514,7 +1515,7 @@ class TravelAgentApp(tk.Tk):
         if not parsed.days:
             # Should be unreachable after _ensure_days; keep a quiet placeholder
             empty = tk.Frame(self.days_inner, bg="#FFFFFF", padx=14, pady=14)
-            empty.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
+            empty.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
             tk.Label(
                 empty,
                 text="Day plan will appear here once the itinerary is ready.",
@@ -1527,17 +1528,15 @@ class TravelAgentApp(tk.Tk):
             self.after(80, self._on_page_body_configure)
             return
 
-        self.days_inner.columnconfigure(0, weight=1, uniform="day")
-        self.days_inner.columnconfigure(1, weight=1, uniform="day")
+        self.days_inner.columnconfigure(0, weight=1)
         for idx, day in enumerate(parsed.days):
             self._add_day_card(day, index=idx)
 
         if parsed.budget:
             shell = tk.Frame(self.days_inner, bg=C["line"], padx=1, pady=1)
             shell.grid(
-                row=(len(parsed.days) + 1) // 2,
+                row=len(parsed.days),
                 column=0,
-                columnspan=2,
                 sticky="ew",
                 padx=8,
                 pady=(4, 8),
@@ -1576,11 +1575,52 @@ class TravelAgentApp(tk.Tk):
             return "⌂"
         return "◎"
 
+    def _load_timetable_thumb(self, url: str, *, size: tuple[int, int] = (72, 54)) -> tk.PhotoImage | None:
+        """Download and cache a small attraction thumbnail for a timetable row."""
+        url = (url or "").strip()
+        if not url.startswith("http"):
+            return None
+        if url in self._timetable_thumb_cache:
+            return self._timetable_thumb_cache[url]
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                },
+            )
+            data = urllib.request.urlopen(req, timeout=10).read()
+            img = Image.open(BytesIO(data)).convert("RGB")
+            tw, th = size
+            scale = max(tw / max(img.width, 1), th / max(img.height, 1))
+            new_w = max(1, round(img.width * scale))
+            new_h = max(1, round(img.height * scale))
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            left = max(0, (new_w - tw) // 2)
+            top = max(0, (new_h - th) // 2)
+            fitted = resized.crop((left, top, left + tw, top + th))
+            photo = ImageTk.PhotoImage(fitted)
+            self._timetable_thumb_cache[url] = photo
+            return photo
+        except Exception:
+            return None
+
     def _add_day_card(self, day: object, *, index: int = 0) -> None:
         """Seoul-itinerary style: big day number, DAY badge, list, dark footer."""
         title = getattr(day, "title", "Day") or "Day"
         body = getattr(day, "body", "") or ""
         urls = list(getattr(day, "urls", []) or [])
+        slot_images: dict[str, str] = dict(getattr(day, "images", {}) or {})
+        if not slot_images and body:
+            from travel_agent.attraction_images import images_for_timetable
+
+            dest = self._trip_context.get("destination", "") or ""
+            slot_images = images_for_timetable(body, dest)
 
         m = re.match(r"(?i)^day\s+(\d+)\b", title)
         if m:
@@ -1607,10 +1647,8 @@ class TravelAgentApp(tk.Tk):
         if not activities:
             activities = ["Details coming soon."]
 
-        cols = 2
-        row, col = divmod(index, cols)
         wrap = tk.Frame(self.days_inner, bg="#2C333A")
-        wrap.grid(row=row, column=col, sticky="nsew", padx=8, pady=8)
+        wrap.grid(row=index, column=0, sticky="ew", padx=8, pady=8)
 
         card = tk.Frame(wrap, bg="#FFFFFF")
         card.pack(fill="both", expand=True)
@@ -1645,22 +1683,69 @@ class TravelAgentApp(tk.Tk):
                 anchor="w",
             ).pack(fill="x", padx=14, pady=(0, 4))
 
+        # Timetable header
         body_frame = tk.Frame(card, bg="#FFFFFF")
         body_frame.pack(fill="both", expand=True, padx=14, pady=(4, 10))
-        for i, line in enumerate(activities[:8]):
-            tk.Label(
-                body_frame,
-                text=f"{i + 1}. {line}",
-                bg="#FFFFFF",
-                fg="#1A1A1A",
-                font=("Segoe UI", 10),
-                justify="left",
-                anchor="nw",
-                wraplength=220,
-            ).pack(fill="x", pady=(0, 4))
+        tk.Label(
+            body_frame,
+            text="TIMETABLE",
+            bg="#FFFFFF",
+            fg=accent,
+            font=("Segoe UI Semibold", 8),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        for line in activities[:10]:
+            tm = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)\s+(.*)$", line)
+            row = tk.Frame(body_frame, bg="#FFFFFF")
+            row.pack(fill="x", pady=2)
+            if tm:
+                time_txt = f"{int(tm.group(1)):02d}:{tm.group(2)}"
+                detail = tm.group(3).strip()
+                tk.Label(
+                    row,
+                    text=time_txt,
+                    bg="#F3F6F8",
+                    fg=accent,
+                    font=("Consolas", 10, "bold"),
+                    padx=8,
+                    pady=4,
+                    width=6,
+                    anchor="center",
+                ).pack(side="left", padx=(0, 10))
+                text_wrap = tk.Frame(row, bg="#FFFFFF")
+                text_wrap.pack(side="left", fill="x", expand=True)
+                tk.Label(
+                    text_wrap,
+                    text=detail,
+                    bg="#FFFFFF",
+                    fg="#1A1A1A",
+                    font=("Segoe UI", 10),
+                    justify="left",
+                    anchor="w",
+                    wraplength=340,
+                ).pack(side="left", fill="x", expand=True)
+                img_url = slot_images.get(time_txt, "")
+                if img_url:
+                    thumb = self._load_timetable_thumb(img_url)
+                    if thumb:
+                        img_lbl = tk.Label(row, image=thumb, bg="#FFFFFF", bd=0)
+                        img_lbl.image = thumb  # keep reference
+                        img_lbl.pack(side="right", padx=(8, 0))
+            else:
+                tk.Label(
+                    row,
+                    text=line,
+                    bg="#FFFFFF",
+                    fg="#1A1A1A",
+                    font=("Segoe UI", 10),
+                    justify="left",
+                    anchor="w",
+                    wraplength=480,
+                ).pack(fill="x")
 
         for url in urls[:1]:
-            LinkLabel(body_frame, url, bg="#FFFFFF", wraplength=220).pack(anchor="w", pady=(4, 0))
+            LinkLabel(body_frame, url, bg="#FFFFFF", wraplength=480).pack(anchor="w", pady=(6, 0))
 
         footer = tk.Frame(card, bg="#3D4F5F", height=36)
         footer.pack(fill="x", side="bottom")
@@ -1745,7 +1830,7 @@ class TravelAgentApp(tk.Tk):
         self.hotel_row.set_loading("Comparing hotels on Trip.com…")
         self._clear_days()
         loading = tk.Frame(self.days_inner, bg="#FFFFFF", padx=14, pady=16)
-        loading.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
+        loading.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         tk.Label(
             loading,
             text="Building your itinerary… this can take a few minutes.",
@@ -2268,6 +2353,8 @@ class TravelAgentApp(tk.Tk):
             f"{msg}\n\n"
             "Keep the same headings (Recommended flight / Recommended hotel / "
             "Day-by-day itinerary / Budget snapshot) so the board can refresh. "
+            "For each Day N, use a timetable (HH:MM lines) with exact places, meals, "
+            "and metro/train routes — no Transit/Go/Lunch/Also/Dinner labels. "
             "Only use https://hk.trip.com/... URLs from tools."
         )
         self._set_busy(True, "Refining itinerary…")

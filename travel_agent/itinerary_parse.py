@@ -43,6 +43,7 @@ class Block:
     title: str
     body: str
     urls: list[str] = field(default_factory=list)
+    images: dict[str, str] = field(default_factory=dict)  # "10:00" -> photo URL
 
 
 @dataclass
@@ -606,57 +607,27 @@ def synthesize_day_blocks(
     destination: str = "",
     styles: list[str] | None = None,
 ) -> list[Block]:
-    """Build Seoul-style day cards when the LLM omits a day-by-day section."""
-    n = max(1, int(nights or 1))
-    style = (styles or ["First-time"])[0] if styles else "First-time"
-    dest = (destination or "your destination").strip() or "your destination"
-    low = style.lower()
-    if "food" in low:
-        focus = f"food markets and local restaurants in {dest}"
-    elif "culture" in low:
-        focus = f"museums, temples, and heritage areas in {dest}"
-    elif "family" in low:
-        focus = f"family-friendly parks and attractions in {dest}"
-    elif "adventure" in low:
-        focus = f"active day trips and viewpoints around {dest}"
-    elif "relax" in low:
-        focus = f"cafes, parks, and a slow pace in {dest}"
-    else:
-        focus = f"top highlights and neighborhoods in {dest}"
+    """Build detailed day cards with named attractions and restaurants."""
+    from travel_agent.destination_guides import (
+        day_ideas_for,
+        format_day_body,
+        format_day_title,
+    )
+    from travel_agent.attraction_images import images_for_timetable
 
+    n = max(1, int(nights or 1))
+    ideas = day_ideas_for(destination, n, styles=styles)
     days: list[Block] = []
-    for i in range(1, n + 1):
-        if i == 1:
-            body = (
-                f"• Arrive in {dest}\n"
-                "• Hotel check-in and settle in\n"
-                "• Light neighborhood walk\n"
-                "• Easy dinner nearby"
+    for i, idea in enumerate(ideas, start=1):
+        body = format_day_body(idea)
+        days.append(
+            Block(
+                title=format_day_title(idea, i),
+                body=body,
+                urls=[],
+                images=images_for_timetable(body, destination),
             )
-            title = f"Day {i} — Arrival"
-        elif i == n:
-            body = (
-                "• Morning buffer / last highlights\n"
-                "• Hotel checkout\n"
-                "• Transfer to airport or station\n"
-                "• Depart"
-            )
-            title = f"Day {i} — Departure"
-        elif i == 2:
-            body = (
-                f"• Morning: {focus}\n"
-                "• Afternoon: continue city highlights\n"
-                f"• Evening: {style} dinner plan"
-            )
-            title = f"Day {i} — Explore"
-        else:
-            body = (
-                f"• Morning: deeper {style.lower()} picks in {dest}\n"
-                "• Afternoon: flexible free time or short day trip\n"
-                "• Evening: local dinner and unwind"
-            )
-            title = f"Day {i} — Discover"
-        days.append(Block(title=title, body=body, urls=[]))
+        )
     return days
 
 
@@ -667,12 +638,8 @@ def ensure_day_blocks(
     destination: str = "",
     styles: list[str] | None = None,
 ) -> ParsedItinerary:
-    """Guarantee day cards exist; move comparison dumps into budget when needed."""
-    if parsed.days:
-        return parsed
-
+    """Guarantee detailed day cards with exact places to visit and eat."""
     raw = parsed.raw or ""
-    # If the model returned a price/comparison dump, keep it under budget — not days
     if not parsed.budget and re.search(
         r"(?i)hotel price comparison|transport comparison|lowest nightly|over budget|est\. low-end",
         raw,
@@ -680,9 +647,18 @@ def ensure_day_blocks(
         cleaned = re.sub(r"(?m)^#{1,6}\s*", "", raw).strip()
         parsed.budget = cleaned[:1800]
 
-    parsed.days = synthesize_day_blocks(
-        nights=nights,
-        destination=destination,
-        styles=styles,
-    )
+    n = max(1, int(nights or 1))
+    from travel_agent.destination_guides import should_use_destination_guide
+
+    if should_use_destination_guide(destination, parsed.days):
+        parsed.days = synthesize_day_blocks(
+            nights=n,
+            destination=destination,
+            styles=styles,
+        )
+    else:
+        from travel_agent.attraction_images import enrich_block_images
+
+        for day in parsed.days:
+            enrich_block_images(day, destination)
     return parsed
