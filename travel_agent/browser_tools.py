@@ -55,6 +55,71 @@ def _default_return(days_ahead: int = 28) -> str:
     return (date.today() + timedelta(days=days_ahead)).isoformat()
 
 
+def _default_return_from(depart: str, nights: int = 7) -> str:
+    """Return date = depart + nights (avoids accidental ~month-long stays)."""
+    try:
+        return (date.fromisoformat(depart) + timedelta(days=max(1, nights))).isoformat()
+    except ValueError:
+        return _default_return(days_ahead=28)
+
+
+def _build_suggested_day_flow(nights: int, *, interests: str = "") -> str:
+    """Emit one Day N block per trip day for the LLM / UI parser."""
+    n = max(1, int(nights or 1))
+    style = (interests or "First-time").split(",")[0].strip() or "First-time"
+    low = style.lower()
+    if "food" in low:
+        mid = "food markets, signature restaurants, and neighborhood cafes"
+        eve = "a standout dinner reservation or street-food crawl"
+    elif "culture" in low:
+        mid = "museums, temples/shrines, and historic districts"
+        eve = "an evening cultural show or heritage neighborhood stroll"
+    elif "family" in low:
+        mid = "parks, kid-friendly attractions, and easy transport hops"
+        eve = "a relaxed family dinner near the hotel"
+    elif "adventure" in low:
+        mid = "an active outing (hike, day trip, or viewpoint)"
+        eve = "recovery dinner and early night"
+    elif "relax" in low:
+        mid = "cafes, parks, and unhurried neighborhood exploring"
+        eve = "a calm dinner and downtime at the hotel"
+    else:
+        mid = "top city highlights and a local food stop"
+        eve = "neighborhood walk and easy dinner"
+
+    lines: list[str] = []
+    for i in range(1, n + 1):
+        if i == 1:
+            bullets = [
+                "Arrive via chosen transport",
+                "Hotel check-in and settle in",
+                "Light neighborhood walk",
+                f"Easy dinner nearby ({style} pace)",
+            ]
+        elif i == n:
+            bullets = [
+                "Morning buffer / last highlights",
+                "Hotel checkout",
+                "Ground transfer to airport or station",
+                "Depart",
+            ]
+        elif i == 2:
+            bullets = [
+                f"Morning: {mid}",
+                "Afternoon: continue highlights",
+                f"Evening: {eve}",
+            ]
+        else:
+            bullets = [
+                f"Morning: secondary area or deeper {style.lower()} picks",
+                "Afternoon: flexible free time or day-trip option",
+                f"Evening: {eve}",
+            ]
+        lines.append(f"Day {i}:")
+        lines.extend(f"- {b}" for b in bullets)
+    return "\n".join(lines)
+
+
 _CAR_NEED_RE = re.compile(
     r"\b("
     r"rent(?:al)?\s*car|car\s*rental|hire\s*car|car\s*hire|"
@@ -1082,9 +1147,9 @@ class TripBrowser:
     ) -> str:
         """Build a trip plan comparing transport modes + hotels on Trip.com."""
         depart_date = depart_date or _default_depart(21)
-        return_date = return_date or _default_return(28)
+        return_date = return_date or _default_return_from(depart_date, 7)
         hotel_city = to_hotel_city(hotel_city or destination)
-        nights = nights_between(depart_date, return_date)
+        nights = max(1, nights_between(depart_date, return_date))
         need_car = _wants_rental_car(rent_car, interests)
         want_flights = _as_bool(include_flights, default=True)
         want_trains = _as_bool(include_trains, default=True)
@@ -1496,13 +1561,10 @@ class TripBrowser:
 - {budget_note}"""
         )
         n += 1
+        day_lines = _build_suggested_day_flow(nights, interests=interests or "")
         sections.append(
             f"""{n}) SUGGESTED DAY FLOW
-- Day 1: Arrive via chosen transport, check-in, neighborhood walk, easy dinner
-- Day 2: Main city highlights + local food
-- Day 3: Secondary area / day trip if time allows
-- Final day: Buffer for checkout, ground transfer to station/airport, depart
-  (Trim/expand days to match the {nights}-night stay.)"""
+{day_lines}"""
         )
         n += 1
 

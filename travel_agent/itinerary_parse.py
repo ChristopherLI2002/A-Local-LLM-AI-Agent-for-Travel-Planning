@@ -10,7 +10,22 @@ from travel_agent.airline_names import _AIRLINE_RE, is_plausible_airline_name
 
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
-_DAY_RE = re.compile(r"(?im)^\s*day\s+(\d+)\s*[:.\-]?\s*(.*)$")
+# Matches: "Day 1:", "- Day 1:", "**1. Day 1:**", "### Day 2 — Shibuya", "Final Day:"
+_DAY_RE = re.compile(
+    r"(?im)^\s*"
+    r"(?:[-*•]\s+)?"
+    r"(?:#{1,6}\s*)?"
+    r"(?:\*{1,2}|_{1,2})?"
+    r"(?:(?:\d+)\.\s*)?"
+    r"(?:"
+    r"day\s+(\d+)"
+    r"|"
+    r"(final)\s+day"
+    r")"
+    r"(?:\*{1,2}|_{1,2})?"
+    r"[ \t]*[:.\-]?[ \t]*"  # keep title extra on the same line only
+    r"(.*)$"
+)
 _TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
 _DURATION_RE = re.compile(
     r"\b(\d+\s*h(?:ours?)?(?:\s*\d+\s*m(?:ins?)?)?|\d+\s*h\s*\d+\s*m|\d+h\s*\d+m)\b",
@@ -403,6 +418,29 @@ def parse_hotel_offer(text: str, fallback_url: str = "") -> HotelOffer:
     return offer
 
 
+def _clean_day_body(text: str) -> str:
+    """Normalize markdown-ish day content into readable card text."""
+    lines: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            if lines and lines[-1] != "":
+                lines.append("")
+            continue
+        # Skip nested headings that duplicate the day title
+        if re.match(r"(?i)^#{1,6}\s*(?:day\s+\d+|final\s+day|suggested|summary)\b", line):
+            continue
+        line = re.sub(r"^\*{1,2}|\*{1,2}$", "", line).strip()
+        line = re.sub(r"^[-*•]\s+", "• ", line)
+        line = re.sub(r"^\d+\.\s+", "• ", line)
+        if line:
+            lines.append(line)
+    # Collapse trailing blank lines
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
 def parse_itinerary(text: str) -> ParsedItinerary:
     """Split agent output into recommended flight/hotel + day blocks."""
     raw = text or ""
@@ -513,18 +551,39 @@ def parse_itinerary(text: str) -> ParsedItinerary:
             result.hotel_offer = offer
             result.hotel = Block(title="Recommended hotel", body=raw[:800], urls=_urls_in(raw))
 
-    matches = list(_DAY_RE.finditer(raw))
+    # Prefer days under the itinerary / day-flow section when present
+    section = re.search(
+        r"(?is)(?:#{1,6}\s*)?(?:\*{1,2})?(?:day-by-day(?:\s+itinerary)?|suggested\s+day\s+flow)(?:\*{1,2})?\s*:?\s*(.*?)(?:\n#{0,6}\s*budget\b|\Z)",
+        raw,
+    )
+    day_src = section.group(1) if section else raw
+    matches = list(_DAY_RE.finditer(day_src))
+    if not matches and section:
+        matches = list(_DAY_RE.finditer(raw))
+        day_src = raw
+
     for i, m in enumerate(matches):
         day_num = m.group(1)
-        title_extra = (m.group(2) or "").strip()
+        is_final = bool(m.group(2))
+        title_extra = (m.group(3) or "").strip()
+        title_extra = re.sub(r"^\*{1,2}|_{1,2}$|\*{1,2}$", "", title_extra).strip(" :.-")
         start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-        chunk = raw[start:end]
-        budget_cut = re.search(r"(?im)^budget\b", chunk)
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(day_src)
+        chunk = day_src[start:end]
+        budget_cut = re.search(
+            r"(?im)^(?:#{0,6}\s*)?budget\b|^(?:#{0,6}\s*)?summary\b",
+            chunk,
+        )
         if budget_cut:
             chunk = chunk[: budget_cut.start()]
-        title = f"Day {day_num}" + (f" — {title_extra}" if title_extra else "")
-        body = chunk.strip()
+        if is_final:
+            title = "Final day" + (f" — {title_extra}" if title_extra else "")
+        else:
+            title = f"Day {day_num}" + (f" — {title_extra}" if title_extra else "")
+        body = _clean_day_body(chunk)
+        if not body and title_extra:
+            body = title_extra
+            title = f"Day {day_num}" if day_num else "Final day"
         if body or title_extra:
             result.days.append(
                 Block(title=title, body=body or title_extra, urls=_urls_in(body))
@@ -539,3 +598,91 @@ def parse_itinerary(text: str) -> ParsedItinerary:
         result.budget = re.sub(r"(?i)^#{0,6}\s*budget[^\n]*\n?", "", budget).strip() or budget
 
     return result
+
+
+def synthesize_day_blocks(
+    *,
+    nights: int,
+    destination: str = "",
+    styles: list[str] | None = None,
+) -> list[Block]:
+    """Build Seoul-style day cards when the LLM omits a day-by-day section."""
+    n = max(1, int(nights or 1))
+    style = (styles or ["First-time"])[0] if styles else "First-time"
+    dest = (destination or "your destination").strip() or "your destination"
+    low = style.lower()
+    if "food" in low:
+        focus = f"food markets and local restaurants in {dest}"
+    elif "culture" in low:
+        focus = f"museums, temples, and heritage areas in {dest}"
+    elif "family" in low:
+        focus = f"family-friendly parks and attractions in {dest}"
+    elif "adventure" in low:
+        focus = f"active day trips and viewpoints around {dest}"
+    elif "relax" in low:
+        focus = f"cafes, parks, and a slow pace in {dest}"
+    else:
+        focus = f"top highlights and neighborhoods in {dest}"
+
+    days: list[Block] = []
+    for i in range(1, n + 1):
+        if i == 1:
+            body = (
+                f"• Arrive in {dest}\n"
+                "• Hotel check-in and settle in\n"
+                "• Light neighborhood walk\n"
+                "• Easy dinner nearby"
+            )
+            title = f"Day {i} — Arrival"
+        elif i == n:
+            body = (
+                "• Morning buffer / last highlights\n"
+                "• Hotel checkout\n"
+                "• Transfer to airport or station\n"
+                "• Depart"
+            )
+            title = f"Day {i} — Departure"
+        elif i == 2:
+            body = (
+                f"• Morning: {focus}\n"
+                "• Afternoon: continue city highlights\n"
+                f"• Evening: {style} dinner plan"
+            )
+            title = f"Day {i} — Explore"
+        else:
+            body = (
+                f"• Morning: deeper {style.lower()} picks in {dest}\n"
+                "• Afternoon: flexible free time or short day trip\n"
+                "• Evening: local dinner and unwind"
+            )
+            title = f"Day {i} — Discover"
+        days.append(Block(title=title, body=body, urls=[]))
+    return days
+
+
+def ensure_day_blocks(
+    parsed: ParsedItinerary,
+    *,
+    nights: int,
+    destination: str = "",
+    styles: list[str] | None = None,
+) -> ParsedItinerary:
+    """Guarantee day cards exist; move comparison dumps into budget when needed."""
+    if parsed.days:
+        return parsed
+
+    raw = parsed.raw or ""
+    # If the model returned a price/comparison dump, keep it under budget — not days
+    if not parsed.budget and re.search(
+        r"(?i)hotel price comparison|transport comparison|lowest nightly|over budget|est\. low-end",
+        raw,
+    ):
+        cleaned = re.sub(r"(?m)^#{1,6}\s*", "", raw).strip()
+        parsed.budget = cleaned[:1800]
+
+    parsed.days = synthesize_day_blocks(
+        nights=nights,
+        destination=destination,
+        styles=styles,
+    )
+    return parsed

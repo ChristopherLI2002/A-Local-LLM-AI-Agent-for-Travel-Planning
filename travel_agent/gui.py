@@ -21,7 +21,13 @@ from PIL import Image, ImageTk
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
 from travel_agent.airline_names import airline_logo_url, is_plausible_airline_name
-from travel_agent.itinerary_parse import FlightOffer, HotelOffer, ParsedItinerary, parse_itinerary
+from travel_agent.itinerary_parse import (
+    FlightOffer,
+    HotelOffer,
+    ParsedItinerary,
+    ensure_day_blocks,
+    parse_itinerary,
+)
 from travel_agent.places import to_flight_code, to_hotel_city
 from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
 from travel_agent.trip_urls import (
@@ -74,6 +80,18 @@ FONT_UI_BOLD = ("Segoe UI Semibold", 11)
 FONT_SMALL = ("Segoe UI", 9)
 FONT_BODY = ("Segoe UI", 11)
 FONT_INPUT = ("Segoe UI", 12)
+FONT_DAY_NUM = ("Segoe UI", 36, "bold")
+FONT_DAY_BADGE = ("Segoe UI Semibold", 8)
+
+# Seoul-style day card accents (cycles per day)
+_DAY_ACCENTS = (
+    "#E85A4F",  # coral
+    "#F0A202",  # amber
+    "#3CB371",  # mint
+    "#3D9BE9",  # sky
+    "#E056A0",  # magenta
+    "#7B6CF6",  # violet
+)
 
 
 def _lerp_hex(a: str, b: str, t: float) -> str:
@@ -1317,12 +1335,21 @@ class TravelAgentApp(tk.Tk):
             fg=C["ink"],
             font=FONT_DISPLAY,
             anchor="w",
-        ).pack(fill="x", pady=(0, 8))
+        ).pack(fill="x", pady=(0, 4))
+        self.days_duration = tk.Label(
+            right,
+            text="",
+            bg="#FFFFFF",
+            fg=C["ink"],
+            font=FONT_SMALL,
+            anchor="w",
+            padx=10,
+            pady=4,
+        )
+        self.days_duration.pack(fill="x", pady=(0, 8))
 
-        days_shell = tk.Frame(right, bg=C["line"], padx=1, pady=1)
-        days_shell.pack(fill="x", anchor="n")
-        self.days_inner = tk.Frame(days_shell, bg=C["field"])
-        self.days_inner.pack(fill="x")
+        self.days_inner = tk.Frame(right, bg="#2C333A")
+        self.days_inner.pack(fill="x", anchor="n", ipadx=8, ipady=8)
         self.days_inner.bind("<Configure>", lambda _e: self._on_page_body_configure())
 
         # Refine chat dock
@@ -1466,43 +1493,57 @@ class TravelAgentApp(tk.Tk):
             self.hotel_row.set_offer(stub)
 
         self._clear_days()
+        nights = 0
+        try:
+            depart = self._trip_context.get("depart_date") or ""
+            ret = self._trip_context.get("return_date") or ""
+            if depart and ret:
+                nights = max(1, (date.fromisoformat(ret) - date.fromisoformat(depart)).days)
+        except ValueError:
+            nights = len(parsed.days) or 0
+        if not nights:
+            nights = len(parsed.days)
+        if hasattr(self, "days_duration"):
+            if nights:
+                self.days_duration.configure(
+                    text=f"  Trip Duration: {nights} Day{'s' if nights != 1 else ''}"
+                )
+            else:
+                self.days_duration.configure(text="")
+
         if not parsed.days:
+            # Should be unreachable after _ensure_days; keep a quiet placeholder
+            empty = tk.Frame(self.days_inner, bg="#FFFFFF", padx=14, pady=14)
+            empty.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
             tk.Label(
-                self.days_inner,
-                text=parsed.raw[:2000] or "No day sections found.",
-                bg=C["field"],
-                fg=C["ink"],
+                empty,
+                text="Day plan will appear here once the itinerary is ready.",
+                bg="#FFFFFF",
+                fg=C["muted"],
                 font=FONT_BODY,
                 justify="left",
                 anchor="nw",
-                wraplength=480,
-            ).pack(fill="x", padx=12, pady=12)
+            ).pack(fill="x")
             self.after(80, self._on_page_body_configure)
             return
 
-        for day in parsed.days:
-            frame = tk.Frame(self.days_inner, bg=C["field"], padx=14, pady=10)
-            frame.pack(fill="x", anchor="n")
-            tk.Frame(frame, bg=C["line"], height=1).pack(fill="x", pady=(0, 8))
-            tk.Label(
-                frame, text=day.title, bg=C["field"], fg=C["accent_deep"], font=FONT_UI_BOLD, anchor="w"
-            ).pack(fill="x")
-            tk.Label(
-                frame,
-                text=day.body,
-                bg=C["field"],
-                fg=C["ink"],
-                font=FONT_BODY,
-                justify="left",
-                anchor="nw",
-                wraplength=520,
-            ).pack(fill="x", pady=(4, 0))
-            for url in day.urls[:2]:
-                LinkLabel(frame, url, bg=C["field"], wraplength=520).pack(anchor="w", pady=2)
+        self.days_inner.columnconfigure(0, weight=1, uniform="day")
+        self.days_inner.columnconfigure(1, weight=1, uniform="day")
+        for idx, day in enumerate(parsed.days):
+            self._add_day_card(day, index=idx)
 
         if parsed.budget:
-            frame = tk.Frame(self.days_inner, bg=C["accent_glow"], padx=14, pady=12)
-            frame.pack(fill="x", padx=8, pady=12)
+            shell = tk.Frame(self.days_inner, bg=C["line"], padx=1, pady=1)
+            shell.grid(
+                row=(len(parsed.days) + 1) // 2,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+                padx=8,
+                pady=(4, 8),
+            )
+            frame = tk.Frame(shell, bg=C["accent_glow"], padx=14, pady=12)
+            frame.pack(fill="x")
             tk.Label(
                 frame, text="Budget snapshot", bg=C["accent_glow"], fg=C["ink"], font=FONT_UI_BOLD
             ).pack(anchor="w")
@@ -1517,6 +1558,120 @@ class TravelAgentApp(tk.Tk):
             ).pack(anchor="w", pady=(4, 0))
 
         self.after(80, self._on_page_body_configure)
+
+    def _day_theme_icon(self, text: str) -> str:
+        """Pick a simple footer icon from the day's activity text."""
+        low = (text or "").lower()
+        if any(k in low for k in ("flight", "airport", "arrive", "depart", "transfer")):
+            return "✈"
+        if any(k in low for k in ("dinner", "lunch", "food", "cuisine", "ramen", "sushi", "cafe")):
+            return "🍽"
+        if any(k in low for k in ("temple", "shrine", "palace", "museum", "asakusa", "senso")):
+            return "⛩"
+        if any(k in low for k in ("shop", "market", "ginza", "harajuku")):
+            return "✦"
+        if any(k in low for k in ("park", "garden", "hike", "nature", "ueno")):
+            return "❀"
+        if any(k in low for k in ("hotel", "check-in", "check in", "checkout", "check-out")):
+            return "⌂"
+        return "◎"
+
+    def _add_day_card(self, day: object, *, index: int = 0) -> None:
+        """Seoul-itinerary style: big day number, DAY badge, list, dark footer."""
+        title = getattr(day, "title", "Day") or "Day"
+        body = getattr(day, "body", "") or ""
+        urls = list(getattr(day, "urls", []) or [])
+
+        m = re.match(r"(?i)^day\s+(\d+)\b", title)
+        if m:
+            num = int(m.group(1))
+        elif re.match(r"(?i)^final\b", title):
+            num = index + 1
+        else:
+            num = index + 1
+        num_label = f"{num:02d}"
+        accent = _DAY_ACCENTS[index % len(_DAY_ACCENTS)]
+
+        if "—" in title:
+            _heading, subtitle = [p.strip() for p in title.split("—", 1)]
+        else:
+            subtitle = ""
+
+        raw_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        activities: list[str] = []
+        for ln in raw_lines:
+            ln = re.sub(r"^[•\-\*]\s*", "", ln)
+            ln = re.sub(r"^\d+[\.)]\s*", "", ln)
+            if ln:
+                activities.append(ln)
+        if not activities:
+            activities = ["Details coming soon."]
+
+        cols = 2
+        row, col = divmod(index, cols)
+        wrap = tk.Frame(self.days_inner, bg="#2C333A")
+        wrap.grid(row=row, column=col, sticky="nsew", padx=8, pady=8)
+
+        card = tk.Frame(wrap, bg="#FFFFFF")
+        card.pack(fill="both", expand=True)
+
+        head = tk.Frame(card, bg="#FFFFFF")
+        head.pack(fill="x", padx=14, pady=(12, 4))
+        tk.Label(
+            head,
+            text=num_label,
+            bg="#FFFFFF",
+            fg=accent,
+            font=FONT_DAY_NUM,
+            anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            head,
+            text=" DAY ",
+            bg=accent,
+            fg="#FFFFFF",
+            font=FONT_DAY_BADGE,
+            padx=6,
+            pady=3,
+        ).pack(side="right", anchor="n", pady=(6, 0))
+
+        if subtitle:
+            tk.Label(
+                card,
+                text=subtitle,
+                bg="#FFFFFF",
+                fg=C["ink_soft"],
+                font=FONT_SMALL,
+                anchor="w",
+            ).pack(fill="x", padx=14, pady=(0, 4))
+
+        body_frame = tk.Frame(card, bg="#FFFFFF")
+        body_frame.pack(fill="both", expand=True, padx=14, pady=(4, 10))
+        for i, line in enumerate(activities[:8]):
+            tk.Label(
+                body_frame,
+                text=f"{i + 1}. {line}",
+                bg="#FFFFFF",
+                fg="#1A1A1A",
+                font=("Segoe UI", 10),
+                justify="left",
+                anchor="nw",
+                wraplength=220,
+            ).pack(fill="x", pady=(0, 4))
+
+        for url in urls[:1]:
+            LinkLabel(body_frame, url, bg="#FFFFFF", wraplength=220).pack(anchor="w", pady=(4, 0))
+
+        footer = tk.Frame(card, bg="#3D4F5F", height=36)
+        footer.pack(fill="x", side="bottom")
+        footer.pack_propagate(False)
+        tk.Label(
+            footer,
+            text=self._day_theme_icon(body + " " + title),
+            bg="#3D4F5F",
+            fg="#FFFFFF",
+            font=("Segoe UI", 14),
+        ).pack(expand=True)
 
     def _show_raw(self) -> None:
         if not self._last_plan:
@@ -1589,14 +1744,15 @@ class TravelAgentApp(tk.Tk):
         self.flight_row.set_loading("Comparing flights on Trip.com…")
         self.hotel_row.set_loading("Comparing hotels on Trip.com…")
         self._clear_days()
+        loading = tk.Frame(self.days_inner, bg="#FFFFFF", padx=14, pady=16)
+        loading.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
         tk.Label(
-            self.days_inner,
+            loading,
             text="Building your itinerary… this can take a few minutes.",
-            bg=C["field"],
+            bg="#FFFFFF",
             fg=C["muted"],
             font=FONT_BODY,
-            padx=12,
-            pady=16,
+            anchor="w",
         ).pack(anchor="w")
         self._set_busy(True, "Building Trip.Planner-style itinerary…")
 
@@ -2072,8 +2228,30 @@ class TravelAgentApp(tk.Tk):
     def _apply_plan(self, text: str) -> None:
         self._last_plan = text
         parsed = self._apply_booking_urls(parse_itinerary(text))
+        parsed = self._ensure_days(parsed)
         self._render_parsed(parsed)
         self._append_chat("System", "Itinerary ready. Refine below if you like.", "agent")
+
+    def _ensure_days(self, parsed: ParsedItinerary) -> ParsedItinerary:
+        """Always show Seoul-style day cards for the trip length."""
+        nights = 0
+        try:
+            depart = self._trip_context.get("depart_date") or ""
+            ret = self._trip_context.get("return_date") or ""
+            if depart and ret:
+                nights = max(1, (date.fromisoformat(ret) - date.fromisoformat(depart)).days)
+        except ValueError:
+            nights = 0
+        if not nights:
+            nights = max(len(parsed.days), 3)
+        styles = self._selected_styles() if hasattr(self, "_style_vars") else []
+        dest = self._trip_context.get("destination", "") or ""
+        return ensure_day_blocks(
+            parsed,
+            nights=nights,
+            destination=dest,
+            styles=styles,
+        )
 
     def _on_refine(self) -> None:
         if self._busy:
@@ -2114,6 +2292,7 @@ class TravelAgentApp(tk.Tk):
         self._last_plan = text
         self._append_chat("Agent", text[:800] + ("…" if len(text) > 800 else ""), "agent")
         parsed = self._apply_booking_urls(parse_itinerary(text))
+        parsed = self._ensure_days(parsed)
         self._render_parsed(parsed)
 
     def _append_chat(self, who: str, text: str, tag: str) -> None:

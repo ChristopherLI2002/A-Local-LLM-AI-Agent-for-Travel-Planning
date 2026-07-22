@@ -27,16 +27,18 @@ Output rules (plain text, no HTML):
    duration, stops, baggage if known, HKD price, and exact hk.trip.com URL
 2) Then "Recommended hotel" with hotel name, stars, score/reviews, location, features,
    room/beds, nightly + total HKD, and exact hk.trip.com hotel DETAIL URL (/hotels/detail/?hotelId=...)
-3) Then "Day-by-day itinerary" with "Day 1:", "Day 2:", ... shaped by travel style
+3) Then "Day-by-day itinerary" with EXACT lines "Day 1:", "Day 2:", ... (one block per
+   trip day — never skip this section; never replace it with only price comparisons)
 4) End with "Budget snapshot"
 
 Hard rules:
 - Prefer Recommended hotel detail link / Hotel option link from tools (not list/search URLs).
 - NEVER invent www.trip.com generic /search URLs or fake prices.
 - Only use https://hk.trip.com/... links that appear in tool results.
-- Round-trip flights; hotel stay matches full trip length.
+- Round-trip flights; hotel stay matches full trip length (use the user's return_date).
 - Travel style must change the itinerary pace (Culture vs Food vs Family, etc.).
 - When refining, keep the same section headings so the UI can re-parse the plan.
+- Do NOT dump raw tool tables as the final answer — rewrite into the four sections above.
 """
 
 
