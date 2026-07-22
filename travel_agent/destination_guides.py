@@ -397,25 +397,107 @@ def day_ideas_for(
     return ideas
 
 
-def format_day_body(idea: DayIdea) -> str:
-    """Timetable lines: HH:MM + plain activity (no Transit/Go/Lunch labels)."""
+def _parse_hhmm(raw: str) -> tuple[int, int] | None:
+    m = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", (raw or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _fmt_hhmm(h: int, m: int) -> str:
+    h = max(0, min(23, h))
+    m = max(0, min(59, m))
+    return f"{h:02d}:{m:02d}"
+
+
+def _add_minutes(h: int, m: int, delta: int) -> tuple[int, int]:
+    total = h * 60 + m + delta
+    total = max(0, min(23 * 60 + 59, total))
+    return total // 60, total % 60
+
+
+def format_day_body(
+    idea: DayIdea,
+    *,
+    arrive_time: str = "",
+    return_depart_time: str = "",
+) -> str:
+    """Timetable lines: HH:MM + plain activity (no Transit/Go/Lunch labels).
+
+    Arrival day starts after the inbound flight lands.
+    Departure day finishes before the outbound/return flight departs.
+    """
     title_l = idea.title.lower()
+    arrive = _parse_hhmm(arrive_time)
+    ret_dep = _parse_hhmm(return_depart_time)
+
     if "arrival" in title_l:
-        slots = [
-            ("11:00", f"Arrive and transfer ({idea.route})"),
-            ("13:00", "Hotel check-in and drop bags"),
-            ("14:30", idea.go),
-            ("16:30", idea.lunch),
-            ("18:00", idea.also),
-            ("19:30", idea.dinner),
-        ]
+        if arrive:
+            # Immigration + bags + transfer buffer after touchdown
+            land_h, land_m = arrive
+            t0 = _add_minutes(land_h, land_m, 0)
+            t1 = _add_minutes(land_h, land_m, 75)   # hotel check-in
+            t2 = _add_minutes(land_h, land_m, 105)  # light nearby walk if evening
+            t3 = _add_minutes(land_h, land_m, 150)  # dinner
+            slots: list[tuple[str, str]] = [
+                (_fmt_hhmm(*t0), f"Land and transfer ({idea.route})"),
+                (_fmt_hhmm(*t1), "Hotel check-in and drop bags"),
+            ]
+            # Only keep evening activities that still fit before ~23:00
+            if t2[0] < 23 or (t2[0] == 22 and t2[1] <= 45):
+                # Prefer a short nearby activity over full daytime list
+                nearby = idea.also if "observatory" in idea.also.lower() or "night" in idea.also.lower() else idea.go
+                if t2[0] >= 21:
+                    slots.append((_fmt_hhmm(*t2), f"Light neighborhood walk near hotel ({nearby.split(',')[0]})"))
+                else:
+                    slots.append((_fmt_hhmm(*t2), nearby))
+            if t3[0] < 23 or (t3[0] == 22 and t3[1] <= 50):
+                slots.append((_fmt_hhmm(*t3), idea.dinner))
+            if len(slots) < 3:
+                slots.append((_fmt_hhmm(*_add_minutes(land_h, land_m, 90)), "Rest at hotel after the flight"))
+        else:
+            slots = [
+                ("11:00", f"Arrive and transfer ({idea.route})"),
+                ("13:00", "Hotel check-in and drop bags"),
+                ("14:30", idea.go),
+                ("16:30", idea.lunch),
+                ("18:00", idea.also),
+                ("19:30", idea.dinner),
+            ]
     elif "departure" in title_l:
-        slots = [
-            ("09:00", idea.go),
-            ("10:30", idea.lunch),
-            ("12:00", idea.also),
-            ("13:30", f"Depart ({idea.route})"),
-        ]
+        if ret_dep:
+            dep_h, dep_m = ret_dep
+            # Leave hotel ~3.5h before flight for airport transfer / security
+            leave_h, leave_m = _add_minutes(dep_h, dep_m, -210)
+            leave_mins = leave_h * 60 + leave_m
+            slots = []
+            if leave_mins >= 8 * 60:
+                # Enough morning for a light outing before checkout
+                slots.append((_fmt_hhmm(*_add_minutes(leave_h, leave_m, -150)), idea.go))
+                slots.append((_fmt_hhmm(*_add_minutes(leave_h, leave_m, -75)), idea.lunch))
+            elif leave_mins >= 6 * 60:
+                slots.append((_fmt_hhmm(*_add_minutes(leave_h, leave_m, -60)), idea.go))
+            else:
+                # Very early flight — keep it short
+                wake_h, wake_m = _add_minutes(leave_h, leave_m, -40)
+                if wake_h * 60 + wake_m < 4 * 60:
+                    wake_h, wake_m = 4, 0
+                # Ensure wake is strictly before leave
+                if (wake_h, wake_m) >= (leave_h, leave_m):
+                    wake_h, wake_m = _add_minutes(leave_h, leave_m, -30)
+                slots.append((_fmt_hhmm(wake_h, wake_m), "Wake up, pack, and hotel checkout"))
+            slots.append(
+                (_fmt_hhmm(leave_h, leave_m), f"Transfer to airport ({idea.route})")
+            )
+            slots.append((_fmt_hhmm(dep_h, dep_m), f"Flight departs at {_fmt_hhmm(dep_h, dep_m)}"))
+            slots = sorted(slots, key=lambda x: x[0])
+        else:
+            slots = [
+                ("09:00", idea.go),
+                ("10:30", idea.lunch),
+                ("12:00", idea.also),
+                ("13:30", f"Depart ({idea.route})"),
+            ]
     elif "day trip" in title_l or "nikko" in title_l or "kamakura" in title_l or "jiufen" in title_l or "nara" in title_l:
         slots = [
             ("08:00", f"Depart ({idea.route})"),

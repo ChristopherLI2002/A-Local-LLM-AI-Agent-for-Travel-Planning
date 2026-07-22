@@ -606,6 +606,8 @@ def synthesize_day_blocks(
     nights: int,
     destination: str = "",
     styles: list[str] | None = None,
+    arrive_time: str = "",
+    return_depart_time: str = "",
 ) -> list[Block]:
     """Build detailed day cards with named attractions and restaurants."""
     from travel_agent.destination_guides import (
@@ -619,7 +621,11 @@ def synthesize_day_blocks(
     ideas = day_ideas_for(destination, n, styles=styles)
     days: list[Block] = []
     for i, idea in enumerate(ideas, start=1):
-        body = format_day_body(idea)
+        body = format_day_body(
+            idea,
+            arrive_time=arrive_time if i == 1 else "",
+            return_depart_time=return_depart_time if i == n else "",
+        )
         days.append(
             Block(
                 title=format_day_title(idea, i),
@@ -637,6 +643,8 @@ def ensure_day_blocks(
     nights: int,
     destination: str = "",
     styles: list[str] | None = None,
+    arrive_time: str = "",
+    return_depart_time: str = "",
 ) -> ParsedItinerary:
     """Guarantee detailed day cards with exact places to visit and eat."""
     raw = parsed.raw or ""
@@ -655,10 +663,29 @@ def ensure_day_blocks(
             nights=n,
             destination=destination,
             styles=styles,
+            arrive_time=arrive_time,
+            return_depart_time=return_depart_time,
         )
     else:
-        from travel_agent.attraction_images import enrich_block_images
+        from travel_agent.attraction_images import enrich_block_images, images_for_timetable
+        from travel_agent.destination_guides import day_ideas_for, format_day_body, format_day_title
 
         for day in parsed.days:
             enrich_block_images(day, destination)
+
+        # Patch only arrival / departure days to match live flight times
+        if arrive_time or return_depart_time:
+            ideas = day_ideas_for(destination, max(n, len(parsed.days) or n), styles=styles)
+            if ideas and parsed.days and arrive_time:
+                body = format_day_body(ideas[0], arrive_time=arrive_time)
+                parsed.days[0].title = format_day_title(ideas[0], 1)
+                parsed.days[0].body = body
+                parsed.days[0].images = images_for_timetable(body, destination)
+            if ideas and parsed.days and return_depart_time:
+                last = ideas[-1]
+                idx = len(parsed.days)
+                body = format_day_body(last, return_depart_time=return_depart_time)
+                parsed.days[-1].title = format_day_title(last, idx)
+                parsed.days[-1].body = body
+                parsed.days[-1].images = images_for_timetable(body, destination)
     return parsed

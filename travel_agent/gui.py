@@ -1532,31 +1532,18 @@ class TravelAgentApp(tk.Tk):
         for idx, day in enumerate(parsed.days):
             self._add_day_card(day, index=idx)
 
-        if parsed.budget:
-            shell = tk.Frame(self.days_inner, bg=C["line"], padx=1, pady=1)
-            shell.grid(
-                row=len(parsed.days),
-                column=0,
-                sticky="ew",
-                padx=8,
-                pady=(4, 8),
-            )
-            frame = tk.Frame(shell, bg=C["accent_glow"], padx=14, pady=12)
-            frame.pack(fill="x")
-            tk.Label(
-                frame, text="Budget snapshot", bg=C["accent_glow"], fg=C["ink"], font=FONT_UI_BOLD
-            ).pack(anchor="w")
-            tk.Label(
-                frame,
-                text=parsed.budget,
-                bg=C["accent_glow"],
-                fg=C["ink"],
-                font=FONT_BODY,
-                justify="left",
-                wraplength=520,
-            ).pack(anchor="w", pady=(4, 0))
-
         self.after(80, self._on_page_body_configure)
+
+    def _day_calendar_date(self, index: int) -> str:
+        """Calendar date for day card index 0 = trip depart date."""
+        depart = (self._trip_context.get("depart_date") or "").strip()
+        if not depart:
+            return ""
+        try:
+            d = date.fromisoformat(depart) + timedelta(days=max(0, index))
+        except ValueError:
+            return ""
+        return d.strftime("%a, %d %b %Y")
 
     def _day_theme_icon(self, text: str) -> str:
         """Pick a simple footer icon from the day's activity text."""
@@ -1634,8 +1621,12 @@ class TravelAgentApp(tk.Tk):
 
         if "—" in title:
             _heading, subtitle = [p.strip() for p in title.split("—", 1)]
+        elif " - " in title:
+            _heading, subtitle = [p.strip() for p in title.split(" - ", 1)]
         else:
             subtitle = ""
+
+        day_date = self._day_calendar_date(index)
 
         raw_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
         activities: list[str] = []
@@ -1655,14 +1646,25 @@ class TravelAgentApp(tk.Tk):
 
         head = tk.Frame(card, bg="#FFFFFF")
         head.pack(fill="x", padx=14, pady=(12, 4))
+        left_head = tk.Frame(head, bg="#FFFFFF")
+        left_head.pack(side="left", fill="x", expand=True)
         tk.Label(
-            head,
+            left_head,
             text=num_label,
             bg="#FFFFFF",
             fg=accent,
             font=FONT_DAY_NUM,
             anchor="w",
         ).pack(side="left")
+        if day_date:
+            tk.Label(
+                left_head,
+                text=day_date,
+                bg="#FFFFFF",
+                fg=C["ink"],
+                font=("Segoe UI Semibold", 11),
+                anchor="w",
+            ).pack(side="left", padx=(12, 0), pady=(10, 0))
         tk.Label(
             head,
             text=" DAY ",
@@ -2331,11 +2333,29 @@ class TravelAgentApp(tk.Tk):
             nights = max(len(parsed.days), 3)
         styles = self._selected_styles() if hasattr(self, "_style_vars") else []
         dest = self._trip_context.get("destination", "") or ""
+
+        arrive_time = ""
+        return_depart_time = ""
+        if self.agent:
+            links = self.agent.booking_links
+            arrive_time = (links.get("flight_arrive") or "").strip()
+            return_depart_time = (links.get("flight_return_depart") or "").strip()
+        if parsed.flight_offer:
+            if not arrive_time and parsed.flight_offer.arrive_time not in {"", "--:--"}:
+                arrive_time = parsed.flight_offer.arrive_time
+            if not return_depart_time and parsed.flight_offer.return_depart_time not in {
+                "",
+                "--:--",
+            }:
+                return_depart_time = parsed.flight_offer.return_depart_time
+
         return ensure_day_blocks(
             parsed,
             nights=nights,
             destination=dest,
             styles=styles,
+            arrive_time=arrive_time,
+            return_depart_time=return_depart_time,
         )
 
     def _on_refine(self) -> None:
