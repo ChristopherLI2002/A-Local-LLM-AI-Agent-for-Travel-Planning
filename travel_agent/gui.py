@@ -731,11 +731,15 @@ class HotelRowCard(tk.Frame):
         body = tk.Frame(self.card, bg="#FFFFFF")
         body.pack(fill="x")
 
-        # Compact photo on top for the narrow bookings column
+        # Full-bleed hotel photo across the bookings column
         self.photo = tk.Canvas(
-            body, width=260, height=96, bg="#2A3340", highlightthickness=0
+            body, width=280, height=140, bg="#2A3340", highlightthickness=0
         )
         self.photo.pack(fill="x")
+        self._hotel_photo: tk.PhotoImage | None = None
+        self._PHOTO_W = 280
+        self._PHOTO_H = 140
+        self.photo.bind("<Configure>", self._on_photo_configure)
         self._draw_photo_placeholder()
 
         info = tk.Frame(body, bg="#FFFFFF", padx=10, pady=10)
@@ -876,27 +880,76 @@ class HotelRowCard(tk.Frame):
 
         self.set_loading("Waiting for plan…")
 
+    def _on_photo_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if event.width > 40 and abs(event.width - self._PHOTO_W) > 2:
+            self._PHOTO_W = event.width
+            self._PHOTO_H = max(120, event.height or self._PHOTO_H)
+
     def _draw_photo_placeholder(self, title: str = "Hotel") -> None:
+        self._hotel_photo = None
         self.photo.delete("all")
-        w, h = 260, 96
+        w = max(self.photo.winfo_width(), self._PHOTO_W, 280)
+        h = self._PHOTO_H
+        self._PHOTO_W = w
         for i in range(10):
             t = i / 9
             color = _lerp_hex("#1A2230", "#C47A3A", t * 0.55)
             self.photo.create_rectangle(
                 0, int(h * i / 10), w, int(h * (i + 1) / 10) + 1, outline="", fill=color
             )
-        self.photo.create_rectangle(24, 28, 110, 90, fill="#243041", outline="")
-        self.photo.create_rectangle(34, 38, 46, 50, fill="#F0C878", outline="")
-        self.photo.create_rectangle(56, 38, 68, 50, fill="#F0C878", outline="")
-        self.photo.create_rectangle(78, 38, 90, 50, fill="#E8B86A", outline="")
-        self.photo.create_rectangle(34, 58, 46, 70, fill="#E8B86A", outline="")
-        self.photo.create_rectangle(56, 58, 68, 70, fill="#F0C878", outline="")
-        self.photo.create_rectangle(58, 74, 78, 90, fill="#1A2230", outline="")
-        self.photo.create_oval(228, 8, 250, 30, fill="#FFFFFF", outline="")
-        self.photo.create_text(239, 19, text="♡", fill="#1B3A6B", font=("Segoe UI", 10))
+        self.photo.create_rectangle(24, 36, 110, h - 14, fill="#243041", outline="")
+        self.photo.create_rectangle(34, 46, 46, 58, fill="#F0C878", outline="")
+        self.photo.create_rectangle(56, 46, 68, 58, fill="#F0C878", outline="")
+        self.photo.create_rectangle(78, 46, 90, 58, fill="#E8B86A", outline="")
+        self.photo.create_rectangle(34, 66, 46, 78, fill="#E8B86A", outline="")
+        self.photo.create_rectangle(56, 66, 68, 78, fill="#F0C878", outline="")
+        self.photo.create_rectangle(58, 86, 78, h - 14, fill="#1A2230", outline="")
+        self.photo.create_oval(w - 32, 8, w - 10, 30, fill="#FFFFFF", outline="")
+        self.photo.create_text(w - 21, 19, text="♡", fill="#1B3A6B", font=("Segoe UI", 10))
         self.photo.create_text(
-            130, 18, text=(title[:18] if title else "Hotel"), fill="#FFFFFF", font=("Segoe UI", 8)
+            min(130, w // 2),
+            18,
+            text=(title[:18] if title else "Hotel"),
+            fill="#FFFFFF",
+            font=("Segoe UI", 8),
         )
+
+    def _set_hotel_photo(self, offer: HotelOffer) -> None:
+        url = (offer.image_url or "").strip().rstrip(".,;)")
+        if not url.startswith("http"):
+            self._draw_photo_placeholder(offer.name or "Hotel")
+            return
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                    "Referer": "https://hk.trip.com/",
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                },
+            )
+            data = urllib.request.urlopen(req, timeout=15).read()
+            img = Image.open(BytesIO(data)).convert("RGB")
+            target_w = max(self.photo.winfo_width(), self._PHOTO_W, 280)
+            target_h = self._PHOTO_H
+            scale = max(target_w / max(img.width, 1), target_h / max(img.height, 1))
+            new_w = max(1, round(img.width * scale))
+            new_h = max(1, round(img.height * scale))
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            left = max(0, (new_w - target_w) // 2)
+            top = max(0, (new_h - target_h) // 2)
+            fitted = resized.crop((left, top, left + target_w, top + target_h))
+            photo = ImageTk.PhotoImage(fitted)
+            self._hotel_photo = photo
+            self._PHOTO_W = target_w
+            self.photo.delete("all")
+            self.photo.create_image(0, 0, image=photo, anchor="nw")
+        except Exception:
+            self._draw_photo_placeholder(offer.name or "Hotel")
 
     def _open(self, _e: object | None = None) -> None:
         if self._url and is_trusted_hotel_detail_url(self._url):
@@ -928,7 +981,7 @@ class HotelRowCard(tk.Frame):
         self._url = ""
 
     def set_offer(self, offer: HotelOffer) -> None:
-        self._draw_photo_placeholder(offer.name)
+        self._set_hotel_photo(offer)
         self.name_lbl.configure(text=offer.name)
         self.stars_lbl.configure(text="★" * max(0, min(offer.stars, 5)))
         self.score_badge.configure(text=offer.score or "—")
@@ -1550,16 +1603,50 @@ class TravelAgentApp(tk.Tk):
         def job() -> str:
             assert self.agent is not None
             answer = self.agent.chat(query)
-            ctx = self._trip_context
-            checkout = ctx.get("return_date") or ""
-            if not checkout:
-                try:
-                    checkout = (
-                        date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
-                    ).isoformat()
-                except ValueError:
-                    checkout = ctx["depart_date"]
-            # Flight card first (needs a clean Trip.com flight session for return leg)
+            # Live card refresh must not wipe a finished itinerary on navigation errors
+            try:
+                self._refresh_live_booking_cards()
+            except Exception:
+                pass
+            return answer
+
+        self._run_browser_job(
+            job,
+            on_ok=lambda answer: self._apply_plan(answer),
+            on_err=lambda e: self._apply_plan(f"Error: {e}"),
+            done=lambda: self._set_busy(False),
+        )
+
+    def _refresh_live_booking_cards(self) -> None:
+        """Refresh flight/hotel card fields from Trip.com (browser thread only)."""
+        if not self.agent:
+            return
+        ctx = self._trip_context
+        checkout = ctx.get("return_date") or ""
+        if not checkout and ctx.get("depart_date"):
+            try:
+                checkout = (
+                    date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
+                ).isoformat()
+            except ValueError:
+                checkout = ctx["depart_date"]
+
+        # Hotel photo/details first — flight goto must not discard hotel image work
+        try:
+            if not is_trusted_hotel_detail_url(self.agent.booking_links.get("hotel", "")):
+                if ctx.get("destination") and ctx.get("depart_date"):
+                    live = fetch_hotel_detail_link(
+                        self.agent.browser,
+                        city=ctx["destination"],
+                        checkin=ctx["depart_date"],
+                        checkout=checkout,
+                    )
+                    self._merge_live_hotel(live)
+            self._ensure_hotel_image()
+        except Exception:
+            pass
+
+        try:
             if ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
                 live_flight = fetch_flight_card(
                     self.agent.browser,
@@ -1569,25 +1656,8 @@ class TravelAgentApp(tk.Tk):
                     return_date=ctx.get("return_date") or checkout,
                 )
                 self._merge_live_flight(live_flight)
-            if not is_trusted_hotel_detail_url(
-                self.agent.booking_links.get("hotel", "")
-            ):
-                if ctx.get("destination") and ctx.get("depart_date"):
-                    live = fetch_hotel_detail_link(
-                        self.agent.browser,
-                        city=ctx["destination"],
-                        checkin=ctx["depart_date"],
-                        checkout=checkout,
-                    )
-                    self._merge_live_hotel(live)
-            return answer
-
-        self._run_browser_job(
-            job,
-            on_ok=lambda answer: self._apply_plan(answer),
-            on_err=lambda exc: self._apply_plan(f"Error: {exc}"),
-            done=lambda: self._set_busy(False),
-        )
+        except Exception:
+            pass
 
     def _merge_live_hotel(self, live: dict[str, str]) -> None:
         """Copy scraped hotel detail fields into agent.booking_links."""
@@ -1604,9 +1674,30 @@ class TravelAgentApp(tk.Tk):
             "hotel_score",
             "hotel_location",
             "hotel_reviews",
+            "hotel_image",
         ):
             if live.get(key):
                 self.agent.booking_links[key] = live[key]
+
+    def _ensure_hotel_image(self) -> None:
+        """Scrape hotel cover photo from the detail page when missing."""
+        if not self.agent:
+            return
+        links = self.agent.booking_links
+        if links.get("hotel_image"):
+            return
+        url = links.get("hotel", "")
+        if not is_trusted_hotel_detail_url(url):
+            return
+        scrape = getattr(self.agent.browser, "scrape_hotel_image_url", None)
+        if not scrape:
+            return
+        try:
+            img = scrape(url)
+        except Exception:
+            img = ""
+        if img:
+            links["hotel_image"] = img
 
     def _merge_live_flight(self, live: dict[str, str]) -> None:
         """Copy scraped flight card fields into agent.booking_links."""
@@ -1924,6 +2015,19 @@ class TravelAgentApp(tk.Tk):
                     pass
             if links.get("hotel_reviews"):
                 offer.reviews = links["hotel_reviews"]
+            if links.get("hotel_image"):
+                offer.image_url = links["hotel_image"].rstrip(".,;)")
+            elif offer.url and not offer.image_url:
+                # leave empty; live scrape should have filled booking_links
+                pass
+
+        if not offer.image_url:
+            alt_img = re.search(
+                r"(?i)(?:image|photo|cover)\s*[:\-]\s*(https?://\S+)",
+                parsed.raw or "",
+            )
+            if alt_img:
+                offer.image_url = alt_img.group(1).rstrip(".,;)")
 
         if _bad_name(offer.name) or offer.price_label == "See Trip.com":
             section = ""
@@ -1993,35 +2097,10 @@ class TravelAgentApp(tk.Tk):
         def job() -> str:
             assert self.agent is not None
             answer = self.agent.chat(refine)
-            ctx = self._trip_context
-            checkout = ctx.get("return_date") or ""
-            if not checkout and ctx.get("depart_date"):
-                try:
-                    checkout = (
-                        date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
-                    ).isoformat()
-                except ValueError:
-                    checkout = ctx["depart_date"]
-            if ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
-                live_flight = fetch_flight_card(
-                    self.agent.browser,
-                    origin=ctx["origin"],
-                    destination=ctx["destination"],
-                    depart_date=ctx["depart_date"],
-                    return_date=ctx.get("return_date") or checkout,
-                )
-                self._merge_live_flight(live_flight)
-            if not is_trusted_hotel_detail_url(
-                self.agent.booking_links.get("hotel", "")
-            ):
-                if ctx.get("destination") and ctx.get("depart_date"):
-                    live = fetch_hotel_detail_link(
-                        self.agent.browser,
-                        city=ctx["destination"],
-                        checkin=ctx["depart_date"],
-                        checkout=checkout,
-                    )
-                    self._merge_live_hotel(live)
+            try:
+                self._refresh_live_booking_cards()
+            except Exception:
+                pass
             return answer
 
         self._run_browser_job(

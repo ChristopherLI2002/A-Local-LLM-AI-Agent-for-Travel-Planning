@@ -26,6 +26,27 @@ from travel_agent.trip_urls import ensure_locale_curr, normalize_trip_url, extra
 TRIP_HOME = f"{settings.trip_base_url}/?locale={settings.trip_locale}&curr={settings.trip_currency}"
 
 
+def _prefer_hotel_photo_url(src: str) -> str:
+    """Normalize TripCDN thumbs toward a larger JPEG cover when possible."""
+    out = (src or "").split("?")[0].strip()
+    if not out:
+        return ""
+    # List cards often use 600x600 webp thumbs — prefer the 960x660 JPEG sibling
+    out = re.sub(
+        r"_R_600_600_R5_D\.jpg_\.webp$",
+        "_R_960_660_R5_D.jpg",
+        out,
+        flags=re.I,
+    )
+    out = re.sub(
+        r"_R_600_600_R5_D\.webp$",
+        "_R_960_660_R5_D.jpg",
+        out,
+        flags=re.I,
+    )
+    return out
+
+
 def _default_depart(days_ahead: int = 21) -> str:
     return (date.today() + timedelta(days=days_ahead)).isoformat()
 
@@ -283,9 +304,38 @@ class TripBrowser:
             raise RuntimeError("Browser is not started. Call start() first.")
         return self.page
 
+    def _safe_goto(
+        self,
+        url: str,
+        *,
+        wait_until: str = "domcontentloaded",
+        timeout: int = 45000,
+        retries: int = 3,
+    ) -> None:
+        """Navigate with retries when Trip.com interrupts with a competing redirect."""
+        page = self._require_page()
+        last_err: Exception | None = None
+        for attempt in range(max(1, retries)):
+            try:
+                page.goto(url, wait_until=wait_until, timeout=timeout)
+                return
+            except Exception as exc:
+                last_err = exc
+                msg = str(exc).lower()
+                if "interrupted" not in msg and "navigation" not in msg:
+                    raise
+                # Let the interrupting navigation settle, then retry the target URL
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=8000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(800 + attempt * 400)
+        if last_err:
+            raise last_err
+
     def open_home(self) -> str:
         page = self._require_page()
-        page.goto(TRIP_HOME, wait_until="domcontentloaded")
+        self._safe_goto(TRIP_HOME)
         page.wait_for_timeout(1500)
         return f"Opened Trip.com Hong Kong home: {page.url}"
 
@@ -364,7 +414,7 @@ class TripBrowser:
                 return
 
         page.on("response", _on_flight_api)
-        page.goto(canonical, wait_until="domcontentloaded")
+        self._safe_goto(canonical)
         page.wait_for_timeout(3000)
         self._dismiss_popups()
         # Fares hydrate after calendar/API calls — wait until listing rows appear
@@ -439,7 +489,7 @@ class TripBrowser:
                     }
                     # Restore outbound search URL context for booking link
                     try:
-                        page.goto(canonical, wait_until="domcontentloaded")
+                        self._safe_goto(canonical)
                         page.wait_for_timeout(1500)
                     except Exception:
                         pass
@@ -546,7 +596,7 @@ class TripBrowser:
             params["keyword"] = city_name
 
         canonical = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
-        page.goto(canonical, wait_until="domcontentloaded")
+        self._safe_goto(canonical)
         page.wait_for_timeout(2500)
         self._dismiss_popups()
 
@@ -564,7 +614,7 @@ class TripBrowser:
                 f"{settings.trip_base_url}/hotels/"
                 f"?locale={settings.trip_locale}&curr={settings.trip_currency}"
             )
-            page.goto(hub, wait_until="domcontentloaded")
+            self._safe_goto(hub)
             page.wait_for_timeout(1500)
             self._dismiss_popups()
             self._try_fill_hotel_form(city_name, checkin, checkout, adults_n, rooms_n)
@@ -648,6 +698,12 @@ class TripBrowser:
             rec_name = hotel_card["name"]
         card_block = ""
         if hotel_card:
+            # Prefer list-card photo; only open detail when missing (detail often
+            # redirects to /hotels/booknew and races later flight navigations)
+            if rec_detail and not hotel_card.get("image_url"):
+                img = self.scrape_hotel_image_url(rec_detail)
+                if img:
+                    hotel_card["image_url"] = img
             card_block = (
                 "Structured hotel card:\n"
                 f"- Hotel: {hotel_card.get('name', rec_name)}\n"
@@ -656,6 +712,11 @@ class TripBrowser:
                 f"- Location: {hotel_card.get('location', city_name)}\n"
                 f"- Nightly: {hotel_card.get('price_label', '')}\n"
                 f"- Reviews: {hotel_card.get('reviews', '')}\n"
+                + (
+                    f"- Image: {hotel_card['image_url']}\n"
+                    if hotel_card.get("image_url")
+                    else ""
+                )
             )
         content = body if prices and len(body) > 400 else snippet
         return _clean_text(
@@ -2052,6 +2113,79 @@ Transport modes: {", ".join(modes)}
                     return times[0], times[1]
         return "", ""
 
+    def scrape_hotel_image_url(self, detail_url: str = "") -> str:
+        """Return the main hotel photo URL from a Trip.com hotel detail page."""
+        page = self._require_page()
+        if detail_url and "trip.com" in detail_url.lower():
+            try:
+                self._safe_goto(detail_url)
+                page.wait_for_timeout(3500)
+                self._dismiss_popups()
+                # If Trip.com bounced to booknew, try to recover overview meta from there
+            except Exception:
+                return ""
+
+        # Prefer Open Graph cover image
+        try:
+            og = page.locator("meta[property='og:image']")
+            if og.count():
+                content = (og.first.get_attribute("content") or "").strip()
+                if content.startswith("http") and "tripcdn.com" in content.lower():
+                    return _prefer_hotel_photo_url(content)
+        except Exception:
+            pass
+
+        # Prefer dedicated overview / gallery hero image
+        for sel in (
+            "img[alt*='hotel overview' i]",
+            "img[alt*='overview picture' i]",
+            "img[alt*='Hotel' i]",
+        ):
+            try:
+                loc = page.locator(sel)
+                count = min(loc.count(), 8)
+            except Exception:
+                continue
+            for i in range(count):
+                try:
+                    src = (
+                        loc.nth(i).get_attribute("src")
+                        or loc.nth(i).evaluate("e => e.currentSrc || ''")
+                        or ""
+                    ).strip()
+                except Exception:
+                    continue
+                if src.startswith("http") and "tripcdn.com" in src.lower():
+                    if any(x in src.lower() for x in ("logo", "icon", "avatar", "qrcode")):
+                        continue
+                    return _prefer_hotel_photo_url(src)
+
+        # Largest on-page TripCDN photo
+        try:
+            imgs = page.evaluate(
+                """() => Array.from(document.querySelectorAll('img')).map(e => ({
+                  src: e.currentSrc || e.src || '',
+                  w: e.naturalWidth || e.width || 0,
+                  h: e.naturalHeight || e.height || 0
+                })).filter(x => x.src && x.src.startsWith('http'))"""
+            )
+        except Exception:
+            imgs = []
+        best = ""
+        best_area = 0
+        for im in imgs or []:
+            src = str(im.get("src") or "")
+            low = src.lower()
+            if "tripcdn.com" not in low and "ak-d.tripcdn" not in low:
+                continue
+            if any(x in low for x in ("logo", "icon", "avatar", "qrcode", "badge")):
+                continue
+            area = int(im.get("w") or 0) * int(im.get("h") or 0)
+            if area > best_area:
+                best_area = area
+                best = _prefer_hotel_photo_url(src)
+        return best if best_area >= 40_000 else ""
+
     def _scrape_top_hotel_card(
         self,
         *,
@@ -2117,6 +2251,20 @@ Transport modes: {", ".join(modes)}
             prices = [p for p in parse_prices(blob) if p >= 200]
             if prices:
                 card["price_label"] = f"HK${min(prices):,.0f}"
+
+        # Cover photo from the listing card (avoid leaving the list page)
+        try:
+            overview = page.locator("img[alt*='hotel overview' i]")
+            if overview.count():
+                src = (
+                    overview.first.get_attribute("src")
+                    or overview.first.evaluate("e => e.currentSrc || ''")
+                    or ""
+                ).strip()
+                if src.startswith("http") and "tripcdn.com" in src.lower():
+                    card["image_url"] = _prefer_hotel_photo_url(src)
+        except Exception:
+            pass
 
         if not card["name"] or "sample" in card["name"].lower():
             card["name"] = f"Hotels in {city}" if city else "Recommended hotel"

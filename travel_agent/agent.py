@@ -146,6 +146,7 @@ class TravelAgent:
                     "hotel_score",
                     "hotel_location",
                     "hotel_reviews",
+                    "hotel_image",
                 ):
                     if found.get(key):
                         self.booking_links[key] = found[key]

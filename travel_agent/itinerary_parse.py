@@ -270,7 +270,7 @@ def parse_hotel_offer(text: str, fallback_url: str = "") -> HotelOffer:
     offer.url = pick_booking_url(urls, "hotel", fallback=fallback_url)
 
     img = re.search(
-        r"(?i)(?:image|photo|cover)\s*[:\-]\s*(https?://\S+\.(?:jpg|jpeg|png|webp)\S*)",
+        r"(?i)(?:image|photo|cover)\s*[:\-]\s*(https?://\S+)",
         blob,
     )
     if img:

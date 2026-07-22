@@ -426,6 +426,7 @@ def extract_booking_urls(text: str) -> dict[str, str]:
             (r"(?im)^-\s*Location:\s*(.+)$", "hotel_location"),
             (r"(?im)^-\s*Nightly:\s*(.+)$", "hotel_price"),
             (r"(?im)^-\s*Reviews:\s*(.+)$", "hotel_reviews"),
+            (r"(?im)^-\s*Image:\s*(\S+)", "hotel_image"),
         ):
             m = re.search(key, block)
             if m:
@@ -606,9 +607,21 @@ def fetch_hotel_detail_link(
         "hotel_score",
         "hotel_location",
         "hotel_reviews",
+        "hotel_image",
     ):
         if found.get(key):
             out[key] = found[key]
+
+    # Always try the detail page cover photo when we have a trusted hotel URL
+    if url and is_trusted_hotel_detail_url(url) and not out.get("hotel_image"):
+        scrape_img = getattr(browser, "scrape_hotel_image_url", None)
+        if scrape_img:
+            try:
+                img = scrape_img(url)
+            except Exception:
+                img = ""
+            if img:
+                out["hotel_image"] = img
     return out
 
 
