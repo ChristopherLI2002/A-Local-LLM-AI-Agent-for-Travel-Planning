@@ -387,6 +387,7 @@ def extract_booking_urls(text: str) -> dict[str, str]:
         for key, dest in (
             (r"(?im)^-\s*Airline:\s*(.+)$", "flight_airline"),
             (r"(?im)^-\s*Airline logo:\s*(\S+)", "flight_airline_logo"),
+            (r"(?im)^-\s*Date:\s*(\d{4}-\d{2}-\d{2})", "flight_date"),
             (r"(?im)^-\s*Depart:\s*([0-2]?\d:[0-5]\d)", "flight_depart"),
             (r"(?im)^-\s*Arrive:\s*([0-2]?\d:[0-5]\d)", "flight_arrive"),
             (r"(?im)^-\s*From:\s*(.+)$", "flight_from"),
@@ -396,6 +397,7 @@ def extract_booking_urls(text: str) -> dict[str, str]:
             (r"(?im)^-\s*Price:\s*(.+)$", "flight_price"),
             (r"(?im)^-\s*Return airline:\s*(.+)$", "flight_return_airline"),
             (r"(?im)^-\s*Return airline logo:\s*(\S+)", "flight_return_airline_logo"),
+            (r"(?im)^-\s*Return date:\s*(\d{4}-\d{2}-\d{2})", "flight_return_date"),
             (r"(?im)^-\s*Return depart:\s*([0-2]?\d:[0-5]\d)", "flight_return_depart"),
             (r"(?im)^-\s*Return arrive:\s*([0-2]?\d:[0-5]\d)", "flight_return_arrive"),
             (r"(?im)^-\s*Return from:\s*(.+)$", "flight_return_from"),
@@ -444,15 +446,42 @@ def extract_booking_urls(text: str) -> dict[str, str]:
         text,
     )
     if flight_section:
-        fopt = re.search(r"(?im)^-\s*Option seen:\s*(.+)$", flight_section.group(1))
+        block = flight_section.group(1)
+        fopt = re.search(r"(?im)^-\s*Option seen:\s*(.+)$", block)
         if fopt:
             out["flight_option"] = fopt.group(1).strip()[:160]
-        if not out.get("flight_airline"):
-            fair = re.search(r"(?im)^-\s*Airline:\s*(.+)$", flight_section.group(1))
-            if fair:
-                cand = fair.group(1).strip()
-                if is_plausible_airline_name(cand):
-                    out["flight_airline"] = cand
+        for key, dest in (
+            (r"(?im)^-\s*Airline:\s*(.+)$", "flight_airline"),
+            (r"(?im)^-\s*Airline logo:\s*(\S+)", "flight_airline_logo"),
+            (r"(?im)^-\s*Date:\s*(\d{4}-\d{2}-\d{2})", "flight_date"),
+            (r"(?im)^-\s*Depart:\s*([0-2]?\d:[0-5]\d)", "flight_depart"),
+            (r"(?im)^-\s*Arrive:\s*([0-2]?\d:[0-5]\d)", "flight_arrive"),
+            (r"(?im)^-\s*From:\s*(.+)$", "flight_from"),
+            (r"(?im)^-\s*To:\s*(.+)$", "flight_to"),
+            (r"(?im)^-\s*Duration:\s*(.+)$", "flight_duration"),
+            (r"(?im)^-\s*Stops:\s*(.+)$", "flight_stops"),
+            (r"(?im)^-\s*Return airline:\s*(.+)$", "flight_return_airline"),
+            (r"(?im)^-\s*Return airline logo:\s*(\S+)", "flight_return_airline_logo"),
+            (r"(?im)^-\s*Return date:\s*(\d{4}-\d{2}-\d{2})", "flight_return_date"),
+            (r"(?im)^-\s*Return depart:\s*([0-2]?\d:[0-5]\d)", "flight_return_depart"),
+            (r"(?im)^-\s*Return arrive:\s*([0-2]?\d:[0-5]\d)", "flight_return_arrive"),
+            (r"(?im)^-\s*Return from:\s*(.+)$", "flight_return_from"),
+            (r"(?im)^-\s*Return to:\s*(.+)$", "flight_return_to"),
+            (r"(?im)^-\s*Return duration:\s*(.+)$", "flight_return_duration"),
+            (r"(?im)^-\s*Return stops:\s*(.+)$", "flight_return_stops"),
+        ):
+            if out.get(dest):
+                continue
+            m = re.search(key, block)
+            if not m:
+                continue
+            val = m.group(1).strip()
+            if dest in {"flight_airline", "flight_return_airline"} and not is_plausible_airline_name(
+                val
+            ):
+                continue
+            if val and "night" not in val.lower():
+                out[dest] = val
 
     hotel_section = re.search(
         r"(?is)RECOMMENDED HOTEL\b(.*?)(?:ALTERNATIVE|Other Trip\.com|=======|$)",
@@ -620,6 +649,7 @@ def fetch_flight_card(
         "flight_stops",
         "flight_price",
         "flight_airline_logo",
+        "flight_date",
         "flight_return_airline",
         "flight_return_depart",
         "flight_return_arrive",
@@ -628,6 +658,7 @@ def fetch_flight_card(
         "flight_return_duration",
         "flight_return_stops",
         "flight_return_airline_logo",
+        "flight_return_date",
     ):
         if found.get(key):
             val = found[key]

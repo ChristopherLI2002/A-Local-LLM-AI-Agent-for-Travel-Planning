@@ -35,6 +35,7 @@ class FlightOffer:
     """Structured fields for a Trip.com-style flight result row."""
 
     airline: str = ""
+    depart_date: str = ""
     depart_time: str = ""
     depart_airport: str = ""
     arrive_time: str = ""
@@ -47,6 +48,7 @@ class FlightOffer:
     baggage: str = ""
     airline_logo: str = ""
     return_airline: str = ""
+    return_date: str = ""
     return_depart_time: str = ""
     return_depart_airport: str = ""
     return_arrive_time: str = ""

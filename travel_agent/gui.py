@@ -324,24 +324,25 @@ class FlightRowCard(tk.Frame):
         self.badges = tk.Frame(self.card, bg="#FFFFFF")
         self.badges.pack(fill="x", pady=(0, 8))
 
-        # Compact stacked layout for the narrow bookings column
-        air = tk.Frame(self.card, bg="#FFFFFF")
-        air.pack(fill="x", pady=(0, 8))
-        sz = self._LOGO_SIZE
-        self.logo = tk.Canvas(air, width=sz, height=sz, bg="#FFFFFF", highlightthickness=0)
-        self.logo.pack(side="left", padx=(0, 10))
-        self._logo_photo: tk.PhotoImage | None = None
-        self.airline_lbl = tk.Label(
-            air, text="—", bg="#FFFFFF", fg=C["ink"], font=FONT_UI, anchor="w"
-        )
-        self.airline_lbl.pack(side="left", fill="x", expand=True)
-
         times = tk.Frame(self.card, bg="#FFFFFF")
         times.pack(fill="x")
+
+        # --- Outbound leg ---
         self.leg_out_lbl = tk.Label(
             times, text="Outbound", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL, anchor="w"
         )
-        self.leg_out_lbl.pack(fill="x", pady=(0, 2))
+        self.leg_out_lbl.pack(fill="x", pady=(0, 4))
+
+        out_air = tk.Frame(times, bg="#FFFFFF")
+        out_air.pack(fill="x", pady=(0, 6))
+        sz = self._LOGO_SIZE
+        self.logo = tk.Canvas(out_air, width=sz, height=sz, bg="#FFFFFF", highlightthickness=0)
+        self.logo.pack(side="left", padx=(0, 10))
+        self._logo_photo: tk.PhotoImage | None = None
+        self.airline_lbl = tk.Label(
+            out_air, text="—", bg="#FFFFFF", fg=C["ink"], font=FONT_UI, anchor="w"
+        )
+        self.airline_lbl.pack(side="left", fill="x", expand=True)
 
         out_row = tk.Frame(times, bg="#FFFFFF")
         out_row.pack(fill="x")
@@ -385,8 +386,9 @@ class FlightRowCard(tk.Frame):
         )
         self.arr_airport.pack(anchor="e")
 
+        # --- Return leg ---
         self.return_block = tk.Frame(times, bg="#FFFFFF")
-        self.return_block.pack(fill="x", pady=(10, 0))
+        self.return_block.pack(fill="x", pady=(12, 0))
         self.leg_ret_lbl = tk.Label(
             self.return_block,
             text="Return",
@@ -395,16 +397,24 @@ class FlightRowCard(tk.Frame):
             font=FONT_SMALL,
             anchor="w",
         )
-        self.leg_ret_lbl.pack(fill="x", pady=(0, 2))
+        self.leg_ret_lbl.pack(fill="x", pady=(0, 4))
+
+        ret_air = tk.Frame(self.return_block, bg="#FFFFFF")
+        ret_air.pack(fill="x", pady=(0, 6))
+        self.ret_logo = tk.Canvas(
+            ret_air, width=sz, height=sz, bg="#FFFFFF", highlightthickness=0
+        )
+        self.ret_logo.pack(side="left", padx=(0, 10))
+        self._ret_logo_photo: tk.PhotoImage | None = None
         self.return_airline_lbl = tk.Label(
-            self.return_block,
-            text="",
+            ret_air,
+            text="—",
             bg="#FFFFFF",
             fg=C["ink"],
-            font=FONT_SMALL,
+            font=FONT_UI,
             anchor="w",
         )
-        self.return_airline_lbl.pack(fill="x", pady=(0, 2))
+        self.return_airline_lbl.pack(side="left", fill="x", expand=True)
 
         ret_row = tk.Frame(self.return_block, bg="#FFFFFF")
         ret_row.pack(fill="x")
@@ -486,6 +496,16 @@ class FlightRowCard(tk.Frame):
 
         self.set_loading("Waiting for plan…")
 
+    @staticmethod
+    def _format_flight_date(raw: str) -> str:
+        text = (raw or "").strip()
+        if not text:
+            return ""
+        try:
+            return date.fromisoformat(text).strftime("%a, %d %b %Y")
+        except ValueError:
+            return text
+
     def _draw_path(self) -> None:
         self.path.delete("all")
         w = max(self.path.winfo_width(), 40)
@@ -502,16 +522,22 @@ class FlightRowCard(tk.Frame):
         self.ret_path.create_oval(4, y - 3, 10, y + 3, fill="#C5CDD6", outline="")
         self.ret_path.create_oval(w - 10, y - 3, w - 4, y + 3, fill="#C5CDD6", outline="")
 
-    def _draw_logo(self, initials: str) -> None:
-        self._logo_photo = None
-        self.logo.delete("all")
+    def _draw_logo_on(
+        self,
+        canvas: tk.Canvas,
+        *,
+        initials: str,
+        photo_attr: str,
+    ) -> None:
+        setattr(self, photo_attr, None)
+        canvas.delete("all")
         sz = self._LOGO_SIZE
         cx = sz // 2
         pad = max(2, sz // 16)
-        self.logo.create_polygon(
+        canvas.create_polygon(
             cx, pad, sz - pad, sz - pad, pad, sz - pad, fill=C["badge_teal"], outline=""
         )
-        self.logo.create_text(
+        canvas.create_text(
             cx,
             cx + pad,
             text=(initials or "TP")[:3].upper(),
@@ -519,17 +545,29 @@ class FlightRowCard(tk.Frame):
             font=("Segoe UI", max(8, sz // 5), "bold"),
         )
 
-    def _set_airline_logo(self, offer: FlightOffer) -> None:
-        url = (offer.airline_logo or airline_logo_url(offer.airline)).strip()
-        if not url or not is_plausible_airline_name(offer.airline):
-            initials = "".join(w[0] for w in offer.airline.split()[:3] if w) or "TP"
-            self._draw_logo(initials)
+    def _draw_logo(self, initials: str) -> None:
+        self._draw_logo_on(self.logo, initials=initials, photo_attr="_logo_photo")
+
+    def _draw_ret_logo(self, initials: str) -> None:
+        self._draw_logo_on(self.ret_logo, initials=initials, photo_attr="_ret_logo_photo")
+
+    def _load_logo_photo(
+        self,
+        *,
+        airline: str,
+        logo_url: str,
+        canvas: tk.Canvas,
+        photo_attr: str,
+    ) -> None:
+        url = (logo_url or airline_logo_url(airline)).strip()
+        initials = "".join(w[0] for w in airline.split()[:3] if w) or "TP"
+        if not url or not is_plausible_airline_name(airline):
+            self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
             return
         try:
             data = urllib.request.urlopen(url, timeout=8).read()
             target = self._LOGO_SIZE
             img = Image.open(BytesIO(data)).convert("RGBA")
-            # Cover the logo box exactly (scale up/down, center-crop if needed)
             scale = max(target / max(img.width, 1), target / max(img.height, 1))
             new_w = max(1, round(img.width * scale))
             new_h = max(1, round(img.height * scale))
@@ -538,13 +576,29 @@ class FlightRowCard(tk.Frame):
             top = (new_h - target) // 2
             fitted = resized.crop((left, top, left + target, top + target))
             photo = ImageTk.PhotoImage(fitted)
-            self._logo_photo = photo
-            self.logo.delete("all")
+            setattr(self, photo_attr, photo)
+            canvas.delete("all")
             cx = target // 2
-            self.logo.create_image(cx, cx, image=photo)
+            canvas.create_image(cx, cx, image=photo)
         except Exception:
-            initials = "".join(w[0] for w in offer.airline.split()[:3] if w) or "TP"
-            self._draw_logo(initials)
+            self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
+
+    def _set_airline_logo(self, offer: FlightOffer) -> None:
+        self._load_logo_photo(
+            airline=offer.airline,
+            logo_url=offer.airline_logo,
+            canvas=self.logo,
+            photo_attr="_logo_photo",
+        )
+
+    def _set_return_airline_logo(self, offer: FlightOffer) -> None:
+        airline = offer.return_airline or offer.airline
+        self._load_logo_photo(
+            airline=airline,
+            logo_url=offer.return_airline_logo or (offer.airline_logo if not offer.return_airline else ""),
+            canvas=self.ret_logo,
+            photo_attr="_ret_logo_photo",
+        )
 
     def _open(self, _e: object | None = None) -> None:
         if self._url and "trip.com" in self._url.lower():
@@ -557,6 +611,7 @@ class FlightRowCard(tk.Frame):
     def set_loading(self, message: str) -> None:
         self._clear_badges()
         self._add_badge(message, filled=False)
+        self.leg_out_lbl.configure(text="Outbound")
         self.airline_lbl.configure(text="Searching Trip.com…")
         self._draw_logo("…")
         self.dep_time.configure(text="--:--")
@@ -565,13 +620,15 @@ class FlightRowCard(tk.Frame):
         self.arr_airport.configure(text="—")
         self.duration.configure(text="—")
         self.stops.configure(text="—")
+        self.leg_ret_lbl.configure(text="Return")
+        self.return_airline_lbl.configure(text="—")
+        self._draw_ret_logo("…")
         self.ret_dep_time.configure(text="--:--")
         self.ret_arr_time.configure(text="--:--")
         self.ret_dep_airport.configure(text="—")
         self.ret_arr_airport.configure(text="—")
         self.ret_duration.configure(text="—")
         self.ret_stops.configure(text="—")
-        self.return_airline_lbl.configure(text="")
         self.return_block.pack_forget()
         self.price.configure(text="…")
         self.trip_lbl.configure(text="")
@@ -613,6 +670,10 @@ class FlightRowCard(tk.Frame):
         if offer.baggage:
             self._add_badge(offer.baggage, filled=False)
 
+        out_date = self._format_flight_date(offer.depart_date)
+        self.leg_out_lbl.configure(
+            text=f"Outbound · {out_date}" if out_date else "Outbound"
+        )
         self._set_airline_logo(offer)
         self.airline_lbl.configure(text=offer.airline)
         self.dep_time.configure(text=offer.depart_time)
@@ -629,12 +690,14 @@ class FlightRowCard(tk.Frame):
         has_return = bool(offer.return_depart_time and offer.return_depart_time != "--:--")
         if has_return:
             if not self.return_block.winfo_ismapped():
-                self.return_block.pack(fill="x", pady=(10, 0))
-            ret_name = offer.return_airline or ""
-            if ret_name and ret_name.lower() != (offer.airline or "").lower():
-                self.return_airline_lbl.configure(text=ret_name)
-            else:
-                self.return_airline_lbl.configure(text="")
+                self.return_block.pack(fill="x", pady=(12, 0))
+            ret_date = self._format_flight_date(offer.return_date)
+            self.leg_ret_lbl.configure(
+                text=f"Return · {ret_date}" if ret_date else "Return"
+            )
+            ret_name = offer.return_airline or offer.airline or "—"
+            self.return_airline_lbl.configure(text=ret_name)
+            self._set_return_airline_logo(offer)
             self.ret_dep_time.configure(text=offer.return_depart_time)
             self.ret_arr_time.configure(text=offer.return_arrive_time or "--:--")
             self.ret_dep_airport.configure(text=offer.return_depart_airport or "—")
@@ -1496,6 +1559,16 @@ class TravelAgentApp(tk.Tk):
                     ).isoformat()
                 except ValueError:
                     checkout = ctx["depart_date"]
+            # Flight card first (needs a clean Trip.com flight session for return leg)
+            if ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
+                live_flight = fetch_flight_card(
+                    self.agent.browser,
+                    origin=ctx["origin"],
+                    destination=ctx["destination"],
+                    depart_date=ctx["depart_date"],
+                    return_date=ctx.get("return_date") or checkout,
+                )
+                self._merge_live_flight(live_flight)
             if not is_trusted_hotel_detail_url(
                 self.agent.booking_links.get("hotel", "")
             ):
@@ -1507,25 +1580,6 @@ class TravelAgentApp(tk.Tk):
                         checkout=checkout,
                     )
                     self._merge_live_hotel(live)
-            links = self.agent.booking_links
-            sparse_flight = (
-                not is_plausible_airline_name(links.get("flight_airline", ""))
-                or not links.get("flight_depart")
-                or not links.get("flight_arrive")
-                or (
-                    bool(ctx.get("return_date"))
-                    and not links.get("flight_return_depart")
-                )
-            )
-            if sparse_flight and ctx.get("origin") and ctx.get("destination"):
-                live_flight = fetch_flight_card(
-                    self.agent.browser,
-                    origin=ctx["origin"],
-                    destination=ctx["destination"],
-                    depart_date=ctx["depart_date"],
-                    return_date=ctx.get("return_date") or checkout,
-                )
-                self._merge_live_flight(live_flight)
             return answer
 
         self._run_browser_job(
@@ -1570,6 +1624,7 @@ class TravelAgentApp(tk.Tk):
             "flight_stops",
             "flight_price",
             "flight_airline_logo",
+            "flight_date",
             "flight_return_airline",
             "flight_return_depart",
             "flight_return_arrive",
@@ -1578,6 +1633,7 @@ class TravelAgentApp(tk.Tk):
             "flight_return_duration",
             "flight_return_stops",
             "flight_return_airline_logo",
+            "flight_return_date",
         ):
             if live.get(key):
                 self.agent.booking_links[key] = live[key]
@@ -1712,8 +1768,12 @@ class TravelAgentApp(tk.Tk):
                 offer.airline_logo = links["flight_airline_logo"]
             elif is_plausible_airline_name(offer.airline):
                 offer.airline_logo = airline_logo_url(offer.airline)
+            if links.get("flight_date"):
+                offer.depart_date = links["flight_date"]
             if is_plausible_airline_name(links.get("flight_return_airline", "")):
                 offer.return_airline = links["flight_return_airline"]
+            if links.get("flight_return_date"):
+                offer.return_date = links["flight_return_date"]
             if links.get("flight_return_depart"):
                 offer.return_depart_time = links["flight_return_depart"]
             if links.get("flight_return_arrive"):
@@ -1791,6 +1851,11 @@ class TravelAgentApp(tk.Tk):
             offer.depart_airport = origin
         if dest and offer.arrive_airport in {"", "—"}:
             offer.arrive_airport = dest
+        # Fill dates from trip context when scraper didn't emit them
+        if not offer.depart_date and ctx.get("depart_date"):
+            offer.depart_date = str(ctx["depart_date"])
+        if not offer.return_date and ctx.get("return_date"):
+            offer.return_date = str(ctx["return_date"])
         # Friendly label when airline still unknown but we have a live fare
         if not is_plausible_airline_name(offer.airline) or offer.airline in {"", "Trip.com fare"}:
             if origin and dest:
@@ -1803,6 +1868,8 @@ class TravelAgentApp(tk.Tk):
             offer.airline_logo = airline_logo_url(offer.airline)
         if offer.return_depart_time:
             offer.trip_label = "Round-trip"
+            if not offer.return_airline and is_plausible_airline_name(offer.airline):
+                offer.return_airline = offer.airline
             if is_plausible_airline_name(offer.return_airline) and not offer.return_airline_logo:
                 offer.return_airline_logo = airline_logo_url(offer.return_airline)
 
@@ -1926,18 +1993,27 @@ class TravelAgentApp(tk.Tk):
         def job() -> str:
             assert self.agent is not None
             answer = self.agent.chat(refine)
+            ctx = self._trip_context
+            checkout = ctx.get("return_date") or ""
+            if not checkout and ctx.get("depart_date"):
+                try:
+                    checkout = (
+                        date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
+                    ).isoformat()
+                except ValueError:
+                    checkout = ctx["depart_date"]
+            if ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
+                live_flight = fetch_flight_card(
+                    self.agent.browser,
+                    origin=ctx["origin"],
+                    destination=ctx["destination"],
+                    depart_date=ctx["depart_date"],
+                    return_date=ctx.get("return_date") or checkout,
+                )
+                self._merge_live_flight(live_flight)
             if not is_trusted_hotel_detail_url(
                 self.agent.booking_links.get("hotel", "")
             ):
-                ctx = self._trip_context
-                checkout = ctx.get("return_date") or ""
-                if not checkout and ctx.get("depart_date"):
-                    try:
-                        checkout = (
-                            date.fromisoformat(ctx["depart_date"]) + timedelta(days=7)
-                        ).isoformat()
-                    except ValueError:
-                        checkout = ctx["depart_date"]
                 if ctx.get("destination") and ctx.get("depart_date"):
                     live = fetch_hotel_detail_link(
                         self.agent.browser,
@@ -1951,7 +2027,7 @@ class TravelAgentApp(tk.Tk):
         self._run_browser_job(
             job,
             on_ok=lambda answer: self._apply_refine(answer),
-            on_err=lambda exc: self._append_chat("Error", str(exc), "agent"),
+            on_err=lambda e: self._append_chat("Error", str(e), "agent"),
             done=lambda: self._set_busy(False),
         )
 

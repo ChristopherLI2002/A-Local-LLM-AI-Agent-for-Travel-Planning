@@ -21,7 +21,7 @@ from travel_agent.pricing import (
     pick_cheapest_from_comparison,
     summarize_prices,
 )
-from travel_agent.trip_urls import ensure_locale_curr, normalize_trip_url
+from travel_agent.trip_urls import ensure_locale_curr, normalize_trip_url, extract_booking_urls
 
 TRIP_HOME = f"{settings.trip_base_url}/?locale={settings.trip_locale}&curr={settings.trip_currency}"
 
@@ -304,6 +304,7 @@ class TripBrowser:
         return_date: str | None = None,
         trip_type: str = "oneway",
         adults: int = 1,
+        include_return_leg: bool = True,
     ) -> str:
         """Search flights on Trip.com HK and return visible result text."""
         page = self._require_page()
@@ -407,21 +408,53 @@ class TripBrowser:
             destination=destination.upper(),
             lowest=prices[0] if prices else None,
         )
-        if is_round and card.get("depart_time"):
+        if is_round and include_return_leg and card.get("depart_time"):
             ret_card = self._scrape_return_flight_card(
                 outbound=card,
                 origin=destination.upper(),
                 destination=origin.upper(),
             )
+            if not ret_card:
+                # Fallback: search the return date as a one-way reverse sector
+                try:
+                    rev = self.search_flights(
+                        origin=destination,
+                        destination=origin,
+                        depart_date=str(params.get("rdate") or return_date or ""),
+                        trip_type="oneway",
+                        adults=adults_n,
+                        include_return_leg=False,
+                    )
+                    rev_fields = extract_booking_urls(rev)
+                    ret_card = {
+                        "airline": rev_fields.get("flight_airline", ""),
+                        "airline_logo": rev_fields.get("flight_airline_logo", ""),
+                        "depart_time": rev_fields.get("flight_depart", ""),
+                        "arrive_time": rev_fields.get("flight_arrive", ""),
+                        "depart_airport": rev_fields.get("flight_from", ""),
+                        "arrive_airport": rev_fields.get("flight_to", ""),
+                        "duration": rev_fields.get("flight_duration", ""),
+                        "stops": rev_fields.get("flight_stops", ""),
+                        "price_label": rev_fields.get("flight_price", ""),
+                    }
+                    # Restore outbound search URL context for booking link
+                    try:
+                        page.goto(canonical, wait_until="domcontentloaded")
+                        page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
+                except Exception:
+                    ret_card = {}
             if ret_card:
                 for key, val in ret_card.items():
                     if val:
                         card[f"return_{key}"] = val
                 # Keep round-trip package price from outbound list when available
-                if card.get("price_label"):
-                    pass
-                elif ret_card.get("price_label"):
+                if not card.get("price_label") and ret_card.get("price_label"):
                     card["price_label"] = ret_card["price_label"]
+        card["depart_date"] = depart_date
+        if is_round and params.get("rdate"):
+            card["return_date"] = str(params["rdate"])
         card_block = ""
         if card:
             airline_line = card.get("airline") or ""
@@ -430,6 +463,7 @@ class TripBrowser:
                 "Structured flight card:\n"
                 + (f"- Airline: {airline_line}\n" if airline_line else "")
                 + (f"- Airline logo: {logo_line}\n" if logo_line else "")
+                + (f"- Date: {card.get('depart_date', '')}\n" if card.get("depart_date") else "")
                 + f"- Depart: {card.get('depart_time', '')}\n"
                 f"- Arrive: {card.get('arrive_time', '')}\n"
                 f"- From: {card.get('depart_airport', origin.upper())}\n"
@@ -441,15 +475,23 @@ class TripBrowser:
             if card.get("return_depart_time"):
                 card_block += (
                     f"- Return airline: {card.get('return_airline', '')}\n"
-                    f"- Return depart: {card.get('return_depart_time', '')}\n"
+                    + (
+                        f"- Return airline logo: {card['return_airline_logo']}\n"
+                        if card.get("return_airline_logo")
+                        else ""
+                    )
+                    + (
+                        f"- Return date: {card.get('return_date', '')}\n"
+                        if card.get("return_date")
+                        else ""
+                    )
+                    + f"- Return depart: {card.get('return_depart_time', '')}\n"
                     f"- Return arrive: {card.get('return_arrive_time', '')}\n"
                     f"- Return from: {card.get('return_depart_airport', destination.upper())}\n"
                     f"- Return to: {card.get('return_arrive_airport', origin.upper())}\n"
                     f"- Return duration: {card.get('return_duration', '')}\n"
                     f"- Return stops: {card.get('return_stops', '')}\n"
                 )
-                if card.get("return_airline_logo"):
-                    card_block += f"- Return airline logo: {card['return_airline_logo']}\n"
         return _clean_text(
             f"Flight search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
             f"Canonical search URL: {ensure_locale_curr(canonical)}\n"
@@ -851,6 +893,7 @@ class TripBrowser:
                         return_date=return_date,
                         trip_type=trip_type,
                         adults=adults,
+                        include_return_leg=False,
                     )
                     url = self._require_page().url
                     summary = summarize_prices(label, page_text, url=url)
@@ -1004,6 +1047,8 @@ class TripBrowser:
         recommended_flight_date = depart_date
         recommended_flight_price = None
         recommended_flight_option = ""
+        flight_card_fields: dict[str, str] = {}
+        structured_flight_card = ""
         if want_flights:
             date_options = nearby_dates(depart_date, (-3, 0, 3))
             flight_compare_text = self.compare_flight_prices(
@@ -1063,6 +1108,11 @@ class TripBrowser:
                 cand = airline_m.group(1).strip()
                 if is_plausible_airline_name(cand):
                     recommended_flight_airline = cand
+            flight_card_fields = extract_booking_urls(flight_text or "")
+            if flight_card_fields.get("flight_airline") and is_plausible_airline_name(
+                flight_card_fields["flight_airline"]
+            ):
+                recommended_flight_airline = flight_card_fields["flight_airline"]
             if flight_low is not None:
                 transport_lows.append(("flights", float(flight_low)))
             snip_block = (
@@ -1073,6 +1123,14 @@ class TripBrowser:
                 f"- Airline: {recommended_flight_airline}\n"
                 if recommended_flight_airline
                 else ""
+            )
+            # Keep the full structured card (outbound + return) near the top of the tool text
+            structured_m = re.search(
+                r"(?is)(Structured flight card:\s*.*?)(?:\n\n|Flight search URL:|$)",
+                flight_text or "",
+            )
+            structured_flight_card = (
+                structured_m.group(1).strip() if structured_m else ""
             )
             sections.append(
                 f"""{n}) FLIGHTS (compared live)
@@ -1087,7 +1145,9 @@ class TripBrowser:
 {flight_compare_text.split("Notes:")[0].strip()}"""
             )
             booking_lines.append(f"  - Recommended flights: {recommended_flight_url}")
-            raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:2200])
+            if structured_flight_card:
+                raw_blocks.insert(0, structured_flight_card)
+            raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:3500])
             n += 1
 
         train_url = ""
@@ -1395,12 +1455,67 @@ class TripBrowser:
             )
             if recommended_flight_airline:
                 pick_lines.append(f"- Airline: {recommended_flight_airline}")
-            pick_lines.append(f"- Depart date: {recommended_flight_date}")
-            pick_lines.append(f"- Return date: {return_date}")
+            if flight_card_fields.get("flight_airline_logo"):
+                pick_lines.append(
+                    f"- Airline logo: {flight_card_fields['flight_airline_logo']}"
+                )
+            pick_lines.append(
+                f"- Date: {flight_card_fields.get('flight_date') or recommended_flight_date}"
+            )
+            if flight_card_fields.get("flight_depart"):
+                pick_lines.append(f"- Depart: {flight_card_fields['flight_depart']}")
+            if flight_card_fields.get("flight_arrive"):
+                pick_lines.append(f"- Arrive: {flight_card_fields['flight_arrive']}")
+            if flight_card_fields.get("flight_from"):
+                pick_lines.append(f"- From: {flight_card_fields['flight_from']}")
+            if flight_card_fields.get("flight_to"):
+                pick_lines.append(f"- To: {flight_card_fields['flight_to']}")
+            if flight_card_fields.get("flight_duration"):
+                pick_lines.append(f"- Duration: {flight_card_fields['flight_duration']}")
+            if flight_card_fields.get("flight_stops"):
+                pick_lines.append(f"- Stops: {flight_card_fields['flight_stops']}")
+            if flight_card_fields.get("flight_return_airline"):
+                pick_lines.append(
+                    f"- Return airline: {flight_card_fields['flight_return_airline']}"
+                )
+            if flight_card_fields.get("flight_return_airline_logo"):
+                pick_lines.append(
+                    f"- Return airline logo: {flight_card_fields['flight_return_airline_logo']}"
+                )
+            pick_lines.append(
+                f"- Return date: {flight_card_fields.get('flight_return_date') or return_date}"
+            )
+            if flight_card_fields.get("flight_return_depart"):
+                pick_lines.append(
+                    f"- Return depart: {flight_card_fields['flight_return_depart']}"
+                )
+            if flight_card_fields.get("flight_return_arrive"):
+                pick_lines.append(
+                    f"- Return arrive: {flight_card_fields['flight_return_arrive']}"
+                )
+            if flight_card_fields.get("flight_return_from"):
+                pick_lines.append(
+                    f"- Return from: {flight_card_fields['flight_return_from']}"
+                )
+            if flight_card_fields.get("flight_return_to"):
+                pick_lines.append(
+                    f"- Return to: {flight_card_fields['flight_return_to']}"
+                )
+            if flight_card_fields.get("flight_return_duration"):
+                pick_lines.append(
+                    f"- Return duration: {flight_card_fields['flight_return_duration']}"
+                )
+            if flight_card_fields.get("flight_return_stops"):
+                pick_lines.append(
+                    f"- Return stops: {flight_card_fields['flight_return_stops']}"
+                )
             pick_lines.append(f"- Lowest seen: {_fmt_hkd(recommended_flight_price)}")
             if recommended_flight_option:
                 pick_lines.append(f"- Option seen: {recommended_flight_option}")
             pick_lines.append(f"- Book this flight search: {recommended_flight_url}")
+            if structured_flight_card:
+                pick_lines.append("")
+                pick_lines.append(structured_flight_card)
             pick_lines.append("")
         pick_lines.append("RECOMMENDED HOTEL")
         pick_lines.append(f"- City: {hotel_city}")
@@ -1617,26 +1732,59 @@ Transport modes: {", ".join(modes)}
         page = self._require_page()
         if not self._click_outbound_select(outbound):
             return {}
-        # Wait for inbound results page
-        for _ in range(20):
+
+        # Wait until inbound results finish loading (not just the "Returning to" shell)
+        body = ""
+        rows: list[dict[str, str]] = []
+        for _ in range(40):
             page.wait_for_timeout(1000)
+            self._dismiss_popups()
             try:
                 body = page.inner_text("body")
             except Exception:
                 body = ""
-            if re.search(r"(?i)Returning\s+to\b", body) or (
-                "showfarenext" in (page.url or "").lower()
-                and re.search(r"\d+\s+flights found", body, re.I)
-            ):
-                break
-        self._dismiss_popups()
-        try:
-            body = page.inner_text("body")
-        except Exception:
-            body = ""
-        rows = parse_trip_com_flight_rows(
-            body[:25000], origin=origin, destination=destination
-        )
+            loading = bool(
+                re.search(
+                    r"(?i)loading the best deals|finding flexible ticket|searching for this route",
+                    body,
+                )
+            )
+            rows = parse_trip_com_flight_rows(
+                body[:25000], origin=origin, destination=destination
+            )
+            has_list = bool(
+                rows
+                or re.search(r"\d+\s+flights found", body, re.I)
+                or (
+                    re.search(r"(?i)Returning\s+to\b", body)
+                    and re.search(r"(?i)\bSelect\b", body)
+                    and re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", body)
+                    and not loading
+                )
+            )
+            if has_list and not loading:
+                # Prefer real parsed rows; keep waiting briefly if only shell markers
+                if rows:
+                    break
+                if re.search(r"\d+\s+flights found", body, re.I):
+                    break
+        else:
+            # One more scroll/settle attempt for late hydration
+            try:
+                page.mouse.wheel(0, 1600)
+                page.wait_for_timeout(2500)
+                body = page.inner_text("body")
+                rows = parse_trip_com_flight_rows(
+                    body[:25000], origin=origin, destination=destination
+                )
+            except Exception:
+                pass
+
+        if not rows:
+            rows = parse_trip_com_flight_rows(
+                body[:25000], origin=origin, destination=destination
+            )
+
         # Prefer inbound rows (arrive back at trip origin / leave destination city)
         out_from = (outbound.get("depart_airport") or "").upper()
         filtered = [
