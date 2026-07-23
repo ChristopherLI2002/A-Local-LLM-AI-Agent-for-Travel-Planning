@@ -1780,6 +1780,7 @@ class TravelAgentApp(tk.Tk):
             return
 
         self.days_inner.columnconfigure(0, weight=1)
+        self._timetable_thumb_seq = 0
         for idx, day in enumerate(parsed.days):
             self._add_day_card(day, index=idx)
 
@@ -1813,26 +1814,29 @@ class TravelAgentApp(tk.Tk):
             return "⌂"
         return "◎"
 
-    def _load_timetable_thumb(self, url: str, *, size: tuple[int, int] = (72, 54)) -> tk.PhotoImage | None:
-        """Download and cache a small attraction thumbnail for a timetable row."""
-        url = (url or "").strip()
-        if not url.startswith("http"):
-            return None
-        if url in self._timetable_thumb_cache:
-            return self._timetable_thumb_cache[url]
+    def _placeholder_timetable_thumb(
+        self,
+        label: str,
+        *,
+        size: tuple[int, int] = (160, 110),
+        accent: str = "#C62828",
+    ) -> tk.PhotoImage:
+        """Solid accent tile used when a photo URL is missing or fails to load."""
+        tw, th = size
+        cache_key = f"ph|{accent}|{(label or '')[:24]}|{tw}x{th}"
+        if cache_key in self._timetable_thumb_cache:
+            return self._timetable_thumb_cache[cache_key]
+        img = Image.new("RGB", (tw, th), accent)
+        # Soft overlay so tiles aren't flat blocks of one color
+        overlay = Image.new("RGB", (tw, th), "#FFFFFF")
+        img = Image.blend(img, overlay, 0.72)
+        photo = ImageTk.PhotoImage(img)
+        self._timetable_thumb_cache[cache_key] = photo
+        return photo
+
+    def _photo_from_bytes(self, data: bytes, *, size: tuple[int, int] = (160, 110)) -> tk.PhotoImage | None:
+        """Build a cropped PhotoImage from raw image bytes (main thread only)."""
         try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36"
-                    ),
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                },
-            )
-            data = urllib.request.urlopen(req, timeout=10).read()
             img = Image.open(BytesIO(data)).convert("RGB")
             tw, th = size
             scale = max(tw / max(img.width, 1), th / max(img.height, 1))
@@ -1842,11 +1846,89 @@ class TravelAgentApp(tk.Tk):
             left = max(0, (new_w - tw) // 2)
             top = max(0, (new_h - th) // 2)
             fitted = resized.crop((left, top, left + tw, top + th))
-            photo = ImageTk.PhotoImage(fitted)
-            self._timetable_thumb_cache[url] = photo
+            return ImageTk.PhotoImage(fitted)
+        except Exception:
+            return None
+
+    def _load_timetable_thumb(self, url: str, *, size: tuple[int, int] = (160, 110)) -> tk.PhotoImage | None:
+        """Download and cache a larger attraction thumbnail for a timetable row."""
+        from travel_agent.attraction_images import fetch_image_bytes, sanitize_image_url
+
+        url = sanitize_image_url(url)
+        if not url.startswith("http"):
+            return None
+        cache_key = f"{url}|{size[0]}x{size[1]}"
+        if cache_key in self._timetable_thumb_cache:
+            return self._timetable_thumb_cache[cache_key]
+        try:
+            data = fetch_image_bytes(url)
+            if not data:
+                return None
+            photo = self._photo_from_bytes(data, size=size)
+            if photo is None:
+                return None
+            self._timetable_thumb_cache[cache_key] = photo
             return photo
         except Exception:
             return None
+
+    def _bind_timetable_thumb_async(
+        self,
+        img_lbl: tk.Label,
+        url: str,
+        *,
+        detail: str = "",
+        accent: str = "#C62828",
+        size: tuple[int, int] = (160, 110),
+        delay_ms: int = 0,
+    ) -> None:
+        """Fetch bytes off-thread; build PhotoImage on the UI thread."""
+        from travel_agent.attraction_images import (
+            candidate_image_urls,
+            fetch_image_bytes,
+            sanitize_image_url,
+        )
+
+        dest = self._trip_context.get("destination", "") or ""
+        urls: list[str] = []
+        first = sanitize_image_url(url) if url else ""
+        if first:
+            urls.append(first)
+        for cand in candidate_image_urls(detail, dest, limit=6):
+            if cand not in urls:
+                urls.append(cand)
+
+        for u in list(urls):
+            cache_key = f"{u}|{size[0]}x{size[1]}"
+            cached = self._timetable_thumb_cache.get(cache_key)
+            if cached is not None:
+                img_lbl.configure(image=cached)
+                img_lbl.image = cached
+                return
+
+        def _apply(data: bytes | None, key: str) -> None:
+            if not img_lbl.winfo_exists() or not data:
+                return
+            photo = self._timetable_thumb_cache.get(key)
+            if photo is None:
+                photo = self._photo_from_bytes(data, size=size)
+                if photo is None:
+                    return
+                self._timetable_thumb_cache[key] = photo
+            img_lbl.configure(image=photo)
+            img_lbl.image = photo
+
+        def _worker() -> None:
+            data = b""
+            key = ""
+            for cand in urls:
+                data = fetch_image_bytes(cand)
+                if data:
+                    key = f"{cand}|{size[0]}x{size[1]}"
+                    break
+            self.after(0, lambda d=data, k=key: _apply(d, k))
+
+        self.after(max(0, delay_ms), lambda: threading.Thread(target=_worker, daemon=True).start())
 
     def _draw_down_arrow_icon(self, parent: tk.Misc, *, color: str, size: int = 18) -> tk.Canvas:
         """Small canvas arrow icon (shaft + chevron head) for transfer rows."""
@@ -1881,12 +1963,16 @@ class TravelAgentApp(tk.Tk):
         title = getattr(day, "title", "Day") or "Day"
         body = getattr(day, "body", "") or ""
         urls = list(getattr(day, "urls", []) or [])
-        slot_images: dict[str, str] = dict(getattr(day, "images", {}) or {})
-        if not slot_images and body:
-            from travel_agent.attraction_images import images_for_timetable
+        from travel_agent.attraction_images import images_for_timetable, lookup_image
 
-            dest = self._trip_context.get("destination", "") or ""
-            slot_images = images_for_timetable(body, dest)
+        dest = self._trip_context.get("destination", "") or ""
+        slot_images: dict[str, str] = dict(getattr(day, "images", {}) or {})
+        if body:
+            # Always fill every timed row (older plans may only have 1–2 thumbs)
+            filled = images_for_timetable(body, dest)
+            for t, url in filled.items():
+                if url:
+                    slot_images[t] = url
 
         m = re.match(r"(?i)^day\s+(\d+)\b", title)
         if m:
@@ -2025,15 +2111,37 @@ class TravelAgentApp(tk.Tk):
                     font=FONT_BODY,
                     justify="left",
                     anchor="w",
-                    wraplength=340,
+                    wraplength=280,
                 ).pack(side="left", fill="x", expand=True)
-                img_url = slot_images.get(time_txt, "")
+                img_url = slot_images.get(time_txt, "") or lookup_image(detail, dest)
+                # Show placeholder immediately; swap real photo in asynchronously
+                # (avoids Wikimedia 429 when many thumbs load at once).
+                placeholder = self._placeholder_timetable_thumb(
+                    detail, size=(160, 110), accent=accent
+                )
+                img_lbl = tk.Label(
+                    row,
+                    image=placeholder,
+                    bg="#FFFFFF",
+                    bd=1,
+                    relief="solid",
+                    highlightthickness=0,
+                )
+                img_lbl.image = placeholder
+                img_lbl.pack(side="right", padx=(10, 0))
                 if img_url:
-                    thumb = self._load_timetable_thumb(img_url)
-                    if thumb:
-                        img_lbl = tk.Label(row, image=thumb, bg="#FFFFFF", bd=0)
-                        img_lbl.image = thumb  # keep reference
-                        img_lbl.pack(side="right", padx=(8, 0))
+                    seq = getattr(self, "_timetable_thumb_seq", 0)
+                    self._timetable_thumb_seq = seq + 1
+                    self._bind_timetable_thumb_async(
+                        img_lbl,
+                        img_url,
+                        detail=detail,
+                        accent=accent,
+                        size=(160, 110),
+                        delay_ms=120 * seq,
+                    )
+                row.configure(height=118)
+                row.pack_propagate(False)
             else:
                 tk.Label(
                     row,
