@@ -330,6 +330,48 @@ _GUIDES: dict[str, list[DayIdea]] = {
             route="Airport Express from Hong Kong / Kowloon / Tsing Yi stations. Leave 3+ hrs before flight",
         ),
     ],
+    "london": [
+        DayIdea(
+            title="Arrival · South Bank",
+            go="London Eye / South Bank walk toward Borough Market",
+            also="Tate Modern exterior + Millennium Bridge views",
+            lunch="Borough Market (Padella pasta queue or market stalls)",
+            dinner="Flat Iron (steak) Covent Garden or Dishoom Covent Garden",
+            route="Elizabeth line / Heathrow Express to Paddington, then Tube to Waterloo or London Bridge. Walk South Bank between Eye, Tate Modern, and Borough",
+        ),
+        DayIdea(
+            title="Westminster & Museums",
+            go="Westminster Abbey exterior + Big Ben / Houses of Parliament photo stop",
+            also="British Museum (Great Court) — pick 2–3 rooms",
+            lunch="Pret or museum cafés near Russell Square; or Dishoom Kings Cross if headed north",
+            dinner="The Ivy Asia / Covent Garden casual — or Bao Soho for a quicker dinner",
+            route="Tube Jubilee / District / Circle to Westminster. Then Northern / Central / Piccadilly toward Tottenham Court Road / Russell Square for the British Museum",
+        ),
+        DayIdea(
+            title="Royal parks & shopping",
+            go="Buckingham Palace Changing of the Guard (check timetable) + St James's Park",
+            also="Harrods Food Hall or Oxford Street / Regent Street browse",
+            lunch="Sketch Gallery (booking) or Fortnum & Mason café",
+            dinner="Gordon Ramsay Street Pizza or Blacklock Soho",
+            route="Tube Victoria / Green Park for the palace. Piccadilly Line or walk to Knightsbridge (Harrods) or Oxford Circus",
+        ),
+        DayIdea(
+            title="East End & skyline",
+            go="Tower of London (Crown Jewels) or Tower Bridge walk",
+            also="Sky Garden (free timed booking) or Borough riverside at dusk",
+            lunch="Cafe Below (St Mary-le-Bow) or Poppies fish & chips Spitalfields",
+            dinner="Duck & Waffle or Honest Burgers near Liverpool Street",
+            route="Tube District / Circle to Tower Hill. Walk to Tower Bridge; for Sky Garden walk to Fenchurch Street / Monument",
+        ),
+        DayIdea(
+            title="Departure",
+            go="Last stop: Liberty London or Covent Garden Market souvenirs",
+            also="Hotel checkout → Heathrow (LHR) or Gatwick (LGW)",
+            lunch="Station meal at King's Cross / Paddington / Victoria",
+            dinner="Light snack airside only",
+            route="Heathrow: Elizabeth line or Heathrow Express from Paddington. Gatwick: Thameslink / Gatwick Express from Victoria or London Bridge. Leave 3+ hrs before flight",
+        ),
+    ],
 }
 
 _ALIASES: dict[str, str] = {
@@ -350,6 +392,10 @@ _ALIASES: dict[str, str] = {
     "taipei taiwan": "taipei",
     "hkg": "hong kong",
     "hk": "hong kong",
+    "lon": "london",
+    "london uk": "london",
+    "london england": "london",
+    "united kingdom": "london",
 }
 
 
@@ -435,6 +481,10 @@ def _infer_transfer(prev: str, nxt: str, idea: DayIdea) -> tuple[str, int]:
             return "AREX airport train", 50
         if "limousine" in route or "bus" in route:
             return "Airport limousine bus", 70
+        if "elizabeth" in route or "heathrow express" in route or "lhr" in blob:
+            return "Elizabeth line / Heathrow Express", 45
+        if "gatwick" in route or "lgw" in blob:
+            return "Gatwick Express / Thameslink", 50
         return "Airport transfer", 60
 
     # Same-neighborhood / meal near last stop
@@ -458,6 +508,8 @@ def _infer_transfer(prev: str, nxt: str, idea: DayIdea) -> tuple[str, int]:
         return "Yurikamome", 20
     if "mtr" in route:
         return "MTR", 15
+    if "elizabeth" in route or "tube" in route or "underground" in route:
+        return "London Underground", 18
     if "metro" in route or "mrt" in route:
         return "Metro", 15
     if "jr " in route or "train" in route:
@@ -511,12 +563,12 @@ def format_day_body(
                 (_fmt_hhmm(*t0), "Land at airport"),
                 (_fmt_hhmm(*t1), "Hotel check-in and drop bags"),
             ]
+            nearby = (
+                idea.also
+                if "observatory" in idea.also.lower() or "night" in idea.also.lower()
+                else idea.go
+            )
             if t2[0] < 23 or (t2[0] == 22 and t2[1] <= 45):
-                nearby = (
-                    idea.also
-                    if "observatory" in idea.also.lower() or "night" in idea.also.lower()
-                    else idea.go
-                )
                 if t2[0] >= 21:
                     slots.append(
                         (
@@ -526,7 +578,18 @@ def format_day_body(
                     )
                 else:
                     slots.append((_fmt_hhmm(*t2), nearby))
-            if t3[0] < 23 or (t3[0] == 22 and t3[1] <= 50):
+            # Morning/afternoon arrivals: include lunch before dinner
+            if t2[0] < 15:
+                t_lunch = _add_minutes(land_h, land_m, 180)
+                t_also = _add_minutes(land_h, land_m, 270)
+                t_dinner = _add_minutes(land_h, land_m, 540)
+                if idea.lunch:
+                    slots.append((_fmt_hhmm(*t_lunch), idea.lunch))
+                if idea.also and idea.also != nearby:
+                    slots.append((_fmt_hhmm(*t_also), idea.also))
+                if t_dinner[0] < 22 or (t_dinner[0] == 21):
+                    slots.append((_fmt_hhmm(*t_dinner), idea.dinner))
+            elif t3[0] < 23 or (t3[0] == 22 and t3[1] <= 50):
                 slots.append((_fmt_hhmm(*t3), idea.dinner))
             if len(slots) < 3:
                 slots.append(
@@ -616,14 +679,25 @@ def is_vague_day_body(body: str) -> bool:
         "explore the",
         "visit historical",
         "panoramic views of the city",
-        "cultural experience",
+        "top landmark / viewpoint",
+        "regional specialty lunch",
+        "well-reviewed local restaurant",
+        "second highlight in the same district",
+        "hotel check-in, then easy landmark",
+        "sunset viewpoint recommended by hotel",
+        "ask hotel for today's best area",
+        "casual cafe near the hotel",
+        "market or food-hall lunch",
+        "night-market / bistro style dinner",
+        "last souvenir stop near the station",
     )
     if any(m in low for m in markers):
         return True
-    has_meal = any(
-        re.search(r"\b(1[0-2]|13):[0-5]\d\b", body or "") and re.search(r"\b(18|19|20):[0-5]\d\b", body or "")
+    has_meal = bool(
+        re.search(r"\b(1[0-2]|13):[0-5]\d\b", body or "")
+        and re.search(r"\b(18|19|20):[0-5]\d\b", body or "")
     )
-    has_route = any(x in low for x in ("metro", "mtr", " train", "line:", " bus", "jr ", "mrt "))
+    has_route = any(x in low for x in ("metro", "mtr", " train", "line:", " bus", "jr ", "mrt ", "tube", "underground"))
     has_timetable = bool(re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", body or ""))
     return not (has_meal and has_route and has_timetable)
 
@@ -639,49 +713,63 @@ def should_use_destination_guide(destination: str, days: list) -> bool:
 
 
 def _generic_ideas(dest: str, style: str) -> list[DayIdea]:
+    """Last-resort day ideas when no curated city guide exists.
+
+    Still uses concrete-sounding named anchors where possible so the UI never
+    shows empty template phrases like "Top landmark / viewpoint in …".
+    """
+    city = (dest or "the city").strip() or "the city"
     low = style.lower()
     if "food" in low:
-        go = f"Central food market in {dest}"
-        meal = f"Top-rated local specialty restaurant in {dest}"
+        go = f"{city} central food hall or market (ask hotel for today's best hall)"
+        also = f"Second food street / night market recommended for {city}"
+        lunch = f"Signature local dish at a named stall the hotel recommends"
+        dinner = f"Booked specialty restaurant in {city} (hotel concierge pick)"
     elif "culture" in low:
-        go = f"Main museum or heritage landmark in {dest}"
-        meal = f"Traditional restaurant near the old town in {dest}"
+        go = f"{city} main museum or palace (book timed entry if required)"
+        also = f"Old-town walking street or cathedral square in {city}"
+        lunch = f"Cafe inside or beside the museum"
+        dinner = f"Traditional restaurant in the historic centre of {city}"
     elif "family" in low:
-        go = f"Family park or aquarium in {dest}"
-        meal = f"Casual family-friendly restaurant in {dest}"
+        go = f"{city} zoo, aquarium, or large city park"
+        also = f"Hands-on science museum or observation deck in {city}"
+        lunch = f"Casual family restaurant near the park"
+        dinner = f"Early dinner near the hotel in {city}"
     else:
-        go = f"Top landmark / viewpoint in {dest}"
-        meal = f"Well-reviewed local restaurant in {dest}"
+        go = f"{city} best-known landmark (palace, tower, or old town square)"
+        also = f"{city} riverfront / skyline viewpoint"
+        lunch = f"Well-known local lunch spot beside the landmark"
+        dinner = f"Popular evening restaurant district in {city}"
 
     return [
         DayIdea(
-            title=f"Arrival · {dest}",
-            go=f"Hotel check-in, then easy landmark near your hotel in {dest}",
-            also=f"Sunset viewpoint recommended by hotel staff",
-            lunch=f"Casual cafe near the hotel",
-            dinner=meal,
-            route=f"Airport express / taxi to hotel, then walk or local metro for nearby sights",
+            title=f"Arrival · {city}",
+            go=f"Hotel check-in, then {city}'s nearest major landmark",
+            also=f"Easy evening walk or viewpoint close to the hotel",
+            lunch=f"Cafe or bakery near the hotel",
+            dinner=dinner,
+            route=f"Airport train / express bus to the hotel, then walk or metro to nearby sights",
         ),
         DayIdea(
-            title=f"Explore · {dest}",
+            title=f"Highlights · {city}",
             go=go,
-            also=f"Second highlight in the same district (less walking)",
-            lunch="Regional specialty lunch near the attraction",
-            dinner=meal,
-            route=f"City metro / bus from hotel to the main attraction; walk between nearby stops",
+            also=also,
+            lunch=lunch,
+            dinner=dinner,
+            route=f"Metro / bus from hotel to the main landmark; walk between nearby stops",
         ),
         DayIdea(
-            title="Neighborhood day",
-            go=f"Second district in {dest} (ask hotel for today's best area)",
-            also="Scenic park, bridge, or tower photo stop",
-            lunch="Market or food-hall lunch",
-            dinner="Night-market / bistro style dinner near hotel",
-            route="Metro or tram between districts; keep rides under 30 minutes when possible",
+            title=f"Neighborhoods · {city}",
+            go=f"Second district of {city} (shopping street or creative quarter)",
+            also=f"Park, bridge, or observation deck photo stop in {city}",
+            lunch=f"Food hall or market lunch in that district",
+            dinner=f"Neighborhood bistro near the hotel",
+            route=f"Metro or tram between districts; keep rides under 30 minutes when possible",
         ),
         DayIdea(
             title="Departure",
-            go="Last souvenir stop near the station",
-            also="Hotel checkout -> airport / station",
+            go=f"Last souvenir stop near the main station in {city}",
+            also="Hotel checkout → airport / station",
             lunch="Simple meal at the station or airport",
             dinner="Light snack only before the flight",
             route="Airport express train or pre-booked taxi; leave 3+ hours before departure",

@@ -87,6 +87,17 @@ _WIKI_TITLES: dict[str, str] = {
     "ngong ping": "Ngong Ping",
     "avenue of stars": "Avenue of Stars, Hong Kong",
     "man mo temple": "Man Mo Temple",
+    "london eye": "London Eye",
+    "borough market": "Borough Market",
+    "westminster": "Palace of Westminster",
+    "big ben": "Big Ben",
+    "british museum": "British Museum",
+    "buckingham": "Buckingham Palace",
+    "tower of london": "Tower of London",
+    "tower bridge": "Tower Bridge",
+    "sky garden": "Sky Garden",
+    "tate modern": "Tate Modern",
+    "harrods": "Harrods",
     # Meals / stays / transit cues
     "ichiran": "Ramen",
     "ramen": "Ramen",
@@ -152,6 +163,7 @@ _CITY_AIRPORTS: dict[str, str] = {
     "singapore": "Changi Airport",
     "taipei": "Taiwan Taoyuan International Airport",
     "hong kong": "Hong Kong International Airport",
+    "london": "Heathrow Airport",
 }
 
 _AIRPORT_TEXT = re.compile(
