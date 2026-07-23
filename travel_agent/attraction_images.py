@@ -470,42 +470,85 @@ def _search_phrases(text: str, city: str = "") -> list[str]:
     return out or ["travel"]
 
 
-def _openverse_image(query: str) -> str:
-    """Search Openverse (Flickr / CC photos). Returns a direct image URL."""
+def _image_identity(url: str) -> str:
+    """Fingerprint so same photo at different sizes/hosts counts as one image."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    path = low.split("?", 1)[0]
+    name = path.rsplit("/", 1)[-1]
+    name = re.sub(r"^\d+px-", "", name)
+    # Flickr: 8666784025_0acf8b0fb1_b.jpg -> flickr:8666784025
+    fm = re.match(r"^(\d+)_[0-9a-f]+", name)
+    if fm or "staticflickr.com" in low or "flickr.com" in low:
+        if fm:
+            return f"flickr:{fm.group(1)}"
+        ids = re.findall(r"/(\d{6,})_", path)
+        if ids:
+            return f"flickr:{ids[-1]}"
+    # LoremFlickr locks are unique per query string
+    if "loremflickr.com" in low:
+        return low
+    # Wikimedia / generic: basename without size prefix
+    if name:
+        return f"file:{urllib.parse.unquote(name)}"
+    return path
+
+
+def _openverse_images(query: str, *, limit: int = 6) -> list[str]:
+    """Search Openverse; return several direct image URLs."""
     q = (query or "").strip()
     if not q:
-        return ""
-    if q in _OPENVERSE_CACHE:
-        return _OPENVERSE_CACHE[q]
+        return []
+    cache_key = f"{q}|{limit}"
+    if cache_key in _OPENVERSE_CACHE:
+        cached = _OPENVERSE_CACHE[cache_key]
+        return [u for u in cached.split("\n") if u] if cached else []
+
     api = "https://api.openverse.org/v1/images/?" + urllib.parse.urlencode(
         {
             "q": q,
-            "page_size": 5,
+            "page_size": max(5, limit),
             "mature": "false",
             "category": "photograph",
             "format": "json",
         }
     )
+    out: list[str] = []
+    seen: set[str] = set()
     try:
         data = _request_json(api, timeout=12)
         for item in data.get("results") or []:
             if not isinstance(item, dict):
                 continue
-            url = (item.get("url") or "").strip()
-            thumb = (item.get("thumbnail") or "").strip()
-            # Prefer direct Flickr / CDN URLs over Openverse thumb proxy
-            for cand in (url, thumb):
+            for cand in ((item.get("url") or "").strip(), (item.get("thumbnail") or "").strip()):
                 if not cand.startswith("http"):
                     continue
                 low = cand.lower()
                 if low.endswith(".svg") or "svg+" in low:
                     continue
-                _OPENVERSE_CACHE[q] = cand
-                return cand
+                ident = _image_identity(cand)
+                if not ident or ident in seen:
+                    continue
+                seen.add(ident)
+                out.append(cand)
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError, TypeError):
         pass
-    _OPENVERSE_CACHE[q] = ""
-    return ""
+    _OPENVERSE_CACHE[cache_key] = "\n".join(out)
+    # Keep legacy single-query cache key compatible
+    _OPENVERSE_CACHE[q] = out[0] if out else ""
+    return out
+
+
+def _openverse_image(query: str) -> str:
+    """Search Openverse (Flickr / CC photos). Returns a direct image URL."""
+    urls = _openverse_images(query, limit=1)
+    return urls[0] if urls else ""
 
 
 def _loremflickr_image(query: str, *, width: int = 480, height: int = 320) -> str:
@@ -518,59 +561,74 @@ def _loremflickr_image(query: str, *, width: int = 480, height: int = 320) -> st
     return f"https://loremflickr.com/{width}/{height}/{urllib.parse.quote(tags)}/all?lock={seed}"
 
 
-def candidate_image_urls(text: str, city: str = "", *, limit: int = 6) -> list[str]:
+def candidate_image_urls(
+    text: str,
+    city: str = "",
+    *,
+    limit: int = 6,
+    exclude: set[str] | None = None,
+) -> list[str]:
     """Ordered image URL candidates across Wikipedia, Openverse, and LoremFlickr."""
     phrases = _search_phrases(text, city)
     urls: list[str] = []
-    seen: set[str] = set()
+    seen: set[str] = set(exclude or ())
 
     def _add(u: str) -> None:
         u = _acceptable_image_url(sanitize_image_url(u) if "upload.wikimedia.org" in (u or "") else u)
-        if not u or u in seen:
+        if not u:
             return
-        seen.add(u)
+        ident = _image_identity(u)
+        if not ident or ident in seen:
+            return
+        seen.add(ident)
         urls.append(u)
 
     airport = _is_airport_query(text)
     # For airports, prefer photographic sources first (Wiki "Airport" is a diagram)
     if airport:
         for phrase in phrases[:5]:
-            _add(_openverse_image(phrase))
-            if len(urls) >= limit:
-                return urls[:limit]
+            for ov in _openverse_images(phrase, limit=4):
+                _add(ov)
+                if len(urls) >= limit:
+                    return urls[:limit]
         for phrase in phrases[:5]:
             _add(_wikipedia_thumbnail(phrase))
             if len(urls) >= limit:
                 return urls[:limit]
-        _add(_loremflickr_image("airport,terminal,airplane"))
+        _add(_loremflickr_image(f"airport,terminal,airplane,{text[:40]}"))
     else:
         for phrase in phrases[:5]:
             _add(_wikipedia_thumbnail(phrase))
             if len(urls) >= limit:
                 return urls[:limit]
-        for phrase in phrases[:4]:
-            _add(_openverse_image(phrase))
-            if len(urls) >= limit:
-                return urls[:limit]
-        _add(_loremflickr_image(phrases[0] if phrases else (city or "travel")))
+        for phrase in phrases[:5]:
+            for ov in _openverse_images(phrase, limit=4):
+                _add(ov)
+                if len(urls) >= limit:
+                    return urls[:limit]
+        _add(_loremflickr_image(f"{phrases[0] if phrases else (city or 'travel')}|{text[:48]}"))
     return urls[:limit]
 
 
-def lookup_image(text: str, city: str = "") -> str:
+def lookup_image(text: str, city: str = "", *, exclude: set[str] | None = None) -> str:
     """Return a photo URL from Wikipedia, Openverse, or LoremFlickr."""
+    excl = exclude or set()
     cache_key = f"{(city or '').strip().lower()}|{(text or '').strip().lower()}"
-    if cache_key in _LOOKUP_CACHE:
-        return _LOOKUP_CACHE[cache_key]
-    urls = candidate_image_urls(text, city, limit=1)
-    url = urls[0] if urls else _loremflickr_image(city or "travel")
-    _LOOKUP_CACHE[cache_key] = url
+    if not excl and cache_key in _LOOKUP_CACHE:
+        cached = _LOOKUP_CACHE[cache_key]
+        if cached and _image_identity(cached) not in excl:
+            return cached
+    urls = candidate_image_urls(text, city, limit=8, exclude=excl)
+    url = urls[0] if urls else _loremflickr_image(f"{city or 'travel'}|{text}|{len(excl)}")
+    if not excl:
+        _LOOKUP_CACHE[cache_key] = url
     return url
 
 
 def images_for_timetable(body: str, city: str = "") -> dict[str, str]:
-    """Map every timetable HH:MM row to a photo URL."""
+    """Map every timetable HH:MM row to a distinct photo URL."""
     out: dict[str, str] = {}
-    city_fallback = lookup_image(city or "travel", city) if city else lookup_image("travel destination")
+    used: set[str] = set()
 
     for line in (body or "").splitlines():
         m = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)\s+(.*)$", line.strip())
@@ -578,9 +636,17 @@ def images_for_timetable(body: str, city: str = "") -> dict[str, str]:
             continue
         t = f"{int(m.group(1)):02d}:{m.group(2)}"
         detail = m.group(3).strip()
-        url = lookup_image(detail, city) or city_fallback
-        if url:
-            out[t] = url
+        url = ""
+        for cand in candidate_image_urls(detail, city, limit=10, exclude=used):
+            ident = _image_identity(cand)
+            if ident and ident not in used:
+                url = cand
+                used.add(ident)
+                break
+        if not url:
+            url = _loremflickr_image(f"{city}|{t}|{detail}")
+            used.add(_image_identity(url))
+        out[t] = url
     return out
 
 

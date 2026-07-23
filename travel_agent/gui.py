@@ -1881,20 +1881,24 @@ class TravelAgentApp(tk.Tk):
         accent: str = "#C62828",
         size: tuple[int, int] = (160, 110),
         delay_ms: int = 0,
+        used_ids: set[str] | None = None,
     ) -> None:
         """Fetch bytes off-thread; build PhotoImage on the UI thread."""
         from travel_agent.attraction_images import (
+            _image_identity,
             candidate_image_urls,
             fetch_image_bytes,
             sanitize_image_url,
         )
 
         dest = self._trip_context.get("destination", "") or ""
+        avoid = set(used_ids or ())
         urls: list[str] = []
         first = sanitize_image_url(url) if url else ""
         if first:
             urls.append(first)
-        for cand in candidate_image_urls(detail, dest, limit=6):
+            avoid.discard(_image_identity(first))  # own assigned url is allowed
+        for cand in candidate_image_urls(detail, dest, limit=10, exclude=avoid):
             if cand not in urls:
                 urls.append(cand)
 
@@ -1904,9 +1908,11 @@ class TravelAgentApp(tk.Tk):
             if cached is not None:
                 img_lbl.configure(image=cached)
                 img_lbl.image = cached
+                if used_ids is not None:
+                    used_ids.add(_image_identity(u))
                 return
 
-        def _apply(data: bytes | None, key: str) -> None:
+        def _apply(data: bytes | None, key: str, chosen: str) -> None:
             if not img_lbl.winfo_exists() or not data:
                 return
             photo = self._timetable_thumb_cache.get(key)
@@ -1917,16 +1923,26 @@ class TravelAgentApp(tk.Tk):
                 self._timetable_thumb_cache[key] = photo
             img_lbl.configure(image=photo)
             img_lbl.image = photo
+            if used_ids is not None and chosen:
+                used_ids.add(_image_identity(chosen))
 
         def _worker() -> None:
             data = b""
             key = ""
+            chosen = ""
+            claimed = set(used_ids or ())
+            if first:
+                claimed.discard(_image_identity(first))
             for cand in urls:
+                ident = _image_identity(cand)
+                if ident and ident in claimed and cand != first:
+                    continue
                 data = fetch_image_bytes(cand)
                 if data:
                     key = f"{cand}|{size[0]}x{size[1]}"
+                    chosen = cand
                     break
-            self.after(0, lambda d=data, k=key: _apply(d, k))
+            self.after(0, lambda d=data, k=key, c=chosen: _apply(d, k, c))
 
         self.after(max(0, delay_ms), lambda: threading.Thread(target=_worker, daemon=True).start())
 
@@ -1963,16 +1979,21 @@ class TravelAgentApp(tk.Tk):
         title = getattr(day, "title", "Day") or "Day"
         body = getattr(day, "body", "") or ""
         urls = list(getattr(day, "urls", []) or [])
-        from travel_agent.attraction_images import images_for_timetable, lookup_image
+        from travel_agent.attraction_images import (
+            _image_identity,
+            images_for_timetable,
+            lookup_image,
+        )
 
         dest = self._trip_context.get("destination", "") or ""
         slot_images: dict[str, str] = dict(getattr(day, "images", {}) or {})
         if body:
-            # Always fill every timed row (older plans may only have 1–2 thumbs)
+            # Always fill every timed row with distinct photos
             filled = images_for_timetable(body, dest)
-            for t, url in filled.items():
-                if url:
-                    slot_images[t] = url
+            slot_images = filled or slot_images
+        used_ids: set[str] = {
+            _image_identity(u) for u in slot_images.values() if _image_identity(u)
+        }
 
         m = re.match(r"(?i)^day\s+(\d+)\b", title)
         if m:
@@ -2113,7 +2134,11 @@ class TravelAgentApp(tk.Tk):
                     anchor="w",
                     wraplength=280,
                 ).pack(side="left", fill="x", expand=True)
-                img_url = slot_images.get(time_txt, "") or lookup_image(detail, dest)
+                img_url = slot_images.get(time_txt, "") or lookup_image(
+                    detail, dest, exclude=used_ids
+                )
+                if img_url:
+                    used_ids.add(_image_identity(img_url))
                 # Show placeholder immediately; swap real photo in asynchronously
                 # (avoids Wikimedia 429 when many thumbs load at once).
                 placeholder = self._placeholder_timetable_thumb(
@@ -2139,6 +2164,7 @@ class TravelAgentApp(tk.Tk):
                         accent=accent,
                         size=(160, 110),
                         delay_ms=120 * seq,
+                        used_ids=used_ids,
                     )
                 row.configure(height=118)
                 row.pack_propagate(False)
@@ -2737,6 +2763,11 @@ class TravelAgentApp(tk.Tk):
                 nights = max(1, (date.fromisoformat(ret) - date.fromisoformat(depart)).days)
         except ValueError:
             nights = 0
+        if not nights:
+            try:
+                nights = max(1, int(self.nights_var.get().strip() or "0"))
+            except (TypeError, ValueError, tk.TclError):
+                nights = 0
         if not nights:
             nights = max(len(parsed.days), 3)
         styles = self._selected_styles() if hasattr(self, "_style_vars") else []

@@ -702,12 +702,23 @@ def is_vague_day_body(body: str) -> bool:
     return not (has_meal and has_route and has_timetable)
 
 
-def should_use_destination_guide(destination: str, days: list) -> bool:
-    """Use curated place lists for known cities when days are missing or vague."""
-    if not normalize_guide_city(destination):
-        return not days
+def should_use_destination_guide(
+    destination: str,
+    days: list,
+    *,
+    nights: int = 0,
+) -> bool:
+    """Use curated place lists when days are missing, too few, or mostly vague."""
+    n = max(0, int(nights or 0))
+    city = normalize_guide_city(destination)
     if not days:
         return True
+    # Always fill out the full trip length (fixes "only 1 day" when the LLM
+    # returns a single detailed day for a multi-night stay).
+    if n and len(days) < n:
+        return True
+    if not city:
+        return False
     vague_n = sum(1 for d in days if is_vague_day_body(getattr(d, "body", "") or ""))
     return vague_n >= max(1, (len(days) + 1) // 2)
 

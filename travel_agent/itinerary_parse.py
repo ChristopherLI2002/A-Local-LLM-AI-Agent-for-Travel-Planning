@@ -615,7 +615,6 @@ def synthesize_day_blocks(
         format_day_body,
         format_day_title,
     )
-    from travel_agent.attraction_images import images_for_timetable
 
     n = max(1, int(nights or 1))
     ideas = day_ideas_for(destination, n, styles=styles)
@@ -631,7 +630,8 @@ def synthesize_day_blocks(
                 title=format_day_title(idea, i),
                 body=body,
                 urls=[],
-                images=images_for_timetable(body, destination),
+                # Photos load in the GUI (avoids blocking multi-day synthesis).
+                images={},
             )
         )
     return days
@@ -658,7 +658,7 @@ def ensure_day_blocks(
     n = max(1, int(nights or 1))
     from travel_agent.destination_guides import should_use_destination_guide
 
-    if should_use_destination_guide(destination, parsed.days):
+    if should_use_destination_guide(destination, parsed.days, nights=n):
         parsed.days = synthesize_day_blocks(
             nights=n,
             destination=destination,
