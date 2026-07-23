@@ -2795,6 +2795,11 @@ class TravelAgentApp(tk.Tk):
             styles=styles,
             arrive_time=arrive_time,
             return_depart_time=return_depart_time,
+            attractions=(
+                list(getattr(self.agent.browser, "last_attractions", None) or [])
+                if self.agent
+                else None
+            ),
         )
 
     def _on_refine(self) -> None:

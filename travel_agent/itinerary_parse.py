@@ -608,6 +608,7 @@ def synthesize_day_blocks(
     styles: list[str] | None = None,
     arrive_time: str = "",
     return_depart_time: str = "",
+    attractions: list[str] | None = None,
 ) -> list[Block]:
     """Build detailed day cards with named attractions and restaurants."""
     from travel_agent.destination_guides import (
@@ -617,7 +618,9 @@ def synthesize_day_blocks(
     )
 
     n = max(1, int(nights or 1))
-    ideas = day_ideas_for(destination, n, styles=styles)
+    ideas = day_ideas_for(
+        destination, n, styles=styles, attractions=attractions
+    )
     days: list[Block] = []
     for i, idea in enumerate(ideas, start=1):
         body = format_day_body(
@@ -645,6 +648,7 @@ def ensure_day_blocks(
     styles: list[str] | None = None,
     arrive_time: str = "",
     return_depart_time: str = "",
+    attractions: list[str] | None = None,
 ) -> ParsedItinerary:
     """Guarantee detailed day cards with exact places to visit and eat."""
     raw = parsed.raw or ""
@@ -665,6 +669,7 @@ def ensure_day_blocks(
             styles=styles,
             arrive_time=arrive_time,
             return_depart_time=return_depart_time,
+            attractions=attractions,
         )
     else:
         from travel_agent.attraction_images import enrich_block_images, images_for_timetable
@@ -675,7 +680,12 @@ def ensure_day_blocks(
 
         # Patch only arrival / departure days to match live flight times
         if arrive_time or return_depart_time:
-            ideas = day_ideas_for(destination, max(n, len(parsed.days) or n), styles=styles)
+            ideas = day_ideas_for(
+                destination,
+                max(n, len(parsed.days) or n),
+                styles=styles,
+                attractions=attractions,
+            )
             if ideas and parsed.days and arrive_time:
                 body = format_day_body(ideas[0], arrive_time=arrive_time)
                 parsed.days[0].title = format_day_title(ideas[0], 1)

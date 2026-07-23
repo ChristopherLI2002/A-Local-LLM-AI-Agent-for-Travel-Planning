@@ -97,7 +97,14 @@ _WIKI_TITLES: dict[str, str] = {
     "tower bridge": "Tower Bridge",
     "sky garden": "Sky Garden",
     "tate modern": "Tate Modern",
-    "harrods": "Harrods",
+    "golden gate": "Golden Gate Bridge",
+    "alcatraz": "Alcatraz Island",
+    "fisherman's wharf": "Fisherman's Wharf",
+    "pier 39": "Pier 39",
+    "ferry building": "Ferry Building",
+    "painted ladies": "Painted Ladies",
+    "palace of fine arts": "Palace of Fine Arts",
+    "chinatown": "Chinatown, San Francisco",
     # Meals / stays / transit cues
     "ichiran": "Ramen",
     "ramen": "Ramen",
@@ -164,6 +171,8 @@ _CITY_AIRPORTS: dict[str, str] = {
     "taipei": "Taiwan Taoyuan International Airport",
     "hong kong": "Hong Kong International Airport",
     "london": "Heathrow Airport",
+    "san francisco": "San Francisco International Airport",
+    "california": "San Francisco International Airport",
 }
 
 _AIRPORT_TEXT = re.compile(

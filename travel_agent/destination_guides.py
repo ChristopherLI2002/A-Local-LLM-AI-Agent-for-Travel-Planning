@@ -372,6 +372,48 @@ _GUIDES: dict[str, list[DayIdea]] = {
             route="Heathrow: Elizabeth line or Heathrow Express from Paddington. Gatwick: Thameslink / Gatwick Express from Victoria or London Bridge. Leave 3+ hrs before flight",
         ),
     ],
+    "san francisco": [
+        DayIdea(
+            title="Arrival · Embarcadero",
+            go="Ferry Building Marketplace + Embarcadero waterfront walk",
+            also="Exploratorium exterior / Pier 15 area if time allows",
+            lunch="Hog Island Oyster Co. or El Porteño empanadas (Ferry Building)",
+            dinner="Kokkari Estiatorio or Tadich Grill (Financial District)",
+            route="BART from SFO to Embarcadero / Montgomery. Walk the Embarcadero; Muni F-Line streetcar for short hops",
+        ),
+        DayIdea(
+            title="Golden Gate & Presidio",
+            go="Golden Gate Bridge walk (Welcome Center / Crissy Field views)",
+            also="Palace of Fine Arts + Chestnut Street (Marina)",
+            lunch="The Warming Hut café or Greens Restaurant (Fort Mason)",
+            dinner="Gary Danko (book ahead) or street eats at Off the Grid Fort Mason",
+            route="Muni bus 28/30 toward Golden Gate Bridge Welcome Center. Walk or rideshare to Palace of Fine Arts / Marina",
+        ),
+        DayIdea(
+            title="Alcatraz & Fisherman's Wharf",
+            go="Alcatraz Island ferry (book timed tickets ahead)",
+            also="Fisherman's Wharf + Pier 39 sea lions",
+            lunch="Boudin Bakery clam chowder bread bowl (Wharf)",
+            dinner="Sotto Mare or Scoma's for seafood",
+            route="Muni F-Line or walk to Pier 33 for Alcatraz. Pier 39 is a short waterfront walk from the ferry return",
+        ),
+        DayIdea(
+            title="Mission & downtown icons",
+            go="Painted Ladies + Alamo Square, then Mission District murals (Balmy Alley)",
+            also="Union Square shopping or Cable Car turnaround at Powell & Market",
+            lunch="La Taqueria or Tartine Manufactory (Mission)",
+            dinner="State Bird Provisions or Liholiho Yacht Club (book ahead)",
+            route="Muni Metro to Civic Center / walk to Alamo Square. BART 16th St Mission for murals. Cable car or Muni back downtown",
+        ),
+        DayIdea(
+            title="Departure",
+            go="Last stop: Chinatown Gate + Grant Avenue souvenirs OR Blue Bottle coffee",
+            also="Hotel checkout → San Francisco International (SFO)",
+            lunch="Good Mong Kok Bakery dim sum or airport meal at SFO",
+            dinner="Light snack airside only",
+            route="BART to SFO (AirTrain to terminals) or shared van / rideshare. Leave 3+ hrs before flight",
+        ),
+    ],
 }
 
 _ALIASES: dict[str, str] = {
@@ -396,6 +438,11 @@ _ALIASES: dict[str, str] = {
     "london uk": "london",
     "london england": "london",
     "united kingdom": "london",
+    "sfo": "san francisco",
+    "san francisco": "san francisco",
+    "sf": "san francisco",
+    "california": "san francisco",
+    "ca usa": "san francisco",
 }
 
 
@@ -412,19 +459,130 @@ def normalize_guide_city(destination: str) -> str:
     return ""
 
 
+def day_ideas_from_attractions(
+    attractions: list[str],
+    *,
+    city: str,
+    nights: int,
+    meals: list[str] | None = None,
+) -> list[DayIdea]:
+    """Build day cards from Trip.com / scraped attraction names."""
+    n = max(1, int(nights or 1))
+    city_label = (city or "the city").strip() or "the city"
+    names = [a.strip() for a in attractions if (a or "").strip()]
+    # Drop noisy product lines
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    skip = re.compile(
+        r"(?i)\b(eSIM|SIM card|wifi|wi-fi|airport express|lounge|transfer|private car|"
+        r"charter|ticket only|voucher|buffet deal|JR Pass)\b"
+    )
+    for name in names:
+        key = name.lower()
+        if skip.search(name) or len(name) < 3 or len(name) > 90:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name)
+    names = cleaned
+
+    meal_pool = [
+        m
+        for m in (meals or [])
+        if m and len(m) < 80 and not skip.search(m)
+    ]
+    if not meal_pool:
+        meal_pool = [
+            f"Casual lunch near the attraction in {city_label}",
+            f"Popular local dinner spot in {city_label}",
+            f"Cafe or bakery lunch in {city_label}",
+            f"Neighborhood restaurant dinner in {city_label}",
+        ]
+
+    if not names:
+        return _generic_ideas(city_label, "First-time")[: max(n, 1)]
+
+    ideas: list[DayIdea] = []
+    # Arrival
+    a0 = names[0]
+    a1 = names[1] if len(names) > 1 else names[0]
+    ideas.append(
+        DayIdea(
+            title=f"Arrival · {city_label}",
+            go=f"Hotel check-in, then {a0}",
+            also=a1 if a1 != a0 else f"Evening walk near {a0}",
+            lunch=meal_pool[0],
+            dinner=meal_pool[1 % len(meal_pool)],
+            route=f"Airport train / express bus to hotel, then local transit to {a0}",
+        )
+    )
+    # Middle days — two attractions each
+    mid_needed = max(0, n - 2)
+    idx = 2 if len(names) > 2 else 0
+    for d in range(mid_needed):
+        go = names[idx % len(names)]
+        idx += 1
+        also = names[idx % len(names)]
+        idx += 1
+        if also == go and len(names) > 1:
+            also = names[(idx) % len(names)]
+        ideas.append(
+            DayIdea(
+                title=f"{city_label} · {go.split('(')[0].strip()[:28]}",
+                go=go,
+                also=also,
+                lunch=meal_pool[(d * 2) % len(meal_pool)],
+                dinner=meal_pool[(d * 2 + 1) % len(meal_pool)],
+                route=f"Metro / bus / rideshare between {go.split('(')[0].strip()} and nearby stops",
+            )
+        )
+    # Departure
+    last = names[-1]
+    ideas.append(
+        DayIdea(
+            title="Departure",
+            go=f"Last stop: {last}" if n > 1 else a0,
+            also=f"Hotel checkout → airport ({city_label})",
+            lunch=meal_pool[0],
+            dinner="Light snack only before the flight",
+            route="Airport express / pre-booked transfer; leave 3+ hours before departure",
+        )
+    )
+    # Trim/pad to exactly n days
+    if len(ideas) > n:
+        if n == 1:
+            ideas = [ideas[0]]
+        else:
+            ideas = [ideas[0]] + ideas[1 : n - 1] + [ideas[-1]]
+    while len(ideas) < n:
+        ideas.insert(-1 if len(ideas) > 1 else len(ideas), ideas[min(1, len(ideas) - 1)])
+    return ideas[:n]
+
+
 def day_ideas_for(
     destination: str,
     nights: int,
     *,
     styles: list[str] | None = None,
+    attractions: list[str] | None = None,
 ) -> list[DayIdea]:
-    """Return one DayIdea per trip day, cycling curated content when needed."""
+    """Return one DayIdea per trip day, cycling curated or scraped content."""
     n = max(1, int(nights or 1))
     city = normalize_guide_city(destination)
     base = list(_GUIDES.get(city) or [])
     style = ((styles or ["First-time"])[0] if styles else "First-time").strip()
     dest_label = (destination or "the city").strip() or "the city"
+    # Prefer a concrete city label when destination was a region (e.g. California)
+    if city == "san francisco":
+        dest_label = "San Francisco"
 
+    if not base and attractions:
+        base = day_ideas_from_attractions(
+            list(attractions),
+            city=dest_label,
+            nights=n,
+        )
     if not base:
         base = _generic_ideas(dest_label, style)
 
@@ -510,6 +668,10 @@ def _infer_transfer(prev: str, nxt: str, idea: DayIdea) -> tuple[str, int]:
         return "MTR", 15
     if "elizabeth" in route or "tube" in route or "underground" in route:
         return "London Underground", 18
+    if "bart" in route:
+        return "BART", 25
+    if "muni" in route or "cable car" in route:
+        return "Muni / cable car", 20
     if "metro" in route or "mrt" in route:
         return "Metro", 15
     if "jr " in route or "train" in route:
@@ -690,6 +852,13 @@ def is_vague_day_body(body: str) -> bool:
         "market or food-hall lunch",
         "night-market / bistro style dinner",
         "last souvenir stop near the station",
+        "best-known landmark",
+        "well-known local lunch spot",
+        "riverfront / skyline viewpoint",
+        "second district of",
+        "shopping street or creative quarter",
+        "food hall or market lunch in that district",
+        "park, bridge, or observation deck",
     )
     if any(m in low for m in markers):
         return True

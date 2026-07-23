@@ -20,6 +20,7 @@ Tools:
 - plan_trip: primary (compares flight/hotel dates, returns hk.trip.com links + prices)
 - compare_flight_prices / compare_hotel_prices: extra ranking if needed
 - search_flights / search_hotels / search_trains / search_transfers / search_cars
+- search_attractions: pull named sights from hk.trip.com/things-to-do for the city
 - browse_url / click_text / get_page_summary
 
 Output rules (plain text, no HTML):
@@ -45,6 +46,8 @@ Hard rules:
 - When refining, keep the same section headings so the UI can re-parse the plan.
 - Do NOT dump raw tool tables as the final answer — rewrite into the four sections above.
 - Do NOT use vague lines like "local dinner and unwind" or "flexible free time" — name places.
+- For regions like California, plan around a primary city (San Francisco) with exact attraction
+  names from search_attractions / Trip.com things-to-do — never "best-known landmark in california".
 """
 
 

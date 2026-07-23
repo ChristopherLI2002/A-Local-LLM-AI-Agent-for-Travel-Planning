@@ -68,6 +68,7 @@ def _build_suggested_day_flow(
     *,
     interests: str = "",
     destination: str = "",
+    attractions: list[str] | None = None,
 ) -> str:
     """Emit one Day N block per trip day with named sights and meals."""
     from travel_agent.destination_guides import (
@@ -78,7 +79,12 @@ def _build_suggested_day_flow(
 
     n = max(1, int(nights or 1))
     styles = [s.strip() for s in (interests or "First-time").split(",") if s.strip()]
-    ideas = day_ideas_for(destination, n, styles=styles or None)
+    ideas = day_ideas_for(
+        destination,
+        n,
+        styles=styles or None,
+        attractions=attractions,
+    )
     lines: list[str] = []
     for i, idea in enumerate(ideas, start=1):
         lines.append(format_day_title(idea, i) + ":")
@@ -301,6 +307,7 @@ class TripBrowser:
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self.page: Page | None = None
+        self.last_attractions: list[str] = []
 
     def start(self) -> None:
         self._pw = sync_playwright().start()
@@ -370,6 +377,149 @@ class TripBrowser:
         self._safe_goto(TRIP_HOME)
         page.wait_for_timeout(1500)
         return f"Opened Trip.com Hong Kong home: {page.url}"
+
+    def scrape_attractions(self, city: str, *, limit: int = 18) -> list[str]:
+        """Search Trip.com things-to-do and return named attractions for a city."""
+        page = self._require_page()
+        city_name = to_hotel_city(city) or (city or "").strip()
+        if not city_name:
+            return []
+
+        from travel_agent.places import to_hotel_city_id
+
+        city_id = ""
+        try:
+            city_id = to_hotel_city_id(city_name) or ""
+        except Exception:
+            city_id = ""
+
+        candidates = [
+            (
+                f"{settings.trip_base_url}/things-to-do/list?"
+                f"{urlencode({'keyword': city_name, 'locale': settings.trip_locale, 'curr': settings.trip_currency})}"
+            ),
+            (
+                f"{settings.trip_base_url}/things-to-do/?"
+                f"{urlencode({'keyword': city_name, 'locale': settings.trip_locale, 'curr': settings.trip_currency})}"
+            ),
+            (
+                f"{settings.trip_base_url}/things-to-do/?locale={settings.trip_locale}"
+                f"&curr={settings.trip_currency}"
+            ),
+        ]
+        if city_id:
+            candidates.insert(
+                0,
+                (
+                    f"{settings.trip_base_url}/things-to-do/list?"
+                    f"{urlencode({'districtId': city_id, 'locale': settings.trip_locale, 'curr': settings.trip_currency})}"
+                ),
+            )
+
+        names: list[str] = []
+        seen: set[str] = set()
+        skip_re = re.compile(
+            r"(?i)\b(eSIM|SIM|wifi|wi-fi|JR Pass|airport express|lounge|voucher|"
+            r"private car|charter|transfer bus|gift card|insurance)\b"
+        )
+
+        def _add(raw: str) -> None:
+            text = re.sub(r"\s+", " ", (raw or "").strip())
+            text = re.sub(r"^(No\.\s*\d+\s+of\s+.+?:\s*)", "", text, flags=re.I)
+            if not text or len(text) < 3 or len(text) > 90:
+                return
+            if skip_re.search(text):
+                return
+            # Skip pure prices / ratings
+            if re.fullmatch(r"[\d.,\sHK$%]+", text):
+                return
+            key = text.lower()
+            if key in seen:
+                return
+            # Prefer landmark-like titles over long tour packages
+            if text.count("·") > 2 or text.count("|") > 2:
+                return
+            seen.add(key)
+            names.append(text)
+
+        for url in candidates:
+            try:
+                self._safe_goto(url)
+                page.wait_for_timeout(2200)
+                # Try typing into search if we're on the hub page
+                if "keyword=" not in url and "districtId=" not in url:
+                    for sel in (
+                        "input[placeholder*='Search' i]",
+                        "input[type='search']",
+                        "input[placeholder*='places' i]",
+                    ):
+                        try:
+                            box = page.locator(sel).first
+                            if box.count():
+                                box.click(timeout=2000)
+                                box.fill(city_name, timeout=2000)
+                                box.press("Enter")
+                                page.wait_for_timeout(2500)
+                                break
+                        except Exception:
+                            continue
+
+                # Collect from attraction/detail anchors and headings
+                selectors = [
+                    "a[href*='/travel-guide/attraction/']",
+                    "a[href*='/things-to-do/detail']",
+                    "a[href*='/things-to-do/']",
+                    "h2",
+                    "h3",
+                ]
+                for sel in selectors:
+                    try:
+                        locs = page.locator(sel)
+                        count = min(locs.count(), 40)
+                        for i in range(count):
+                            try:
+                                label = (locs.nth(i).inner_text(timeout=800) or "").strip()
+                            except Exception:
+                                continue
+                            # Take first line only
+                            label = label.split("\n")[0].strip()
+                            _add(label)
+                            if len(names) >= limit:
+                                break
+                    except Exception:
+                        continue
+                    if len(names) >= limit:
+                        break
+                if len(names) >= max(6, limit // 2):
+                    break
+            except Exception:
+                continue
+
+        self.last_attractions = names[:limit]
+        return self.last_attractions
+
+    def search_attractions(self, city: str, limit: int = 18) -> str:
+        """Tool wrapper: list Trip.com things-to-do attractions for a city."""
+        names = self.scrape_attractions(city, limit=max(6, int(limit or 18)))
+        city_name = to_hotel_city(city) or city
+        if not names:
+            return (
+                f"No attractions parsed for {city_name} on Trip.com things-to-do. "
+                f"Try https://hk.trip.com/things-to-do/?locale=en-HK&curr=HKD"
+            )
+        lines = [
+            f"TRIP.COM ATTRACTIONS — {city_name}",
+            f"Source: https://hk.trip.com/things-to-do/?locale=en-HK&curr=HKD",
+            "",
+        ]
+        for i, name in enumerate(names, 1):
+            lines.append(f"{i}. {name}")
+        lines.append("")
+        lines.append(
+            "Use these exact attraction names in the Day-by-day itinerary "
+            "(pair with nearby restaurants)."
+        )
+        return "\n".join(lines)
 
     def get_page_summary(self) -> str:
         page = self._require_page()
@@ -1124,6 +1274,13 @@ class TripBrowser:
         if not want_flights and not want_trains:
             want_flights = True
 
+        # Pull live attraction names from Trip.com things-to-do for the day plan
+        attractions: list[str] = []
+        try:
+            attractions = self.scrape_attractions(hotel_city or destination, limit=18)
+        except Exception:
+            attractions = list(self.last_attractions or [])
+
         raw_blocks: list[str] = []
         sections: list[str] = []
         booking_lines: list[str] = []
@@ -1532,11 +1689,17 @@ class TripBrowser:
             nights,
             interests=interests or "",
             destination=hotel_city or destination,
+            attractions=attractions or None,
         )
         sections.append(
             f"""{n}) SUGGESTED DAY FLOW
 {day_lines}"""
         )
+        if attractions:
+            sections.append(
+                "Attraction sources (Trip.com things-to-do):\n"
+                + "\n".join(f"- {a}" for a in attractions[:12])
+            )
         n += 1
 
         pick_lines = [
@@ -2656,6 +2819,32 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "search_attractions",
+            "description": (
+                "Search Trip.com Hong Kong things-to-do "
+                "(https://hk.trip.com/things-to-do/?locale=en-HK&curr=HKD) "
+                "and return named attractions/experiences for a city. "
+                "Use these exact names in the day-by-day itinerary."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "City or region, e.g. San Francisco, California, Tokyo",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max attractions to return (default 18)",
+                    },
+                },
+                "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "plan_trip",
             "description": (
                 "Create a full travel plan on Trip.com: live-compare flight dates and "
@@ -2767,6 +2956,7 @@ def dispatch_tool(browser: TripBrowser, name: str, arguments: dict[str, Any] | s
         "compare_flight_prices": lambda: browser.compare_flight_prices(**arguments),
         "compare_hotel_prices": lambda: browser.compare_hotel_prices(**arguments),
         "plan_trip": lambda: browser.plan_trip(**arguments),
+        "search_attractions": lambda: browser.search_attractions(**arguments),
         "browse_url": lambda: browser.browse_url(**arguments),
         "get_page_summary": lambda: browser.get_page_summary(),
         "click_text": lambda: browser.click_text(**arguments),
