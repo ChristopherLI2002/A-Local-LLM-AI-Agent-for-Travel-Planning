@@ -33,8 +33,10 @@ from travel_agent.planner_query import TRAVEL_STYLES, build_plan_query
 from travel_agent.trip_urls import (
     build_flight_search_url,
     build_hotel_list_url,
+    canonicalize_hotel_detail_url,
     fetch_flight_card,
     fetch_hotel_detail_link,
+    is_openable_hotel_url,
     is_trusted_hotel_detail_url,
     resolve_booking_url,
 )
@@ -716,16 +718,15 @@ class FlightRowCard(tk.Frame):
         canvas.delete("all")
         sz = self._LOGO_SIZE
         cx = sz // 2
-        pad = max(2, sz // 16)
-        canvas.create_polygon(
-            cx, pad, sz - pad, sz - pad, pad, sz - pad, fill=C["badge_teal"], outline=""
-        )
+        # Soft rounded square (not the old triangle placeholder)
+        pad = max(2, sz // 14)
+        canvas.create_oval(pad, pad, sz - pad, sz - pad, fill="#EEF3F8", outline="#D5DEE8")
         canvas.create_text(
             cx,
-            cx + pad,
-            text=(initials or "TP")[:3].upper(),
-            fill="#FFFFFF",
-            font=("Segoe UI", max(8, sz // 5), "bold"),
+            cx,
+            text=(initials or "TP")[:2].upper(),
+            fill=C["badge_teal"],
+            font=("Segoe UI", max(9, sz // 4), "bold"),
         )
 
     def _draw_logo(self, initials: str) -> None:
@@ -733,6 +734,21 @@ class FlightRowCard(tk.Frame):
 
     def _draw_ret_logo(self, initials: str) -> None:
         self._draw_logo_on(self.ret_logo, initials=initials, photo_attr="_ret_logo_photo")
+
+    def _fetch_logo_bytes(self, url: str) -> bytes:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://hk.trip.com/",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+        )
+        return urllib.request.urlopen(req, timeout=10).read()
 
     def _load_logo_photo(
         self,
@@ -742,29 +758,52 @@ class FlightRowCard(tk.Frame):
         canvas: tk.Canvas,
         photo_attr: str,
     ) -> None:
-        url = (logo_url or airline_logo_url(airline)).strip()
         initials = "".join(w[0] for w in airline.split()[:3] if w) or "TP"
-        if not url or not is_plausible_airline_name(airline):
+        # Prefer Trip.com CDN by IATA code — scraped URLs are often tiny/broken
+        cdn = airline_logo_url(airline).strip()
+        candidates = [u for u in (cdn, (logo_url or "").strip()) if u.startswith("http")]
+        # Dedupe while preserving order
+        seen: set[str] = set()
+        urls: list[str] = []
+        for u in candidates:
+            if u not in seen:
+                seen.add(u)
+                urls.append(u)
+        if not urls:
             self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
             return
-        try:
-            data = urllib.request.urlopen(url, timeout=8).read()
-            target = self._LOGO_SIZE
-            img = Image.open(BytesIO(data)).convert("RGBA")
-            scale = max(target / max(img.width, 1), target / max(img.height, 1))
-            new_w = max(1, round(img.width * scale))
-            new_h = max(1, round(img.height * scale))
-            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            left = (new_w - target) // 2
-            top = (new_h - target) // 2
-            fitted = resized.crop((left, top, left + target, top + target))
-            photo = ImageTk.PhotoImage(fitted)
-            setattr(self, photo_attr, photo)
-            canvas.delete("all")
-            cx = target // 2
-            canvas.create_image(cx, cx, image=photo)
-        except Exception:
-            self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
+        last_err: Exception | None = None
+        for url in urls:
+            try:
+                data = self._fetch_logo_bytes(url)
+                if len(data) < 200:
+                    continue
+                target = self._LOGO_SIZE
+                img = Image.open(BytesIO(data)).convert("RGBA")
+                # Fit inside square with padding so logos aren't clipped
+                pad = max(2, target // 10)
+                box = target - pad * 2
+                scale = min(box / max(img.width, 1), box / max(img.height, 1))
+                new_w = max(1, round(img.width * scale))
+                new_h = max(1, round(img.height * scale))
+                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                canvas_img = Image.new("RGBA", (target, target), (255, 255, 255, 0))
+                canvas_img.paste(
+                    resized,
+                    ((target - new_w) // 2, (target - new_h) // 2),
+                    resized,
+                )
+                photo = ImageTk.PhotoImage(canvas_img)
+                setattr(self, photo_attr, photo)
+                canvas.delete("all")
+                cx = target // 2
+                canvas.create_image(cx, cx, image=photo)
+                return
+            except Exception as exc:
+                last_err = exc
+                continue
+        _ = last_err
+        self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
 
     def _set_airline_logo(self, offer: FlightOffer) -> None:
         self._load_logo_photo(
@@ -895,16 +934,17 @@ class FlightRowCard(tk.Frame):
 class HotelRowCard(tk.Frame):
     """Trip.com-style hotel listing card (photo, name, stars, score, room, price)."""
 
-    def __init__(self, master: tk.Misc, **kwargs) -> None:
+    def __init__(self, master: tk.Misc, *, heading: str = "Recommended hotel", **kwargs) -> None:
         super().__init__(master, bg=C["paper"], **kwargs)
-        tk.Label(
+        self.heading_lbl = tk.Label(
             self,
-            text="Recommended hotel",
+            text=heading,
             bg=C["paper"],
             fg=C["ink"],
             font=FONT_UI_BOLD,
             anchor="w",
-        ).pack(fill="x", pady=(0, 6))
+        )
+        self.heading_lbl.pack(fill="x", pady=(0, 6))
 
         shell = tk.Frame(self, bg=C["line"], padx=1, pady=1)
         shell.pack(fill="x")
@@ -922,6 +962,9 @@ class HotelRowCard(tk.Frame):
         self._hotel_photo: tk.PhotoImage | None = None
         self._PHOTO_W = 280
         self._PHOTO_H = 140
+        self._offer_image_url = ""
+        self._offer_photo_title = "Hotel"
+        self._photo_reload_after: str | None = None
         self.photo.bind("<Configure>", self._on_photo_configure)
         self._draw_photo_placeholder()
 
@@ -1067,6 +1110,19 @@ class HotelRowCard(tk.Frame):
         if event.width > 40 and abs(event.width - self._PHOTO_W) > 2:
             self._PHOTO_W = event.width
             self._PHOTO_H = max(120, event.height or self._PHOTO_H)
+            # Canvas often grows after first paint — redraw so we don't leave a black half
+            if self._offer_image_url:
+                if self._photo_reload_after:
+                    try:
+                        self.after_cancel(self._photo_reload_after)
+                    except Exception:
+                        pass
+                self._photo_reload_after = self.after(80, self._reload_hotel_photo)
+
+    def _reload_hotel_photo(self) -> None:
+        self._photo_reload_after = None
+        if self._offer_image_url:
+            self._paint_hotel_photo(self._offer_image_url, self._offer_photo_title)
 
     def _draw_photo_placeholder(self, title: str = "Hotel") -> None:
         self._hotel_photo = None
@@ -1097,11 +1153,7 @@ class HotelRowCard(tk.Frame):
             font=FONTS["tiny"],
         )
 
-    def _set_hotel_photo(self, offer: HotelOffer) -> None:
-        url = (offer.image_url or "").strip().rstrip(".,;)")
-        if not url.startswith("http"):
-            self._draw_photo_placeholder(offer.name or "Hotel")
-            return
+    def _paint_hotel_photo(self, url: str, title: str) -> None:
         try:
             req = urllib.request.Request(
                 url,
@@ -1117,8 +1169,9 @@ class HotelRowCard(tk.Frame):
             )
             data = urllib.request.urlopen(req, timeout=15).read()
             img = Image.open(BytesIO(data)).convert("RGB")
+            self.update_idletasks()
             target_w = max(self.photo.winfo_width(), self._PHOTO_W, 280)
-            target_h = self._PHOTO_H
+            target_h = max(self.photo.winfo_height(), self._PHOTO_H, 140)
             scale = max(target_w / max(img.width, 1), target_h / max(img.height, 1))
             new_w = max(1, round(img.width * scale))
             new_h = max(1, round(img.height * scale))
@@ -1129,21 +1182,48 @@ class HotelRowCard(tk.Frame):
             photo = ImageTk.PhotoImage(fitted)
             self._hotel_photo = photo
             self._PHOTO_W = target_w
+            self._PHOTO_H = target_h
             self.photo.delete("all")
             self.photo.create_image(0, 0, image=photo, anchor="nw")
         except Exception:
-            self._draw_photo_placeholder(offer.name or "Hotel")
+            self._draw_photo_placeholder(title or "Hotel")
+
+    def _set_hotel_photo(self, offer: HotelOffer) -> None:
+        url = (offer.image_url or "").strip().rstrip(".,;)")
+        title = offer.name or "Hotel"
+        if not url.startswith("http") or title.lower().startswith("hotels in "):
+            try:
+                from travel_agent.attraction_images import lookup_image
+
+                city = offer.city or offer.location or "hotel"
+                query = title if not title.lower().startswith("hotels in ") else f"{city} hotel exterior"
+                found = lookup_image(query, city=city)
+                if found and found.startswith("http"):
+                    url = found
+            except Exception:
+                pass
+        if not url.startswith("http"):
+            self._offer_image_url = ""
+            self._draw_photo_placeholder(title)
+            return
+        self._offer_image_url = url
+        self._offer_photo_title = title
+        self._paint_hotel_photo(url, title)
 
     def _open(self, _e: object | None = None) -> None:
-        if self._url and is_trusted_hotel_detail_url(self._url):
-            webbrowser.open(self._url)
-        elif self._url and "trip.com" in self._url.lower():
+        url = (self._url or "").strip()
+        if url and is_openable_hotel_url(url):
+            webbrowser.open(url)
+            return
+        if url and "trip.com" in url.lower() and "/hotels/" in url.lower():
+            # List URL without city id still often works; open it
+            webbrowser.open(url)
+            return
+        if url:
             messagebox.showwarning(
                 "Invalid link",
-                "This hotel link looks invalid. Regenerate the trip to refresh it.",
+                "No valid Trip.com hotel link for this stay yet. Regenerate the trip.",
             )
-        elif self._url:
-            messagebox.showwarning("Invalid link", "No valid Trip.com booking link is available yet.")
         else:
             messagebox.showinfo("No link", "Generate an itinerary first to get a booking link.")
 
@@ -1164,20 +1244,45 @@ class HotelRowCard(tk.Frame):
         self._url = ""
 
     def set_offer(self, offer: HotelOffer) -> None:
+        heading = offer.stay_label or (
+            f"Stay · {offer.city}" if offer.city else "Recommended hotel"
+        )
+        if offer.nights and "night" not in heading.lower():
+            heading = f"{heading} ({offer.nights} night{'s' if offer.nights != 1 else ''})"
+        self.heading_lbl.configure(text=heading)
         self._set_hotel_photo(offer)
         self.name_lbl.configure(text=offer.name)
         self.stars_lbl.configure(text="★" * max(0, min(offer.stars, 5)))
         self.score_badge.configure(text=offer.score or "—")
         self.score_word.configure(text=offer.score_label or "")
         self.reviews_lbl.configure(text=offer.reviews or "")
-        self.location_lbl.configure(text=f"Loc · {offer.location}")
+        loc = offer.location or offer.city or "—"
+        dates = ""
+        if offer.checkin and offer.checkout:
+            dates = f"  ·  {offer.checkin} → {offer.checkout}"
+        self.location_lbl.configure(text=f"Loc · {loc}{dates}")
         self.features_lbl.configure(text=f"Highlights · {offer.features}")
         self.room_lbl.configure(text=offer.room_type)
         self.beds_lbl.configure(text=offer.beds)
         self.social_lbl.configure(text=offer.social_proof)
         self.price_lbl.configure(text=offer.price_label)
         self.total_lbl.configure(text=offer.total_label or "Total (incl. taxes & fees): see Trip.com")
-        self._url = offer.url
+        # Prefer a city/date list URL when the offer link is missing or unusable
+        url = (offer.url or "").strip()
+        if not is_openable_hotel_url(url) and offer.city and offer.checkin and offer.checkout:
+            url = build_hotel_list_url(
+                city=offer.city,
+                checkin=offer.checkin,
+                checkout=offer.checkout,
+            )
+        elif is_trusted_hotel_detail_url(url):
+            url = canonicalize_hotel_detail_url(
+                url,
+                checkin=offer.checkin or "",
+                checkout=offer.checkout or "",
+                city=offer.city or offer.location or "",
+            ) or url
+        self._url = url
 
 
 class TravelAgentApp(tk.Tk):
@@ -1231,7 +1336,7 @@ class TravelAgentApp(tk.Tk):
         self.font_slider.pack(side="right", padx=(0, 16))
         self.step_label = tk.Label(
             top_bar,
-            text="Step 1 of 3 — Destination",
+            text="Plan your trip",
             bg=C["paper"],
             fg=C["muted"],
             font=FONT_UI,
@@ -1387,57 +1492,38 @@ class TravelAgentApp(tk.Tk):
     # ── Wizard ──────────────────────────────────────────────────────────
 
     def _build_wizard(self) -> None:
+        """Single-page trip form (destination + dates + style)."""
         self.wizard.pack(fill="both", expand=True)
 
+        # Keep aliases so older step helpers still resolve to the same form
         self.step1 = tk.Frame(self.wizard, bg=C["paper"])
-        self.step2 = tk.Frame(self.wizard, bg=C["paper"])
-        self.step3 = tk.Frame(self.wizard, bg=C["paper"])
+        self.step2 = self.step1
+        self.step3 = self.step1
+        form = self.step1
 
-        # Step 1 — Destination
         tk.Label(
-            self.step1,
-            text="Where next?",
+            form,
+            text="Plan your trip",
             bg=C["paper"],
             fg=C["ink"],
             font=("Georgia", 26),
             anchor="w",
         ).pack(fill="x", pady=(24, 6))
         tk.Label(
-            self.step1,
-            text="One destination. Voyage builds flights, hotels, and a day-by-day plan.",
+            form,
+            text="Destination, dates, and style on one page — then Voyage builds flights, hotels, and a day-by-day plan.",
             bg=C["paper"],
             fg=C["muted"],
             font=FONT_UI,
             anchor="w",
-        ).pack(fill="x", pady=(0, 20))
+            wraplength=720,
+            justify="left",
+        ).pack(fill="x", pady=(0, 18))
 
         self.dest_var = tk.StringVar()
         self.origin_var = tk.StringVar(value="Hong Kong")
-        Field(self.step1, "Destination (city)", self.dest_var).pack(fill="x", pady=(0, 12))
-        Field(self.step1, "Flying from", self.origin_var).pack(fill="x", pady=(0, 24))
-        row1 = tk.Frame(self.step1, bg=C["paper"])
-        row1.pack(fill="x")
-        PillButton(row1, "Continue", command=lambda: self._wizard_next(2), width=140).pack(
-            side="left"
-        )
-
-        # Step 2 — Duration
-        tk.Label(
-            self.step2,
-            text="How long?",
-            bg=C["paper"],
-            fg=C["ink"],
-            font=("Georgia", 26),
-            anchor="w",
-        ).pack(fill="x", pady=(24, 6))
-        tk.Label(
-            self.step2,
-            text="Default is tomorrow for 7 nights — same rhythm as Trip.Planner.",
-            bg=C["paper"],
-            fg=C["muted"],
-            font=FONT_UI,
-            anchor="w",
-        ).pack(fill="x", pady=(0, 20))
+        Field(form, "Destination (city or region)", self.dest_var).pack(fill="x", pady=(0, 12))
+        Field(form, "Flying from", self.origin_var).pack(fill="x", pady=(0, 16))
 
         self.nights_var = tk.StringVar(value="7")
         self.depart_var = tk.StringVar(value=_default_depart())
@@ -1446,7 +1532,7 @@ class TravelAgentApp(tk.Tk):
         self.depart_var.trace_add("write", self._sync_return)
         self.nights_var.trace_add("write", self._sync_return)
 
-        grid = tk.Frame(self.step2, bg=C["paper"])
+        grid = tk.Frame(form, bg=C["paper"])
         grid.pack(fill="x")
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
@@ -1460,52 +1546,39 @@ class TravelAgentApp(tk.Tk):
             row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 12)
         )
         Field(grid, "Return", self.return_var).grid(
-            row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 12)
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 16)
         )
 
-        row2 = tk.Frame(self.step2, bg=C["paper"])
-        row2.pack(fill="x", pady=(16, 0))
-        PillButton(row2, "Back", command=lambda: self._wizard_next(1), primary=False, width=110).pack(
-            side="left"
-        )
-        PillButton(row2, "Continue", command=lambda: self._wizard_next(3), width=140).pack(
-            side="left", padx=10
-        )
-
-        # Step 3 — Travel style
         tk.Label(
-            self.step3,
-            text="Your travel style",
+            form,
+            text="Travel style",
             bg=C["paper"],
             fg=C["ink"],
-            font=("Georgia", 26),
+            font=FONT_UI_BOLD,
             anchor="w",
-        ).pack(fill="x", pady=(24, 6))
+        ).pack(fill="x", pady=(4, 8))
         tk.Label(
-            self.step3,
-            text="Pick one or more — the itinerary pace and places follow your style.",
+            form,
+            text="Pick one or more — pace and places follow your style.",
             bg=C["paper"],
             fg=C["muted"],
             font=FONT_UI,
             anchor="w",
-        ).pack(fill="x", pady=(0, 18))
+        ).pack(fill="x", pady=(0, 10))
 
-        chips = tk.Frame(self.step3, bg=C["paper"])
-        chips.pack(fill="x", pady=(0, 24))
+        chips = tk.Frame(form, bg=C["paper"])
+        chips.pack(fill="x", pady=(0, 20))
         for i, style in enumerate(TRAVEL_STYLES):
             var = tk.BooleanVar(value=(style == "First-time"))
             self._style_vars[style] = var
             Chip(chips, style, var).grid(row=i // 3, column=i % 3, padx=(0, 10), pady=6, sticky="w")
 
-        row3 = tk.Frame(self.step3, bg=C["paper"])
-        row3.pack(fill="x")
-        PillButton(row3, "Back", command=lambda: self._wizard_next(2), primary=False, width=110).pack(
-            side="left"
-        )
+        row = tk.Frame(form, bg=C["paper"])
+        row.pack(fill="x")
         self.generate_btn = PillButton(
-            row3, "Generate itinerary", command=self._on_generate, width=190
+            row, "Generate itinerary", command=self._on_generate, width=200
         )
-        self.generate_btn.pack(side="left", padx=10)
+        self.generate_btn.pack(side="left")
 
     def _sync_return(self, *_args: object) -> None:
         try:
@@ -1516,32 +1589,15 @@ class TravelAgentApp(tk.Tk):
         self.return_var.set((depart + timedelta(days=nights)).isoformat())
 
     def _wizard_next(self, step: int) -> None:
-        if step == 2 and not self.dest_var.get().strip():
-            messagebox.showerror("Destination", "Enter a destination city.")
-            return
-        if step == 3:
-            try:
-                float(self.budget_var.get().strip())
-                date.fromisoformat(self.depart_var.get().strip())
-                int(self.nights_var.get().strip())
-            except ValueError:
-                messagebox.showerror("Duration", "Check nights, dates, and budget.")
-                return
-        self._show_wizard_step(step)
+        # Legacy multi-step navigation — form is now one page
+        self._show_wizard_step(1)
 
-    def _show_wizard_step(self, step: int) -> None:
-        self._wizard_step = step
+    def _show_wizard_step(self, step: int = 1) -> None:
+        self._wizard_step = 1
         self.results.pack_forget()
         self.wizard.pack(fill="both", expand=True)
-        for fr in (self.step1, self.step2, self.step3):
-            fr.pack_forget()
-        labels = {
-            1: "Step 1 of 3 — Destination",
-            2: "Step 2 of 3 — Duration",
-            3: "Step 3 of 3 — Travel style",
-        }
-        self.step_label.configure(text=labels.get(step, ""))
-        {1: self.step1, 2: self.step2, 3: self.step3}[step].pack(fill="both", expand=True)
+        self.step1.pack(fill="both", expand=True)
+        self.step_label.configure(text="Plan your trip")
         self._scroll_to_top()
 
     # ── Results board ───────────────────────────────────────────────────
@@ -1577,8 +1633,11 @@ class TravelAgentApp(tk.Tk):
         ).pack(fill="x", pady=(0, 8))
         self.flight_row = FlightRowCard(left)
         self.flight_row.pack(fill="x", pady=(0, 12))
-        self.hotel_row = HotelRowCard(left)
+        self.hotels_box = tk.Frame(left, bg=C["paper"])
+        self.hotels_box.pack(fill="x", pady=(0, 8))
+        self.hotel_row = HotelRowCard(self.hotels_box)
         self.hotel_row.pack(fill="x", pady=(0, 8))
+        self.hotel_rows: list[HotelRowCard] = [self.hotel_row]
 
         tk.Label(
             right,
@@ -1693,6 +1752,40 @@ class TravelAgentApp(tk.Tk):
         self.step_label.configure(text="Your itinerary")
         self._scroll_to_top()
 
+    def _render_hotel_cards(self, parsed: ParsedItinerary) -> None:
+        """Show one or more hotel stay cards (multi-city regions use several)."""
+        from travel_agent.itinerary_parse import HotelOffer, parse_hotel_offer
+
+        offers: list[HotelOffer] = list(getattr(parsed, "hotel_offers", None) or [])
+        if not offers and parsed.hotel_offer:
+            offers = [parsed.hotel_offer]
+        if not offers and parsed.hotel:
+            offers = [
+                parse_hotel_offer(
+                    parsed.hotel.body,
+                    fallback_url=parsed.hotel.urls[0] if parsed.hotel.urls else "",
+                )
+            ]
+        if not offers:
+            stub = parse_hotel_offer(parsed.raw or "")
+            dest = to_hotel_city(self._trip_context.get("destination", "") or "")
+            if dest and stub.name in {"", "Recommended hotel"}:
+                stub.name = f"Hotels in {dest}"
+                stub.location = dest
+            offers = [stub]
+
+        # Rebuild hotel cards to match stay count
+        for child in self.hotels_box.winfo_children():
+            child.destroy()
+        self.hotel_rows = []
+        for i, offer in enumerate(offers[:4]):
+            card = HotelRowCard(self.hotels_box)
+            card.pack(fill="x", pady=(0, 10))
+            card.set_offer(offer)
+            self.hotel_rows.append(card)
+            if i == 0:
+                self.hotel_row = card
+
     def _clear_days(self) -> None:
         for child in self.days_inner.winfo_children():
             child.destroy()
@@ -1725,24 +1818,17 @@ class TravelAgentApp(tk.Tk):
             stub = parse_flight_offer(parsed.raw or "")
             ctx = self._trip_context
             stub.depart_airport = to_flight_code(ctx.get("origin", "Hong Kong") or "Hong Kong").upper() or "HKG"
-            stub.arrive_airport = to_flight_code(ctx.get("destination", "") or "").upper() or "—"
+            arrive = (ctx.get("arrive_airport") or "").strip().upper()
+            if not arrive:
+                arrive = to_flight_code(ctx.get("destination", "") or "").upper() or "—"
+            stub.arrive_airport = arrive
+            ret_from = (ctx.get("depart_airport") or "").strip().upper()
+            if ret_from:
+                stub.return_depart_airport = ret_from
+                stub.return_arrive_airport = stub.depart_airport
             self.flight_row.set_offer(stub)
 
-        if parsed.hotel_offer:
-            self.hotel_row.set_offer(parsed.hotel_offer)
-        elif parsed.hotel:
-            offer = parse_hotel_offer(
-                parsed.hotel.body,
-                fallback_url=parsed.hotel.urls[0] if parsed.hotel.urls else "",
-            )
-            self.hotel_row.set_offer(offer)
-        else:
-            stub = parse_hotel_offer(parsed.raw or "")
-            dest = to_hotel_city(self._trip_context.get("destination", "") or "")
-            if dest and stub.name in {"", "Recommended hotel"}:
-                stub.name = f"Hotels in {dest}"
-                stub.location = dest
-            self.hotel_row.set_offer(stub)
+        self._render_hotel_cards(parsed)
 
         self._clear_days()
         nights = 0
@@ -2219,12 +2305,12 @@ class TravelAgentApp(tk.Tk):
         destination = self.dest_var.get().strip()
         if not destination:
             messagebox.showerror("Destination", "Enter a destination city.")
-            self._show_wizard_step(1)
+            self._show_wizard_step()
             return
         styles = self._selected_styles()
         if not styles:
             messagebox.showerror("Travel style", "Pick at least one travel style.")
-            self._show_wizard_step(3)
+            self._show_wizard_step()
             return
         try:
             budget = float(self.budget_var.get().strip())
@@ -2236,7 +2322,7 @@ class TravelAgentApp(tk.Tk):
                 date.fromisoformat(ret)
         except ValueError:
             messagebox.showerror("Duration", "Check nights, dates, and budget.")
-            self._show_wizard_step(2)
+            self._show_wizard_step()
             return
 
         query = build_plan_query(
@@ -2258,6 +2344,22 @@ class TravelAgentApp(tk.Tk):
             "depart_date": depart,
             "return_date": ret or "",
         }
+        # Vague regions (e.g. California) → multi-city open-jaw itinerary
+        try:
+            from travel_agent.regions import build_regional_route
+
+            route = build_regional_route(destination, nights, depart_date=depart)
+            if route:
+                self._trip_context["arrive_airport"] = route.arrive_airport.upper()
+                self._trip_context["depart_airport"] = route.depart_airport.upper()
+                self._trip_context["region"] = route.label
+                self._trip_context["stays"] = ";".join(
+                    f"{s.city}|{s.nights}|{s.checkin}|{s.checkout}|{s.airport}"
+                    for s in route.stays
+                )
+                self._trip_context["internal_note"] = route.internal_note
+        except Exception:
+            pass
         if self.agent:
             self.agent.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
 
@@ -2308,15 +2410,46 @@ class TravelAgentApp(tk.Tk):
             except ValueError:
                 checkout = ctx["depart_date"]
 
+        # Prefer first regional stay city (not vague "California") for hotel refresh
+        hotel_city = ""
+        hotel_checkout = checkout
+        stays_raw = (ctx.get("stays") or "").strip()
+        if stays_raw:
+            first = stays_raw.split(";")[0].split("|")
+            if first:
+                hotel_city = first[0]
+            if len(first) > 3 and first[3]:
+                hotel_checkout = first[3]
+            if len(first) > 2 and first[2]:
+                hotel_checkin = first[2]
+            else:
+                hotel_checkin = ctx.get("depart_date") or ""
+        else:
+            hotel_city = to_hotel_city(ctx.get("destination", "") or "") or ctx.get(
+                "destination", ""
+            )
+            hotel_checkin = ctx.get("depart_date") or ""
+
+        arrive = (ctx.get("arrive_airport") or "").strip().upper()
+        ret_from = (ctx.get("depart_airport") or "").strip().upper()
+        open_jaw = bool(arrive and ret_from and arrive != ret_from)
+
         # Hotel photo/details first — flight goto must not discard hotel image work
         try:
-            if not is_trusted_hotel_detail_url(self.agent.booking_links.get("hotel", "")):
-                if ctx.get("destination") and ctx.get("depart_date"):
+            # Skip when plan_trip already filled multi-city stays (refresh would
+            # collapse them into one California/SFO hotel).
+            multi_stays = list(
+                getattr(self.agent.browser, "last_hotel_stays", None) or []
+            )
+            if len(multi_stays) > 1:
+                pass
+            elif not is_trusted_hotel_detail_url(self.agent.booking_links.get("hotel", "")):
+                if hotel_city and hotel_checkin:
                     live = fetch_hotel_detail_link(
                         self.agent.browser,
-                        city=ctx["destination"],
-                        checkin=ctx["depart_date"],
-                        checkout=checkout,
+                        city=hotel_city,
+                        checkin=hotel_checkin,
+                        checkout=hotel_checkout or checkout,
                     )
                     self._merge_live_hotel(live)
             self._ensure_hotel_image()
@@ -2324,11 +2457,22 @@ class TravelAgentApp(tk.Tk):
             pass
 
         try:
-            if ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
+            # Never re-scrape vague region as same-city RT — that overwrites open-jaw
+            if open_jaw:
+                links = self.agent.booking_links
+                links["flight_to"] = arrive
+                links["flight_return_from"] = ret_from
+                links["flight_return_to"] = to_flight_code(
+                    ctx.get("origin", "Hong Kong") or "Hong Kong"
+                ).upper() or "HKG"
+                if ctx.get("return_date"):
+                    links["flight_return_date"] = ctx["return_date"]
+            elif ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
+                dest_code = arrive or to_flight_code(ctx["destination"]).upper()
                 live_flight = fetch_flight_card(
                     self.agent.browser,
                     origin=ctx["origin"],
-                    destination=ctx["destination"],
+                    destination=dest_code or ctx["destination"],
                     depart_date=ctx["depart_date"],
                     return_date=ctx.get("return_date") or checkout,
                 )
@@ -2411,13 +2555,30 @@ class TravelAgentApp(tk.Tk):
         if not ctx.get("destination") or not ctx.get("depart_date"):
             return "", ""
         ret = ctx.get("return_date") or None
+        arrive = (ctx.get("arrive_airport") or "").strip().upper()
+        ret_from = (ctx.get("depart_airport") or "").strip().upper()
+        flight_dest = arrive or ctx["destination"]
+        # Open-jaw: link outbound leg (return is a separate OW search in plan_trip)
+        trip_type = "oneway" if (arrive and ret_from and arrive != ret_from) else "roundtrip"
         flight = build_flight_search_url(
             origin=ctx.get("origin", "Hong Kong"),
-            destination=ctx["destination"],
+            destination=flight_dest,
             depart_date=ctx["depart_date"],
-            return_date=ret,
+            return_date=None if trip_type == "oneway" else ret,
+            trip_type=trip_type,
         )
         checkout = ret
+        hotel_city = ctx["destination"]
+        hotel_checkin = ctx["depart_date"]
+        stays_raw = (ctx.get("stays") or "").strip()
+        if stays_raw:
+            bits = stays_raw.split(";")[0].split("|")
+            if bits:
+                hotel_city = bits[0]
+            if len(bits) > 2 and bits[2]:
+                hotel_checkin = bits[2]
+            if len(bits) > 3 and bits[3]:
+                checkout = bits[3]
         if not checkout:
             try:
                 checkout = (
@@ -2426,8 +2587,8 @@ class TravelAgentApp(tk.Tk):
             except ValueError:
                 checkout = ctx["depart_date"]
         hotel = build_hotel_list_url(
-            city=ctx["destination"],
-            checkin=ctx["depart_date"],
+            city=hotel_city,
+            checkin=hotel_checkin,
             checkout=checkout,
         )
         return flight, hotel
@@ -2443,7 +2604,7 @@ class TravelAgentApp(tk.Tk):
             tool_flight = self.agent.booking_links.get("flight", "")
             tool_hotel = self.agent.booking_links.get("hotel", "")
             hotel_name = self.agent.booking_links.get("hotel_name", "")
-        built_flight, _built_hotel = self._built_booking_urls()
+        built_flight, built_hotel = self._built_booking_urls()
 
         parsed_flight = ""
         if parsed.flight_offer:
@@ -2466,7 +2627,7 @@ class TravelAgentApp(tk.Tk):
         hotel_url = resolve_booking_url(
             "hotel",
             tool_url=tool_hotel,
-            built_url="",
+            built_url=built_hotel,
             parsed_url=parsed_hotel,
         )
 
@@ -2498,8 +2659,175 @@ class TravelAgentApp(tk.Tk):
             )
             parsed.hotel_offer.url = hotel_url
 
+        # Multi-city stays: prefer trip-context segments (always correct for
+        # California-style regions). Enrich with live scrape when available.
+        ctx_stays: list[dict[str, str]] = []
+        if self._trip_context.get("stays"):
+            for part in self._trip_context["stays"].split(";"):
+                bits = part.split("|")
+                if len(bits) >= 2:
+                    ctx_stays.append(
+                        {
+                            "city": bits[0],
+                            "nights": bits[1],
+                            "checkin": bits[2] if len(bits) > 2 else "",
+                            "checkout": bits[3] if len(bits) > 3 else "",
+                            "airport": bits[4] if len(bits) > 4 else "",
+                            "label": f"Stay · {bits[0]} ({bits[1]} night{'s' if bits[1] != '1' else ''})",
+                            "name": f"Hotels in {bits[0]}",
+                            "location": bits[0],
+                            "url": "",
+                            "price_label": "",
+                            "total_label": "",
+                            "image_url": "",
+                            "score": "",
+                            "score_label": "",
+                            "stars": "",
+                            "reviews": "",
+                        }
+                    )
+
+        scraped: list[dict[str, str]] = []
+        if self.agent:
+            scraped = list(getattr(self.agent.browser, "last_hotel_stays", None) or [])
+
+        stays: list[dict[str, str]] = []
+
+        def _finalize_stay(rec: dict[str, str]) -> dict[str, str]:
+            from travel_agent.browser_tools import _fallback_stay_hotel
+
+            city = (rec.get("city") or "").strip()
+            name = (rec.get("name") or "").strip()
+            low = name.lower()
+            bad = (
+                not name
+                or low.startswith("hotels in ")
+                or any(
+                    m in low
+                    for m in ("lishui", "high speed railway", "高铁", "火车站")
+                )
+            )
+            if bad and city:
+                fb = _fallback_stay_hotel(city)
+                rec["name"] = fb["name"]
+                if fb.get("features"):
+                    rec["features"] = fb["features"]
+                if not (rec.get("image_url") or "").startswith("http") or "loremflickr" in (
+                    rec.get("image_url") or ""
+                ).lower():
+                    rec["image_url"] = fb.get("image_url") or rec.get("image_url", "")
+                if not rec.get("stars"):
+                    rec["stars"] = fb.get("stars", "4")
+                if not rec.get("score"):
+                    rec["score"] = fb.get("score", "")
+                    rec["score_label"] = fb.get("score_label", "")
+                # Drop wrong-city detail links when we reject the listing name
+                rec["url"] = ""
+            if not (rec.get("image_url") or "").startswith("http"):
+                try:
+                    from travel_agent.attraction_images import lookup_image
+
+                    rec["image_url"] = lookup_image(
+                        rec.get("name") or f"{city} hotel", city=city
+                    )
+                except Exception:
+                    pass
+
+            # Always attach a working Trip.com link for this stay's city + dates
+            checkin = (rec.get("checkin") or "").strip()
+            checkout = (rec.get("checkout") or "").strip()
+            raw_url = (rec.get("url") or "").strip()
+            if is_trusted_hotel_detail_url(raw_url):
+                rec["url"] = (
+                    canonicalize_hotel_detail_url(
+                        raw_url,
+                        checkin=checkin,
+                        checkout=checkout,
+                        city=city,
+                    )
+                    or raw_url
+                )
+            elif city and checkin and checkout:
+                rec["url"] = build_hotel_list_url(
+                    city=city, checkin=checkin, checkout=checkout
+                )
+            elif not is_openable_hotel_url(raw_url):
+                rec["url"] = hotel_url or raw_url
+            return rec
+
+        if len(ctx_stays) > 1:
+            # Merge scrape into context stays by city name
+            by_city = {
+                (s.get("city") or "").strip().lower(): s for s in scraped if s.get("city")
+            }
+            for stub in ctx_stays:
+                key = (stub.get("city") or "").strip().lower()
+                live = by_city.get(key) or {}
+                merged = dict(stub)
+                for k in (
+                    "name",
+                    "url",
+                    "price_label",
+                    "total_label",
+                    "image_url",
+                    "score",
+                    "score_label",
+                    "stars",
+                    "reviews",
+                    "location",
+                    "features",
+                ):
+                    if live.get(k):
+                        merged[k] = live[k]
+                # Never let scrape overwrite split nights/dates
+                merged["nights"] = stub["nights"]
+                merged["checkin"] = stub["checkin"]
+                merged["checkout"] = stub["checkout"]
+                merged["label"] = stub["label"]
+                merged["city"] = stub["city"]
+                stays.append(_finalize_stay(merged))
+        elif scraped:
+            stays = [_finalize_stay(dict(s)) for s in scraped]
+        elif ctx_stays:
+            stays = [_finalize_stay(dict(s)) for s in ctx_stays]
+
+        if stays:
+            from travel_agent.itinerary_parse import HotelOffer
+
+            offers: list[HotelOffer] = []
+            for stay in stays:
+                off = HotelOffer(
+                    name=stay.get("name") or f"Hotels in {stay.get('city', '')}",
+                    location=stay.get("location") or stay.get("city", ""),
+                    city=stay.get("city", ""),
+                    checkin=stay.get("checkin", ""),
+                    checkout=stay.get("checkout", ""),
+                    nights=int(stay.get("nights") or 0) or 0,
+                    stay_label=stay.get("label", ""),
+                    url=stay.get("url", "") or hotel_url,
+                    price_label=stay.get("price_label", ""),
+                    total_label=stay.get("total_label", ""),
+                    score=stay.get("score", ""),
+                    score_label=stay.get("score_label", ""),
+                    reviews=stay.get("reviews", ""),
+                    image_url=stay.get("image_url", ""),
+                    features=stay.get("features", "") or "Details on Trip.com",
+                )
+                try:
+                    off.stars = int(stay.get("stars") or 0)
+                except ValueError:
+                    off.stars = 0
+                offers.append(off)
+            parsed.hotel_offers = offers
+            parsed.hotel_offer = offers[0]
+
         self._enrich_flight_offer(parsed)
-        self._enrich_hotel_offer(parsed, hotel_name=hotel_name)
+        # Multi-city cards already have per-city scrape data — don't overwrite
+        # with a single California/region hotel from booking_links.
+        if len(parsed.hotel_offers or []) <= 1:
+            self._enrich_hotel_offer(parsed, hotel_name=hotel_name)
+        if parsed.hotel_offers:
+            parsed.hotel_offer = parsed.hotel_offers[0]
         return parsed
 
     def _enrich_flight_offer(self, parsed: ParsedItinerary) -> None:
@@ -2511,7 +2839,11 @@ class TravelAgentApp(tk.Tk):
             return
         ctx = self._trip_context
         origin = to_flight_code(ctx.get("origin", "Hong Kong") or "Hong Kong").upper()
-        dest = to_flight_code(ctx.get("destination", "") or "").upper()
+        dest = (
+            (ctx.get("arrive_airport") or "").strip().upper()
+            or to_flight_code(ctx.get("destination", "") or "").upper()
+        )
+        ret_from = (ctx.get("depart_airport") or "").strip().upper() or dest
 
         if self.agent:
             links = self.agent.booking_links
@@ -2534,6 +2866,10 @@ class TravelAgentApp(tk.Tk):
                 offer.price_label = links["flight_price"]
             if links.get("flight_airline_logo"):
                 offer.airline_logo = links["flight_airline_logo"]
+            # Always prefer CDN logo by IATA code when we know the carrier
+            cdn = airline_logo_url(offer.airline)
+            if cdn:
+                offer.airline_logo = cdn
             elif is_plausible_airline_name(offer.airline):
                 offer.airline_logo = airline_logo_url(offer.airline)
             if links.get("flight_date"):
@@ -2558,6 +2894,9 @@ class TravelAgentApp(tk.Tk):
                 offer.return_stops = links["flight_return_stops"]
             if links.get("flight_return_airline_logo"):
                 offer.return_airline_logo = links["flight_return_airline_logo"]
+            ret_cdn = airline_logo_url(offer.return_airline or "")
+            if ret_cdn:
+                offer.return_airline_logo = ret_cdn
             elif is_plausible_airline_name(offer.return_airline):
                 offer.return_airline_logo = airline_logo_url(offer.return_airline)
             if links.get("flight_option") and (
@@ -2615,10 +2954,32 @@ class TravelAgentApp(tk.Tk):
             if alt.arrive_airport and alt.arrive_airport not in {"", "—"}:
                 offer.arrive_airport = alt.arrive_airport
 
-        if origin and offer.depart_airport in {"", "—", "HKG"}:
-            offer.depart_airport = origin
-        if dest and offer.arrive_airport in {"", "—"}:
+        # Open-jaw regional trips: ALWAYS use context airports (scrape often
+        # returns a same-city round-trip that must not win over the plan).
+        is_open_jaw = bool(ret_from and dest and ret_from != dest)
+        if is_open_jaw:
             offer.arrive_airport = dest
+            offer.return_depart_airport = ret_from
+            offer.return_arrive_airport = origin or offer.return_arrive_airport or "HKG"
+            offer.trip_label = "Open-jaw"
+            offer.badge = f"Open-jaw · {dest} in / {ret_from} out"
+            if self.agent:
+                self.agent.booking_links["flight_to"] = dest
+                self.agent.booking_links["flight_return_from"] = ret_from
+                self.agent.booking_links["flight_return_to"] = (
+                    origin or offer.return_arrive_airport or "HKG"
+                )
+        else:
+            if origin and offer.depart_airport in {"", "—", "HKG"}:
+                offer.depart_airport = origin
+            if dest and offer.arrive_airport in {"", "—"}:
+                offer.arrive_airport = dest
+            if ret_from and offer.return_depart_airport in {"", "—"}:
+                offer.return_depart_airport = ret_from
+            if origin and offer.return_arrive_airport in {"", "—"} and (
+                offer.return_depart_time or ret_from
+            ):
+                offer.return_arrive_airport = origin
         # Fill dates from trip context when scraper didn't emit them
         if not offer.depart_date and ctx.get("depart_date"):
             offer.depart_date = str(ctx["depart_date"])
@@ -2635,7 +2996,8 @@ class TravelAgentApp(tk.Tk):
         if is_plausible_airline_name(offer.airline) and not offer.airline_logo:
             offer.airline_logo = airline_logo_url(offer.airline)
         if offer.return_depart_time:
-            offer.trip_label = "Round-trip"
+            if not is_open_jaw:
+                offer.trip_label = "Round-trip"
             if not offer.return_airline and is_plausible_airline_name(offer.airline):
                 offer.return_airline = offer.airline
             if is_plausible_airline_name(offer.return_airline) and not offer.return_airline_logo:
@@ -2666,8 +3028,17 @@ class TravelAgentApp(tk.Tk):
 
         if self.agent:
             links = self.agent.booking_links
-            if links.get("hotel_name") and not _bad_name(links["hotel_name"]):
-                offer.name = links["hotel_name"]
+            cand = links.get("hotel_name") or ""
+            if cand and not _bad_name(cand):
+                # Reject China rail-station hotels mapped onto Western cities
+                low = cand.lower()
+                if not any(
+                    m in low
+                    for m in ("lishui", "high speed railway", "高铁", "火车站")
+                ):
+                    offer.name = cand
+                elif hotel_name and not _bad_name(hotel_name):
+                    offer.name = hotel_name
             elif hotel_name and not _bad_name(hotel_name):
                 offer.name = hotel_name
             if links.get("hotel_price"):

@@ -414,6 +414,66 @@ _GUIDES: dict[str, list[DayIdea]] = {
             route="BART to SFO (AirTrain to terminals) or shared van / rideshare. Leave 3+ hrs before flight",
         ),
     ],
+    "los angeles": [
+        DayIdea(
+            title="Arrival · Hollywood / Mid-Wilshire",
+            go="Griffith Observatory + Hollywood Sign viewpoint",
+            also="Hollywood Walk of Fame / TCL Chinese Theatre",
+            lunch="In-N-Out Burger or Howlin' Ray's (if queue is short)",
+            dinner="Republique or Night + Market Song",
+            route="Fly/drive into LA; Metro B Line to Hollywood/Vine or rideshare to Griffith Observatory",
+        ),
+        DayIdea(
+            title="Santa Monica & Venice",
+            go="Santa Monica Pier + Third Street Promenade",
+            also="Venice Beach boardwalk + Abbot Kinney",
+            lunch="Bay Cities Italian Deli or Sidecar Doughnuts",
+            dinner="Gjelina (Venice) or The Misfit (Santa Monica)",
+            route="Metro E Line to Santa Monica; walk/bike path or rideshare to Venice",
+        ),
+        DayIdea(
+            title="Arts & Downtown",
+            go="The Getty Center (book timed entry) or LACMA",
+            also="Grand Central Market + DTLA Arts District stroll",
+            lunch="Guerilla Tacos or Eggslut (Grand Central Market)",
+            dinner="Bestia or Bavel (Arts District — book ahead)",
+            route="Metro to Downtown; rideshare/bus to Getty (parking or shuttle from station)",
+        ),
+        DayIdea(
+            title="Departure",
+            go="Last stop: The Grove / Farmers Market souvenirs OR beach sunrise",
+            also="Hotel checkout → Los Angeles (LAX)",
+            lunch="Airport meal at LAX or nearby Culver City bite",
+            dinner="Light snack airside only",
+            route="Metro + LAX FlyAway bus, or rideshare to LAX. Leave 3+ hrs before flight",
+        ),
+    ],
+    "san diego": [
+        DayIdea(
+            title="Arrival · Gaslamp / Waterfront",
+            go="Balboa Park museums + botanical gardens",
+            also="San Diego Zoo (book timed entry) if energy allows",
+            lunch="Prado at Balboa Park or Extraordinary Desserts",
+            dinner="Cowboy Star or Born & Raised (Gaslamp)",
+            route="Amtrak/Pacific Surfliner or drive from LA; trolley / rideshare to Balboa Park",
+        ),
+        DayIdea(
+            title="Coast & La Jolla",
+            go="La Jolla Cove seals + coastal walk",
+            also="Birch Aquarium or Torrey Pines views",
+            lunch="George's at the Cove or Puesto La Jolla",
+            dinner="Ironside Fish & Oyster or Juniper & Ivy",
+            route="Drive or bus to La Jolla; return to Gaslamp / Little Italy for dinner",
+        ),
+        DayIdea(
+            title="Departure",
+            go="Last stop: Little Italy farmers market / coffee",
+            also="Hotel checkout → San Diego (SAN) or continue north to LAX",
+            lunch="Morning Glory or James Coffee Co.",
+            dinner="Light snack before departure",
+            route="Trolley / rideshare to SAN, or Amtrak back toward LAX. Leave 3+ hrs before flight",
+        ),
+    ],
 }
 
 _ALIASES: dict[str, str] = {
@@ -441,8 +501,11 @@ _ALIASES: dict[str, str] = {
     "sfo": "san francisco",
     "san francisco": "san francisco",
     "sf": "san francisco",
-    "california": "san francisco",
-    "ca usa": "san francisco",
+    "lax": "los angeles",
+    "los angeles": "los angeles",
+    "la": "los angeles",
+    "san diego": "san diego",
+    "san": "san diego",
 }
 
 
@@ -560,22 +623,146 @@ def day_ideas_from_attractions(
     return ideas[:n]
 
 
+def _pick_idea_for_city_day(
+    city_key: str,
+    *,
+    day_index: int,
+    days_in_city: int,
+    city_day_i: int,
+    styles: list[str] | None,
+    is_trip_first: bool,
+    is_trip_last: bool,
+    transfer_note: str = "",
+) -> DayIdea:
+    """Pick arrival / mid / departure idea for one city stay day."""
+    base = list(_GUIDES.get(city_key) or [])
+    if not base:
+        label = city_key.replace("_", " ").title()
+        base = _generic_ideas(label, ((styles or ["First-time"])[0]))
+    if days_in_city <= 1:
+        idea = base[0]
+    elif city_day_i == 0:
+        idea = base[0]
+    elif city_day_i == days_in_city - 1 and len(base) > 1:
+        # Prefer a mid highlight over departure when this isn't the trip's last day
+        if is_trip_last:
+            idea = base[-1]
+        else:
+            mid = base[1:-1] if len(base) > 2 else base[1:]
+            idea = mid[(city_day_i - 1) % len(mid)] if mid else base[0]
+    else:
+        mid = base[1:-1] if len(base) > 2 else base
+        idea = mid[(city_day_i - 1) % len(mid)]
+
+    title = idea.title
+    also = idea.also
+    route = idea.route
+    if transfer_note and city_day_i == days_in_city - 1 and not is_trip_last:
+        also = f"{idea.also}. Then {transfer_note}"
+        if "Transfer" not in title:
+            title = f"{title} · transfer day"
+    if is_trip_first and city_day_i == 0 and "Arrival" not in title:
+        title = f"Arrival · {title}"
+    if is_trip_last and city_day_i == days_in_city - 1:
+        title = idea.title if "Departure" in idea.title else f"Departure · {title}"
+        # Use city's departure idea when available
+        if len(base) > 1 and "Departure" in base[-1].title:
+            idea = base[-1]
+            title = idea.title
+            also = idea.also
+            route = idea.route
+    return DayIdea(
+        title=title,
+        go=idea.go,
+        also=also,
+        lunch=idea.lunch,
+        dinner=idea.dinner,
+        route=route,
+    )
+
+
+def day_ideas_for_regional(
+    route: object,
+    nights: int,
+    *,
+    styles: list[str] | None = None,
+) -> list[DayIdea]:
+    """Build a multi-city day plan from a RegionalRoute."""
+    from travel_agent.regions import RegionalRoute, regional_day_city_sequence
+
+    if not isinstance(route, RegionalRoute):
+        return []
+    n = max(1, int(nights or 1))
+    seq = regional_day_city_sequence(route)[:n]
+    while len(seq) < n:
+        seq.append(seq[-1] if seq else "san francisco")
+
+    # Count days per city in order
+    ideas: list[DayIdea] = []
+    i = 0
+    stay_idx = 0
+    while i < n:
+        city = seq[i]
+        # length of this city run
+        run = 1
+        while i + run < n and seq[i + run] == city:
+            run += 1
+        transfer = ""
+        if stay_idx < len(route.stays) - 1:
+            nxt = route.stays[stay_idx + 1]
+            transfer = (
+                f"transfer to {nxt.city} ({route.internal_note or 'flight / train / car'})"
+            )
+        for j in range(run):
+            ideas.append(
+                _pick_idea_for_city_day(
+                    city,
+                    day_index=i + j,
+                    days_in_city=run,
+                    city_day_i=j,
+                    styles=styles,
+                    is_trip_first=(i + j == 0),
+                    is_trip_last=(i + j == n - 1),
+                    transfer_note=transfer if j == run - 1 else "",
+                )
+            )
+        i += run
+        stay_idx += 1
+    return ideas[:n]
+
+
 def day_ideas_for(
     destination: str,
     nights: int,
     *,
     styles: list[str] | None = None,
     attractions: list[str] | None = None,
+    regional_route: object | None = None,
 ) -> list[DayIdea]:
     """Return one DayIdea per trip day, cycling curated or scraped content."""
     n = max(1, int(nights or 1))
-    city = normalize_guide_city(destination)
-    base = list(_GUIDES.get(city) or [])
     style = ((styles or ["First-time"])[0] if styles else "First-time").strip()
     dest_label = (destination or "the city").strip() or "the city"
-    # Prefer a concrete city label when destination was a region (e.g. California)
+
+    # Multi-city region (e.g. California → SF + LA)
+    if regional_route is None:
+        try:
+            from travel_agent.regions import build_regional_route
+
+            regional_route = build_regional_route(destination, n)
+        except Exception:
+            regional_route = None
+    if regional_route is not None:
+        regional = day_ideas_for_regional(regional_route, n, styles=styles)
+        if regional:
+            return regional
+
+    city = normalize_guide_city(destination)
+    base = list(_GUIDES.get(city) or [])
     if city == "san francisco":
         dest_label = "San Francisco"
+    elif city == "los angeles":
+        dest_label = "Los Angeles"
 
     if not base and attractions:
         base = day_ideas_from_attractions(

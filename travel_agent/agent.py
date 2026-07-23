@@ -46,8 +46,10 @@ Hard rules:
 - When refining, keep the same section headings so the UI can re-parse the plan.
 - Do NOT dump raw tool tables as the final answer — rewrite into the four sections above.
 - Do NOT use vague lines like "local dinner and unwind" or "flexible free time" — name places.
-- For regions like California, plan around a primary city (San Francisco) with exact attraction
-  names from search_attractions / Trip.com things-to-do — never "best-known landmark in california".
+- For regions like California, plan a MULTI-CITY trip (not one hotel):
+  e.g. San Francisco then Los Angeles, with open-jaw flights (SFO in / LAX out),
+  one Recommended hotel block per city stay, and day cards that move between cities.
+- Use search_attractions / Trip.com things-to-do for named sights in each city.
 """
 
 

@@ -4,11 +4,9 @@ Local AI travel concierge inspired by [Trip.com Trip.Planner](https://hk.trip.co
 
 ## Flow (like Trip.Planner)
 
-1. **Destination** — where you’re going (from Hong Kong by default)
-2. **Duration** — nights / dates (default: tomorrow + 7 nights)
-3. **Travel style** — First-time, Culture, Food, Family, Relaxed, Adventure
-4. **Generate itinerary** — recommended flight + hotel with `hk.trip.com` links, plus a day-by-day plan
-5. **Refine with AI** — chat dock to tweak the plan without leaving the board
+1. **Plan your trip** — destination, dates/nights, budget, and travel style on one page  
+2. **Generate itinerary** — recommended flight + hotel(s) with `hk.trip.com` links, plus a day-by-day plan  
+3. **Refine with AI** — chat dock to tweak the plan without leaving the board
 
 ## Prerequisites
 

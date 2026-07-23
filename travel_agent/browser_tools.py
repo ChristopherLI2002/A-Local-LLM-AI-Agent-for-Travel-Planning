@@ -44,7 +44,150 @@ def _prefer_hotel_photo_url(src: str) -> str:
         out,
         flags=re.I,
     )
+    out = re.sub(
+        r"_R_\d+_\d+_R5_D\.jpg_\.webp$",
+        "_R_960_660_R5_D.jpg",
+        out,
+        flags=re.I,
+    )
     return out
+
+
+_CN_HOTEL_MARKERS = (
+    "lishui",
+    "high speed railway",
+    "railway station shop",
+    "高铁",
+    "火车站",
+    "beijing",
+    "shanghai",
+    "guangzhou",
+    "shenzhen",
+    "hangzhou",
+    "chengdu",
+    "wuhan",
+    "nanjing",
+    "suzhou",
+    "xian",
+    "xi'an",
+)
+
+
+def _hotel_name_plausible_for_city(name: str, city: str) -> bool:
+    """Reject obviously wrong-region hotel titles (e.g. China listings for SF)."""
+    low = (name or "").lower()
+    city_l = (city or "").lower()
+    if not low or "sample" in low or "rates range" in low:
+        return False
+    # US / Western city stays should not show mainland-China rail-station hotels
+    western = any(
+        x in city_l
+        for x in (
+            "san francisco",
+            "los angeles",
+            "san diego",
+            "new york",
+            "london",
+            "paris",
+            "tokyo",
+            "seoul",
+            "singapore",
+            "sydney",
+            "california",
+        )
+    )
+    if western and any(m in low for m in _CN_HOTEL_MARKERS):
+        return False
+    if re.search(r"[\u4e00-\u9fff]", name or "") and western:
+        return False
+    return True
+
+
+def _city_hotel_fallback_image(city: str, *, hotel_name: str = "") -> str:
+    """Stable city hotel photo when Trip.com cover scrape fails."""
+    from travel_agent.attraction_images import lookup_image, _loremflickr_image
+
+    key = (city or "hotel").strip() or "hotel"
+    fb = _CITY_STAY_FALLBACKS.get(key.lower()) or {}
+    queries = [
+        hotel_name,
+        fb.get("name", ""),
+        fb.get("image_query", ""),
+        f"{key} hotel exterior",
+    ]
+    for query in queries:
+        q = (query or "").strip()
+        if not q:
+            continue
+        try:
+            url = lookup_image(q, city=key)
+        except Exception:
+            url = ""
+        if not url or not url.startswith("http"):
+            continue
+        low = url.lower()
+        if any(
+            bad in low
+            for bad in ("capsule_hotel", "capsule-hotel", "pod_hotel", "hostel_dorm")
+        ):
+            continue
+        return url
+    return _loremflickr_image(f"hotel,exterior,{key}", width=640, height=360)
+
+
+# Well-known city hotels used when Trip.com list scrape returns nothing usable
+_CITY_STAY_FALLBACKS: dict[str, dict[str, str]] = {
+    "los angeles": {
+        "name": "The Hollywood Roosevelt",
+        "image_query": "Hollywood Roosevelt Hotel 2015",
+        "features": "Hollywood Blvd · pool · walk to TCL Chinese Theatre",
+    },
+    "la": {
+        "name": "The Hollywood Roosevelt",
+        "image_query": "Hollywood Roosevelt Hotel 2015",
+        "features": "Hollywood Blvd · pool · walk to TCL Chinese Theatre",
+    },
+    "san francisco": {
+        "name": "Hotel Zephyr San Francisco",
+        "image_query": "Fisherman's Wharf San Francisco waterfront",
+        "features": "Fisherman's Wharf · bay views · Embarcadero",
+    },
+    "san diego": {
+        "name": "Hotel del Coronado",
+        "image_query": "Hotel del Coronado",
+        "features": "Coronado Beach · historic icon · spa",
+    },
+    "tokyo": {
+        "name": "Hotel Gracery Shinjuku",
+        "image_query": "Shinjuku Tokyo skyline",
+        "features": "Shinjuku · Godzilla Head · transit hub",
+    },
+    "seoul": {
+        "name": "L7 Myeongdong",
+        "image_query": "Myeongdong Seoul",
+        "features": "Myeongdong · shopping · metro access",
+    },
+    "london": {
+        "name": "The Z Hotel Piccadilly",
+        "image_query": "Piccadilly Circus London",
+        "features": "West End · Piccadilly Circus · compact city stay",
+    },
+}
+
+
+def _fallback_stay_hotel(city: str) -> dict[str, str]:
+    key = (city or "").strip().lower()
+    fb = _CITY_STAY_FALLBACKS.get(key) or {}
+    name = fb.get("name") or (f"Recommended hotel · {city}" if city else "Recommended hotel")
+    return {
+        "name": name,
+        "image_url": _city_hotel_fallback_image(city, hotel_name=name),
+        "features": fb.get("features", ""),
+        "location": city,
+        "stars": "4",
+        "score": "8.4",
+        "score_label": "Very Good",
+    }
 
 
 def _default_depart(days_ahead: int = 21) -> str:
@@ -69,6 +212,7 @@ def _build_suggested_day_flow(
     interests: str = "",
     destination: str = "",
     attractions: list[str] | None = None,
+    regional_route: object | None = None,
 ) -> str:
     """Emit one Day N block per trip day with named sights and meals."""
     from travel_agent.destination_guides import (
@@ -84,6 +228,7 @@ def _build_suggested_day_flow(
         n,
         styles=styles or None,
         attractions=attractions,
+        regional_route=regional_route,
     )
     lines: list[str] = []
     for i, idea in enumerate(ideas, start=1):
@@ -308,6 +453,7 @@ class TripBrowser:
         self._browser: Browser | None = None
         self.page: Page | None = None
         self.last_attractions: list[str] = []
+        self.last_hotel_stays: list[dict[str, str]] = []
 
     def start(self) -> None:
         self._pw = sync_playwright().start()
@@ -1274,10 +1420,29 @@ class TripBrowser:
         if not want_flights and not want_trains:
             want_flights = True
 
+        from travel_agent.regions import build_regional_route
+
+        regional = build_regional_route(
+            destination, nights, depart_date=depart_date
+        )
+        arrive_code = to_flight_code(destination)
+        return_from_code = arrive_code
+        if regional:
+            arrive_code = regional.arrive_airport
+            return_from_code = regional.depart_airport
+            hotel_city = regional.stays[0].city
+
         # Pull live attraction names from Trip.com things-to-do for the day plan
         attractions: list[str] = []
         try:
-            attractions = self.scrape_attractions(hotel_city or destination, limit=18)
+            # For regions, scrape each stay city
+            if regional:
+                for stay in regional.stays:
+                    attractions.extend(
+                        self.scrape_attractions(stay.city, limit=8)[:6]
+                    )
+            else:
+                attractions = self.scrape_attractions(hotel_city or destination, limit=18)
         except Exception:
             attractions = list(self.last_attractions or [])
 
@@ -1301,89 +1466,246 @@ class TripBrowser:
         structured_flight_card = ""
         if want_flights:
             date_options = nearby_dates(depart_date, (-3, 0, 3))
-            flight_compare_text = self.compare_flight_prices(
-                origin=origin,
-                destination=destination,
-                dates=",".join(date_options),
-                trip_type="roundtrip",
-                return_date=return_date,
-                adults=adults,
+            open_jaw = bool(
+                regional and arrive_code.upper() != return_from_code.upper()
             )
-            best_flight = pick_cheapest_from_comparison(flight_compare_text)
-            recommended_flight_date = best_flight.get("depart_date") or depart_date
-            recommended_flight_price = best_flight.get("lowest_hkd")
-            recommended_flight_url = best_flight.get("url") or ""
-            flight_best_label = best_flight.get("label") or ""
-
-            # Open the recommended (cheapest) date so the booking link is exact
-            flight_text = self.search_flights(
-                origin=origin,
-                destination=destination,
-                depart_date=recommended_flight_date,
-                return_date=return_date,
-                trip_type="roundtrip",
-                adults=adults,
-            )
-            flight_url = self._require_page().url
-            # Prefer canonical hk.trip.com link from tool text
-            canon_m = re.search(r"Canonical search URL:\s*(\S+)", flight_text)
-            if canon_m:
-                recommended_flight_url = canon_m.group(1).rstrip(".,;")
-            else:
-                recommended_flight_url = flight_url or recommended_flight_url
-            recommended_flight_url = ensure_locale_curr(
-                normalize_trip_url(recommended_flight_url)
-            )
-            if "hk.trip.com" not in recommended_flight_url and canon_m:
-                recommended_flight_url = ensure_locale_curr(
-                    normalize_trip_url(canon_m.group(1).rstrip(".,;"))
+            if open_jaw:
+                # Outbound to arrive city + separate return from depart city
+                flight_compare_text = self.compare_flight_prices(
+                    origin=origin,
+                    destination=arrive_code,
+                    dates=",".join(date_options),
+                    trip_type="oneway",
+                    adults=adults,
                 )
-            flight_prices = summarize_prices(
-                f"Flights {origin}->{destination} on {recommended_flight_date}",
-                flight_text,
-                url=flight_url,
-            )
-            if recommended_flight_price is None:
-                recommended_flight_price = flight_prices.get("lowest_hkd")
-            flight_low = recommended_flight_price
-            flight_snippets = flight_prices.get("snippets") or []
-            if flight_snippets:
-                recommended_flight_option = flight_snippets[0]
-            recommended_flight_airline = ""
-            airline_m = re.search(
-                r"(?im)^-\s*Airline:\s*(.+)$",
-                flight_text or "",
-            )
-            if airline_m:
-                cand = airline_m.group(1).strip()
-                if is_plausible_airline_name(cand):
-                    recommended_flight_airline = cand
-            flight_card_fields = extract_booking_urls(flight_text or "")
-            if flight_card_fields.get("flight_airline") and is_plausible_airline_name(
-                flight_card_fields["flight_airline"]
-            ):
-                recommended_flight_airline = flight_card_fields["flight_airline"]
-            if flight_low is not None:
-                transport_lows.append(("flights", float(flight_low)))
-            snip_block = (
-                "\n".join(f"  · {s}" for s in flight_snippets[:4])
-                or "  · (option names sparse on page — use ranked prices below)"
-            )
-            airline_line = (
-                f"- Airline: {recommended_flight_airline}\n"
-                if recommended_flight_airline
-                else ""
-            )
-            # Keep the full structured card (outbound + return) near the top of the tool text
-            structured_m = re.search(
-                r"(?is)(Structured flight card:\s*.*?)(?:\n\n|Flight search URL:|$)",
-                flight_text or "",
-            )
-            structured_flight_card = (
-                structured_m.group(1).strip() if structured_m else ""
-            )
-            sections.append(
-                f"""{n}) FLIGHTS (compared live)
+                best_flight = pick_cheapest_from_comparison(flight_compare_text)
+                recommended_flight_date = best_flight.get("depart_date") or depart_date
+                recommended_flight_price = best_flight.get("lowest_hkd")
+                recommended_flight_url = best_flight.get("url") or ""
+                flight_best_label = best_flight.get("label") or ""
+
+                out_text = self.search_flights(
+                    origin=origin,
+                    destination=arrive_code,
+                    depart_date=recommended_flight_date,
+                    trip_type="oneway",
+                    adults=adults,
+                    include_return_leg=False,
+                )
+                ret_text = self.search_flights(
+                    origin=return_from_code,
+                    destination=origin,
+                    depart_date=return_date,
+                    trip_type="oneway",
+                    adults=adults,
+                    include_return_leg=False,
+                )
+                flight_text = (
+                    f"OPEN-JAW REGIONAL FLIGHTS ({regional.label if regional else destination})\n"
+                    f"Outbound: {origin.upper()} → {arrive_code.upper()}\n"
+                    f"{out_text}\n\n"
+                    f"Return: {return_from_code.upper()} → {origin.upper()}\n"
+                    f"{ret_text}"
+                )
+                out_fields = extract_booking_urls(out_text)
+                ret_fields = extract_booking_urls(ret_text)
+                flight_card_fields = dict(out_fields)
+                # Map return one-way fields onto return_* keys
+                if ret_fields.get("flight_airline"):
+                    flight_card_fields["flight_return_airline"] = ret_fields["flight_airline"]
+                if ret_fields.get("flight_airline_logo"):
+                    flight_card_fields["flight_return_airline_logo"] = ret_fields[
+                        "flight_airline_logo"
+                    ]
+                if ret_fields.get("flight_depart"):
+                    flight_card_fields["flight_return_depart"] = ret_fields["flight_depart"]
+                if ret_fields.get("flight_arrive"):
+                    flight_card_fields["flight_return_arrive"] = ret_fields["flight_arrive"]
+                if ret_fields.get("flight_from"):
+                    flight_card_fields["flight_return_from"] = ret_fields["flight_from"]
+                else:
+                    flight_card_fields["flight_return_from"] = return_from_code.upper()
+                if ret_fields.get("flight_to"):
+                    flight_card_fields["flight_return_to"] = ret_fields["flight_to"]
+                else:
+                    flight_card_fields["flight_return_to"] = to_flight_code(origin).upper()
+                if ret_fields.get("flight_duration"):
+                    flight_card_fields["flight_return_duration"] = ret_fields["flight_duration"]
+                if ret_fields.get("flight_stops"):
+                    flight_card_fields["flight_return_stops"] = ret_fields["flight_stops"]
+                if not flight_card_fields.get("flight_to"):
+                    flight_card_fields["flight_to"] = arrive_code.upper()
+                if not flight_card_fields.get("flight_from"):
+                    flight_card_fields["flight_from"] = to_flight_code(origin).upper()
+                # Always pin open-jaw airports (scraper may echo wrong city)
+                flight_card_fields["flight_to"] = arrive_code.upper()
+                flight_card_fields["flight_return_from"] = return_from_code.upper()
+                flight_card_fields["flight_return_to"] = to_flight_code(origin).upper()
+                flight_card_fields["flight_return_date"] = return_date
+
+                flight_url = self._require_page().url
+                canon_m = re.search(r"Canonical search URL:\s*(\S+)", out_text)
+                if canon_m:
+                    recommended_flight_url = canon_m.group(1).rstrip(".,;")
+                else:
+                    recommended_flight_url = flight_url or recommended_flight_url
+                recommended_flight_url = ensure_locale_curr(
+                    normalize_trip_url(recommended_flight_url)
+                )
+                out_prices = summarize_prices(
+                    f"Flights {origin}->{arrive_code} on {recommended_flight_date}",
+                    out_text,
+                    url=recommended_flight_url,
+                )
+                ret_prices = summarize_prices(
+                    f"Flights {return_from_code}->{origin} on {return_date}",
+                    ret_text,
+                    url="",
+                )
+                out_low = out_prices.get("lowest_hkd")
+                ret_low = ret_prices.get("lowest_hkd")
+                if out_low is not None and ret_low is not None:
+                    recommended_flight_price = round(float(out_low) + float(ret_low), 2)
+                elif out_low is not None:
+                    recommended_flight_price = out_low
+                flight_low = recommended_flight_price
+                flight_snippets = (out_prices.get("snippets") or [])[:2] + (
+                    ret_prices.get("snippets") or []
+                )[:2]
+                if flight_snippets:
+                    recommended_flight_option = flight_snippets[0]
+                recommended_flight_airline = flight_card_fields.get("flight_airline", "")
+                if flight_low is not None:
+                    transport_lows.append(("flights", float(flight_low)))
+                snip_block = (
+                    "\n".join(f"  · {s}" for s in flight_snippets[:4])
+                    or "  · (option names sparse on page — use ranked prices below)"
+                )
+                airline_line = (
+                    f"- Outbound airline: {recommended_flight_airline}\n"
+                    if recommended_flight_airline
+                    else ""
+                )
+                ret_air = flight_card_fields.get("flight_return_airline", "")
+                if ret_air:
+                    airline_line += f"- Return airline: {ret_air}\n"
+                structured_flight_card = (
+                    "Structured flight card:\n"
+                    f"- Route: open-jaw {to_flight_code(origin).upper()}→{arrive_code.upper()} "
+                    f"/ {return_from_code.upper()}→{to_flight_code(origin).upper()}\n"
+                    + (f"- Airline: {recommended_flight_airline}\n" if recommended_flight_airline else "")
+                    + f"- From: {flight_card_fields.get('flight_from', to_flight_code(origin).upper())}\n"
+                    + f"- To: {flight_card_fields.get('flight_to', arrive_code.upper())}\n"
+                    + f"- Depart: {flight_card_fields.get('flight_depart', '')}\n"
+                    + f"- Arrive: {flight_card_fields.get('flight_arrive', '')}\n"
+                    + f"- Return from: {flight_card_fields.get('flight_return_from', return_from_code.upper())}\n"
+                    + f"- Return to: {flight_card_fields.get('flight_return_to', to_flight_code(origin).upper())}\n"
+                    + f"- Return depart: {flight_card_fields.get('flight_return_depart', '')}\n"
+                    + f"- Return arrive: {flight_card_fields.get('flight_return_arrive', '')}\n"
+                    + f"- Return airline: {ret_air}\n"
+                    + f"- Price: {_fmt_hkd(recommended_flight_price)}\n"
+                )
+                sections.append(
+                    f"""{n}) FLIGHTS — OPEN-JAW (compared live)
+- Region: {regional.label if regional else destination}
+- Outbound: {to_flight_code(origin).upper()} → {arrive_code.upper()} on {recommended_flight_date}
+- Return: {return_from_code.upper()} → {to_flight_code(origin).upper()} on {return_date}
+- Recommended outbound link: {recommended_flight_url}
+{airline_line}- Combined lowest seen: {_fmt_hkd(recommended_flight_price)}
+- Sample options seen:
+{snip_block}
+- Ranking (outbound dates):
+{flight_compare_text.split("Notes:")[0].strip()}"""
+                )
+                booking_lines.append(f"  - Recommended flights: {recommended_flight_url}")
+                if structured_flight_card:
+                    raw_blocks.insert(0, structured_flight_card)
+                raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:3500])
+                n += 1
+            else:
+                flight_compare_text = self.compare_flight_prices(
+                    origin=origin,
+                    destination=arrive_code,
+                    dates=",".join(date_options),
+                    trip_type="roundtrip",
+                    return_date=return_date,
+                    adults=adults,
+                )
+                best_flight = pick_cheapest_from_comparison(flight_compare_text)
+                recommended_flight_date = best_flight.get("depart_date") or depart_date
+                recommended_flight_price = best_flight.get("lowest_hkd")
+                recommended_flight_url = best_flight.get("url") or ""
+                flight_best_label = best_flight.get("label") or ""
+
+                # Open the recommended (cheapest) date so the booking link is exact
+                flight_text = self.search_flights(
+                    origin=origin,
+                    destination=arrive_code,
+                    depart_date=recommended_flight_date,
+                    return_date=return_date,
+                    trip_type="roundtrip",
+                    adults=adults,
+                )
+                flight_url = self._require_page().url
+                # Prefer canonical hk.trip.com link from tool text
+                canon_m = re.search(r"Canonical search URL:\s*(\S+)", flight_text)
+                if canon_m:
+                    recommended_flight_url = canon_m.group(1).rstrip(".,;")
+                else:
+                    recommended_flight_url = flight_url or recommended_flight_url
+                recommended_flight_url = ensure_locale_curr(
+                    normalize_trip_url(recommended_flight_url)
+                )
+                if "hk.trip.com" not in recommended_flight_url and canon_m:
+                    recommended_flight_url = ensure_locale_curr(
+                        normalize_trip_url(canon_m.group(1).rstrip(".,;"))
+                    )
+                flight_prices = summarize_prices(
+                    f"Flights {origin}->{arrive_code} on {recommended_flight_date}",
+                    flight_text,
+                    url=flight_url,
+                )
+                if recommended_flight_price is None:
+                    recommended_flight_price = flight_prices.get("lowest_hkd")
+                flight_low = recommended_flight_price
+                flight_snippets = flight_prices.get("snippets") or []
+                if flight_snippets:
+                    recommended_flight_option = flight_snippets[0]
+                recommended_flight_airline = ""
+                airline_m = re.search(
+                    r"(?im)^-\s*Airline:\s*(.+)$",
+                    flight_text or "",
+                )
+                if airline_m:
+                    cand = airline_m.group(1).strip()
+                    if is_plausible_airline_name(cand):
+                        recommended_flight_airline = cand
+                flight_card_fields = extract_booking_urls(flight_text or "")
+                if flight_card_fields.get("flight_airline") and is_plausible_airline_name(
+                    flight_card_fields["flight_airline"]
+                ):
+                    recommended_flight_airline = flight_card_fields["flight_airline"]
+                if flight_low is not None:
+                    transport_lows.append(("flights", float(flight_low)))
+                snip_block = (
+                    "\n".join(f"  · {s}" for s in flight_snippets[:4])
+                    or "  · (option names sparse on page — use ranked prices below)"
+                )
+                airline_line = (
+                    f"- Airline: {recommended_flight_airline}\n"
+                    if recommended_flight_airline
+                    else ""
+                )
+                # Keep the full structured card (outbound + return) near the top of the tool text
+                structured_m = re.search(
+                    r"(?is)(Structured flight card:\s*.*?)(?:\n\n|Flight search URL:|$)",
+                    flight_text or "",
+                )
+                structured_flight_card = (
+                    structured_m.group(1).strip() if structured_m else ""
+                )
+                sections.append(
+                    f"""{n}) FLIGHTS (compared live)
 - Recommended depart date: {recommended_flight_date}
 - Recommended flight link: {recommended_flight_url}
 {airline_line}- Lowest seen for that date: {_fmt_hkd(recommended_flight_price)}
@@ -1393,12 +1715,12 @@ class TripBrowser:
 {snip_block}
 - Ranking:
 {flight_compare_text.split("Notes:")[0].strip()}"""
-            )
-            booking_lines.append(f"  - Recommended flights: {recommended_flight_url}")
-            if structured_flight_card:
-                raw_blocks.insert(0, structured_flight_card)
-            raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:3500])
-            n += 1
+                )
+                booking_lines.append(f"  - Recommended flights: {recommended_flight_url}")
+                if structured_flight_card:
+                    raw_blocks.insert(0, structured_flight_card)
+                raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:3500])
+                n += 1
 
         train_url = ""
         train_low = None
@@ -1473,10 +1795,19 @@ class TripBrowser:
             n += 1
 
         hotel_alt_checkins = nearby_dates(depart_date, (-7, 0, 7))
+        stay0_nights = (
+            regional.stays[0].nights if regional and regional.stays else nights
+        )
+        try:
+            stay0_checkout = (
+                date.fromisoformat(depart_date) + timedelta(days=stay0_nights)
+            ).isoformat()
+        except ValueError:
+            stay0_checkout = return_date
         hotel_compare_text = self.compare_hotel_prices(
             city=hotel_city,
             checkin=depart_date,
-            checkout=return_date,
+            checkout=stay0_checkout,
             adults=adults,
             rooms=1,
             alternate_checkins=",".join(hotel_alt_checkins),
@@ -1492,13 +1823,13 @@ class TripBrowser:
         # Open the cheapest check-in window and capture listing + detail links
         try:
             rec_checkout = (
-                date.fromisoformat(recommended_hotel_checkin) + timedelta(days=nights)
+                date.fromisoformat(recommended_hotel_checkin) + timedelta(days=stay0_nights)
             ).isoformat()
         except ValueError:
-            rec_checkout = return_date
+            rec_checkout = stay0_checkout
 
         hotel_text = self.search_hotels(
-            city=hotel_city,
+            city=(regional.stays[0].city if regional and regional.stays else hotel_city),
             checkin=recommended_hotel_checkin,
             checkout=rec_checkout,
             adults=adults,
@@ -1522,7 +1853,7 @@ class TripBrowser:
             recommended_hotel_price = hotel_prices.get("lowest_hkd")
         hotel_low = recommended_hotel_price
         hotel_total = (
-            round(hotel_low * nights, 2) if hotel_low is not None else None
+            round(hotel_low * stay0_nights, 2) if hotel_low is not None else None
         )
         hotel_snippets = hotel_prices.get("snippets") or []
         if hotel_snippets:
@@ -1544,8 +1875,7 @@ class TripBrowser:
             if (
                 label
                 and label not in recommended_hotel_names
-                and "sample" not in label.lower()
-                and "rates range" not in label.lower()
+                and _hotel_name_plausible_for_city(label, hotel_city)
             ):
                 recommended_hotel_names.append(label)
             if len(recommended_hotel_detail_links) >= 3:
@@ -1553,6 +1883,31 @@ class TripBrowser:
         # Prefer real hotel title over generic price snippets
         if recommended_hotel_names:
             recommended_hotel_option = recommended_hotel_names[0]
+
+        # Live list-card fields (photo + rating) for the first stay
+        stay0_card = self._scrape_top_hotel_card(
+            city=hotel_city,
+            fallback_name=(
+                recommended_hotel_names[0]
+                if recommended_hotel_names
+                else f"Hotels in {hotel_city}"
+            ),
+            lowest=float(hotel_low) if hotel_low is not None else None,
+        )
+        if stay0_card.get("name") and _hotel_name_plausible_for_city(
+            stay0_card["name"], hotel_city
+        ):
+            if not recommended_hotel_names:
+                recommended_hotel_names = [stay0_card["name"]]
+                recommended_hotel_option = stay0_card["name"]
+        stay0_image = stay0_card.get("image_url") or ""
+        if not stay0_image and recommended_hotel_detail_links:
+            try:
+                stay0_image = self.scrape_hotel_image_url(recommended_hotel_detail_links[0])
+            except Exception:
+                stay0_image = ""
+        if not stay0_image:
+            stay0_image = _city_hotel_fallback_image(hotel_city)
 
         snip_hotels = (
             "\n".join(f"  · {s}" for s in hotel_snippets[:5])
@@ -1569,7 +1924,7 @@ class TripBrowser:
         )
         sections.append(
             f"""{n}) HOTELS (compared live)
-- Recommended check-in: {recommended_hotel_checkin} ({nights} nights)
+- Recommended check-in: {recommended_hotel_checkin} ({stay0_nights} nights)
 - Recommended hotel list link: {recommended_hotel_url}
 {name_line}- Hotel detail links found:
 {detail_block}
@@ -1590,6 +1945,112 @@ class TripBrowser:
             booking_lines.append(f"  - Hotel option: {detail}")
         raw_blocks.append("--- Raw hotel excerpt ---\n" + hotel_text[:2200])
         n += 1
+
+        # Seed first stay; for regional trips, search hotels in each later city too
+        self.last_hotel_stays = [
+            {
+                "city": hotel_city,
+                "airport": arrive_code,
+                "nights": str(
+                    regional.stays[0].nights if regional and regional.stays else nights
+                ),
+                "checkin": recommended_hotel_checkin,
+                "checkout": (
+                    (
+                        date.fromisoformat(recommended_hotel_checkin)
+                        + timedelta(
+                            days=(
+                                regional.stays[0].nights
+                                if regional and regional.stays
+                                else nights
+                            )
+                        )
+                    ).isoformat()
+                    if recommended_hotel_checkin
+                    else return_date
+                ),
+                "label": (
+                    regional.stays[0].label
+                    if regional and regional.stays
+                    else f"Stay · {hotel_city}"
+                ),
+                "name": (
+                    stay0_card.get("name")
+                    if stay0_card.get("name")
+                    and _hotel_name_plausible_for_city(stay0_card["name"], hotel_city)
+                    else (
+                        recommended_hotel_names[0]
+                        if recommended_hotel_names
+                        else f"Hotels in {hotel_city}"
+                    )
+                ),
+                "url": (
+                    recommended_hotel_detail_links[0]
+                    if recommended_hotel_detail_links
+                    else recommended_hotel_url
+                ),
+                "price_label": f"HK${hotel_low:,.0f}" if hotel_low is not None else "",
+                "total_label": (
+                    f"Est. stay total: HK${hotel_total:,.0f}"
+                    if hotel_total is not None
+                    else ""
+                ),
+                "location": hotel_city,
+                "image_url": stay0_image,
+                "score": stay0_card.get("score", ""),
+                "score_label": stay0_card.get("score_label", ""),
+                "stars": stay0_card.get("stars", ""),
+                "reviews": stay0_card.get("reviews", ""),
+            }
+        ]
+        if regional and len(regional.stays) > 1:
+            extra_blocks: list[str] = []
+            for si, stay in enumerate(regional.stays[1:], start=2):
+                cin = stay.checkin or depart_date
+                cout = stay.checkout or return_date
+                stay_rec = self._build_regional_stay_hotel(
+                    stay_city=stay.city,
+                    airport=stay.airport,
+                    nights=stay.nights,
+                    checkin=cin,
+                    checkout=cout,
+                    label=stay.label or f"Stay {si} · {stay.city}",
+                    adults=adults,
+                    stay_index=si,
+                )
+                raw_excerpt = stay_rec.pop("_raw_excerpt", "")
+                self.last_hotel_stays.append(stay_rec)
+                booking_lines.append(
+                    f"  - Stay {si} hotel ({stay.city}): "
+                    f"{stay_rec.get('url') or '(open Trip.com hotels)'}"
+                )
+                extra_blocks.append(
+                    f"Stay {si} · {stay.city} ({stay.nights} nights)\n"
+                    f"- Check-in: {cin} → {cout}\n"
+                    f"- Airport hub: {stay.airport.upper()}\n"
+                    f"- Hotel: {stay_rec['name']}\n"
+                    f"- Lowest nightly: {stay_rec.get('price_label') or 'see Trip.com'}\n"
+                    f"- Est. stay total: {stay_rec.get('total_label') or 'see Trip.com'}\n"
+                    f"- Book: {stay_rec.get('url') or 'open Trip.com hotels list'}"
+                )
+                if raw_excerpt:
+                    raw_blocks.append(raw_excerpt)
+            # Fix first stay nights to regional split (was full trip length)
+            if regional.stays:
+                first = regional.stays[0]
+                self.last_hotel_stays[0]["nights"] = str(first.nights)
+                self.last_hotel_stays[0]["checkin"] = first.checkin or recommended_hotel_checkin
+                self.last_hotel_stays[0]["checkout"] = first.checkout or ""
+                self.last_hotel_stays[0]["label"] = first.label
+                self.last_hotel_stays[0]["airport"] = first.airport
+            if extra_blocks:
+                sections.append(
+                    f"""{n}) ADDITIONAL CITY HOTELS
+- Region: {regional.label}
+- Internal travel: {regional.internal_note}
+{chr(10).join(extra_blocks)}"""
+                )
+                n += 1
 
         car_low = None
         car_total = None
@@ -1690,6 +2151,7 @@ class TripBrowser:
             interests=interests or "",
             destination=hotel_city or destination,
             attractions=attractions or None,
+            regional_route=regional,
         )
         sections.append(
             f"""{n}) SUGGESTED DAY FLOW
@@ -1775,17 +2237,36 @@ class TripBrowser:
                 pick_lines.append(structured_flight_card)
             pick_lines.append("")
         pick_lines.append("RECOMMENDED HOTEL")
-        pick_lines.append(f"- City: {hotel_city}")
-        pick_lines.append(
-            f"- Check-in: {recommended_hotel_checkin} ({nights} nights)"
-        )
-        pick_lines.append(f"- Lowest nightly: {_fmt_hkd(hotel_low)}")
-        pick_lines.append(f"- Est. stay total: {_fmt_hkd(hotel_total)}")
-        if recommended_hotel_option:
-            pick_lines.append(f"- Option seen: {recommended_hotel_option}")
-        pick_lines.append(f"- Book this hotel search: {recommended_hotel_url}")
-        for i, detail in enumerate(recommended_hotel_detail_links[:3], 1):
-            pick_lines.append(f"- Hotel option link {i}: {detail}")
+        if self.last_hotel_stays and len(self.last_hotel_stays) > 1:
+            pick_lines.append(
+                f"- Multi-city stays: {len(self.last_hotel_stays)} hotels"
+            )
+            for i, stay in enumerate(self.last_hotel_stays, 1):
+                pick_lines.append("")
+                pick_lines.append(f"Stay {i} · {stay.get('city', '')}")
+                pick_lines.append(f"- Hotel: {stay.get('name', '')}")
+                pick_lines.append(
+                    f"- Check-in: {stay.get('checkin', '')} → {stay.get('checkout', '')} "
+                    f"({stay.get('nights', '')} nights)"
+                )
+                pick_lines.append(f"- Location: {stay.get('location', stay.get('city', ''))}")
+                if stay.get("price_label"):
+                    pick_lines.append(f"- Lowest nightly: {stay['price_label']}")
+                if stay.get("total_label"):
+                    pick_lines.append(f"- {stay['total_label']}")
+                pick_lines.append(f"- Book this hotel: {stay.get('url', '')}")
+        else:
+            pick_lines.append(f"- City: {hotel_city}")
+            pick_lines.append(
+                f"- Check-in: {recommended_hotel_checkin} ({stay0_nights} nights)"
+            )
+            pick_lines.append(f"- Lowest nightly: {_fmt_hkd(hotel_low)}")
+            pick_lines.append(f"- Est. stay total: {_fmt_hkd(hotel_total)}")
+            if recommended_hotel_option:
+                pick_lines.append(f"- Option seen: {recommended_hotel_option}")
+            pick_lines.append(f"- Book this hotel search: {recommended_hotel_url}")
+            for i, detail in enumerate(recommended_hotel_detail_links[:3], 1):
+                pick_lines.append(f"- Hotel option link {i}: {detail}")
         pick_lines.append("")
         if want_trains and train_url:
             pick_lines.append(
@@ -1810,6 +2291,20 @@ Route: {origin} -> {destination}
 Requested dates: {depart_date} -> {return_date} ({nights} nights)
 Travelers: {adults} adult(s)
 Hotel city: {hotel_city}
+Interests: {interests_line}
+Transport modes: {", ".join(modes)}
+
+{recommend_block}
+"""
+        if regional and arrive_code.upper() != return_from_code.upper():
+            header = f"""TRIP PLAN (Trip.com Hong Kong live search)
+========================================
+Region: {regional.label} (multi-city)
+Flights: {to_flight_code(origin).upper()} → {arrive_code.upper()} in / {return_from_code.upper()} → {to_flight_code(origin).upper()} out
+Stays: {", ".join(s.label for s in regional.stays)}
+Internal: {regional.internal_note}
+Requested dates: {depart_date} -> {return_date} ({nights} nights)
+Travelers: {adults} adult(s)
 Interests: {interests_line}
 Transport modes: {", ".join(modes)}
 
@@ -2309,6 +2804,163 @@ Transport modes: {", ".join(modes)}
                     return times[0], times[1]
         return "", ""
 
+    def _build_regional_stay_hotel(
+        self,
+        *,
+        stay_city: str,
+        airport: str,
+        nights: int,
+        checkin: str,
+        checkout: str,
+        label: str,
+        adults: int = 2,
+        stay_index: int = 2,
+    ) -> dict[str, str]:
+        """Search Trip.com for a regional stay city; never leave a blank placeholder."""
+        from travel_agent.trip_urls import build_hotel_list_url
+
+        fb = _fallback_stay_hotel(stay_city)
+        stay_rec: dict[str, str] = {
+            "city": stay_city,
+            "airport": airport,
+            "nights": str(nights),
+            "checkin": checkin,
+            "checkout": checkout,
+            "label": label,
+            "name": fb["name"],
+            "url": build_hotel_list_url(
+                city=stay_city, checkin=checkin, checkout=checkout, adults=adults
+            ),
+            "price_label": "",
+            "total_label": "",
+            "score": fb.get("score", ""),
+            "score_label": fb.get("score_label", ""),
+            "stars": fb.get("stars", "4"),
+            "reviews": "",
+            "location": stay_city,
+            "image_url": fb.get("image_url", ""),
+            "features": fb.get("features", ""),
+        }
+        h_text = ""
+        try:
+            h_text = self.search_hotels(
+                city=stay_city,
+                checkin=checkin,
+                checkout=checkout,
+                adults=adults,
+                rooms=1,
+            )
+        except Exception:
+            stay_rec["_raw_excerpt"] = (
+                f"--- Raw hotel excerpt ({stay_city}) ---\n(search failed)"
+            )
+            return stay_rec
+
+        h_url = ""
+        try:
+            h_url = self._require_page().url
+        except Exception:
+            h_url = ""
+        canon_h = re.search(r"Canonical search URL:\s*(\S+)", h_text or "")
+        stay_url = ensure_locale_curr(
+            normalize_trip_url(
+                (canon_h.group(1).rstrip(".,;") if canon_h else h_url) or ""
+            )
+        )
+        if stay_url:
+            stay_rec["url"] = stay_url
+
+        h_prices = summarize_prices(f"Hotels in {stay_city}", h_text, url=h_url)
+        nightly = h_prices.get("lowest_hkd")
+        stay_total = (
+            round(float(nightly) * nights, 2) if nightly is not None else None
+        )
+        if nightly is not None:
+            stay_rec["price_label"] = f"HK${nightly:,.0f}"
+        if stay_total is not None:
+            stay_rec["total_label"] = f"Est. stay total: HK${stay_total:,.0f}"
+
+        # Keep scanning until we have a plausible hotel title + detail URL
+        name = ""
+        detail = ""
+        for u, label_txt in self._extract_hotel_detail_options(limit=12):
+            nu = ensure_locale_curr(normalize_trip_url(u))
+            if "/hotels/" not in nu.lower():
+                continue
+            if not (
+                "hotelid=" in nu.lower()
+                or re.search(r"hotel-detail-\d+", nu, re.I)
+                or re.search(r"/hotels/[^/?]+-\d+", nu)
+            ):
+                continue
+            if not detail:
+                detail = nu
+            if label_txt and _hotel_name_plausible_for_city(label_txt, stay_city):
+                name = label_txt
+                detail = nu
+                break
+        if detail:
+            stay_rec["url"] = detail
+
+        card = self._scrape_top_hotel_card(
+            city=stay_city,
+            fallback_name=name or fb["name"],
+            lowest=float(nightly) if nightly is not None else None,
+        )
+        card_name = card.get("name") or ""
+        if card_name and _hotel_name_plausible_for_city(card_name, stay_city):
+            # Prefer a real listing title over the generic "Hotels in …"
+            if not card_name.lower().startswith("hotels in "):
+                stay_rec["name"] = card_name
+        elif name:
+            stay_rec["name"] = name
+
+        for k in ("score", "score_label", "stars", "reviews", "price_label"):
+            if card.get(k):
+                stay_rec[k] = card[k]
+
+        img = card.get("image_url") or ""
+        # Reject LoremFlickr-looking tiny/generic if we can get a real detail photo
+        if detail and (
+            not img
+            or "loremflickr" in img.lower()
+            or stay_rec["name"].lower().startswith("hotels in ")
+        ):
+            try:
+                detail_img = self.scrape_hotel_image_url(detail)
+            except Exception:
+                detail_img = ""
+            if detail_img:
+                img = detail_img
+        if not img or "loremflickr" in (img or "").lower():
+            # Named hotel photo via Wikipedia/Openverse
+            try:
+                from travel_agent.attraction_images import lookup_image
+
+                img = lookup_image(stay_rec["name"], city=stay_city) or img
+            except Exception:
+                pass
+        if not img:
+            img = _city_hotel_fallback_image(stay_city)
+        stay_rec["image_url"] = img
+
+        # Still generic? use curated city hotel
+        if stay_rec["name"].lower().startswith("hotels in "):
+            stay_rec["name"] = fb["name"]
+            if not stay_rec.get("features"):
+                stay_rec["features"] = fb.get("features", "")
+            if "loremflickr" in (stay_rec.get("image_url") or "").lower() or not stay_rec.get(
+                "image_url"
+            ):
+                stay_rec["image_url"] = fb.get("image_url") or _city_hotel_fallback_image(
+                    stay_city
+                )
+
+        stay_rec["_raw_excerpt"] = (
+            f"--- Raw hotel excerpt ({stay_city}) ---\n" + (h_text or "")[:1800]
+        )
+        return stay_rec
+
     def scrape_hotel_image_url(self, detail_url: str = "") -> str:
         """Return the main hotel photo URL from a Trip.com hotel detail page."""
         page = self._require_page()
@@ -2408,11 +3060,10 @@ Transport modes: {", ".join(modes)}
 
         # Prefer anchor text from detail links
         if not card["name"] or "sample" in card["name"].lower():
-            for _url, label in self._extract_hotel_detail_options(limit=5):
+            for _url, label in self._extract_hotel_detail_options(limit=8):
                 if (
                     label
-                    and "sample" not in label.lower()
-                    and "rates range" not in label.lower()
+                    and _hotel_name_plausible_for_city(label, city)
                     and 3 < len(label) < 80
                 ):
                     card["name"] = label
@@ -2449,6 +3100,7 @@ Transport modes: {", ".join(modes)}
                 card["price_label"] = f"HK${min(prices):,.0f}"
 
         # Cover photo from the listing card (avoid leaving the list page)
+        card["image_url"] = ""
         try:
             overview = page.locator("img[alt*='hotel overview' i]")
             if overview.count():
@@ -2457,12 +3109,44 @@ Transport modes: {", ".join(modes)}
                     or overview.first.evaluate("e => e.currentSrc || ''")
                     or ""
                 ).strip()
-                if src.startswith("http") and "tripcdn.com" in src.lower():
+                if src.startswith("http") and (
+                    "tripcdn.com" in src.lower() or "ak-d.tripcdn" in src.lower()
+                ):
                     card["image_url"] = _prefer_hotel_photo_url(src)
         except Exception:
             pass
+        if not card.get("image_url"):
+            try:
+                imgs = page.evaluate(
+                    """() => Array.from(document.querySelectorAll('img')).map(e => ({
+                      src: e.currentSrc || e.src || '',
+                      w: e.naturalWidth || e.width || 0,
+                      h: e.naturalHeight || e.height || 0,
+                      alt: e.alt || ''
+                    })).filter(x => x.src && x.src.startsWith('http'))"""
+                )
+            except Exception:
+                imgs = []
+            best = ""
+            best_area = 0
+            for im in imgs or []:
+                src = str(im.get("src") or "")
+                low = src.lower()
+                if "tripcdn.com" not in low and "ak-d.tripcdn" not in low:
+                    continue
+                if any(x in low for x in ("logo", "icon", "avatar", "qrcode", "badge", "airline")):
+                    continue
+                area = int(im.get("w") or 0) * int(im.get("h") or 0)
+                # Prefer landscape hotel thumbs
+                if area > best_area and area >= 8_000:
+                    best_area = area
+                    best = _prefer_hotel_photo_url(src)
+            if best:
+                card["image_url"] = best
+        if not card.get("image_url"):
+            card["image_url"] = _city_hotel_fallback_image(city)
 
-        if not card["name"] or "sample" in card["name"].lower():
+        if not card["name"] or not _hotel_name_plausible_for_city(card["name"], city):
             card["name"] = f"Hotels in {city}" if city else "Recommended hotel"
         return card
 

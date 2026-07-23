@@ -95,6 +95,12 @@ class HotelOffer:
     url: str = ""
     image_url: str = ""
     raw: str = ""
+    # Multi-city stay metadata
+    city: str = ""
+    checkin: str = ""
+    checkout: str = ""
+    nights: int = 0
+    stay_label: str = ""
 
 
 @dataclass
@@ -106,6 +112,7 @@ class ParsedItinerary:
     raw: str = ""
     flight_offer: FlightOffer | None = None
     hotel_offer: HotelOffer | None = None
+    hotel_offers: list[HotelOffer] = field(default_factory=list)
 
 
 def _urls_in(text: str) -> list[str]:
@@ -532,6 +539,51 @@ def parse_itinerary(text: str) -> ParsedItinerary:
             hotel_body, fallback_url=best or (urls[0] if urls else "")
         )
 
+    # Multi-stay sections: "Stay 1 · San Francisco", "Recommended hotel 2", etc.
+    stay_blocks = list(
+        re.finditer(
+            r"(?im)^(?:#{0,6}\s*)?(?:stay\s*\d+|recommended\s+hotel(?:\s*\d+)?)\b[^\n]*",
+            raw,
+        )
+    )
+    for i, m in enumerate(stay_blocks):
+        start = m.end()
+        end = stay_blocks[i + 1].start() if i + 1 < len(stay_blocks) else len(raw)
+        # Stop at day-by-day if it appears before next stay
+        chunk = raw[start:end]
+        day_cut = re.search(r"(?im)^(?:#{0,6}\s*)?day-by-day|^day\s+\d+", chunk)
+        if day_cut:
+            chunk = chunk[: day_cut.start()]
+        header = m.group(0)
+        offer = parse_hotel_offer(chunk)
+        # Pull city / nights from header when present
+        city_m = re.search(
+            r"(?i)(?:stay\s*\d+\s*[·\-–—:]\s*|in\s+)([A-Za-z][A-Za-z\s]+?)(?:\s*\(|\s*$|\s*—|\s*-)",
+            header,
+        )
+        if city_m and not offer.city:
+            offer.city = city_m.group(1).strip()
+        nights_m = re.search(r"(?i)(\d+)\s*nights?", header + " " + chunk[:200])
+        if nights_m:
+            try:
+                offer.nights = int(nights_m.group(1))
+            except ValueError:
+                pass
+        offer.stay_label = re.sub(r"^#+\s*", "", header).strip()[:80]
+        if offer.city and not offer.location:
+            offer.location = offer.city
+        if offer.name and offer.name != "Recommended hotel":
+            result.hotel_offers.append(offer)
+        elif offer.url or offer.city:
+            if not offer.name or offer.name == "Recommended hotel":
+                offer.name = f"Hotels in {offer.city}" if offer.city else "Recommended hotel"
+            result.hotel_offers.append(offer)
+
+    if result.hotel_offer and not result.hotel_offers:
+        result.hotel_offers = [result.hotel_offer]
+    elif result.hotel_offers and not result.hotel_offer:
+        result.hotel_offer = result.hotel_offers[0]
+
     # Fallback: LLM skipped headings — still try to fill cards from whole plan
     if not result.flight_offer:
         offer = parse_flight_offer(raw)
@@ -618,8 +670,15 @@ def synthesize_day_blocks(
     )
 
     n = max(1, int(nights or 1))
+    from travel_agent.regions import build_regional_route
+
+    regional = build_regional_route(destination, n)
     ideas = day_ideas_for(
-        destination, n, styles=styles, attractions=attractions
+        destination,
+        n,
+        styles=styles,
+        attractions=attractions,
+        regional_route=regional,
     )
     days: list[Block] = []
     for i, idea in enumerate(ideas, start=1):

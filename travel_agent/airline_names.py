@@ -13,10 +13,13 @@ _AIRLINE_RE = re.compile(
     r"Air France|KLM|Lufthansa|British Airways|Finnair|Turkish Airlines|"
     r"Air China|China Eastern|China Southern|Hainan Airlines|HK Express|"
     r"Virgin Atlantic|Etihad|Swiss|Austrian|Iberia|Delta|"
-    r"United Airlines|American Airlines|Qantas|Vietnam Airlines|"
+    r"United Airlines|American Airlines|Delta Air Lines|Delta Airlines|"
+    r"Alaska Airlines|Southwest Airlines|JetBlue|Hawaiian Airlines|Air Canada|"
+    r"Qantas|Vietnam Airlines|"
     r"Philippine Airlines|Malaysia Airlines|Cebu Pacific|Etihad Airways|SWISS|"
     r"KLM Royal Dutch Airlines|"
-    r"CX|HB|UO|AF|KL|SQ|NH|JL|CI|BR|MU|CZ|CA|EK|QR|TK|AY|TG|KE|OZ"
+    r"CX|HB|UO|AF|KL|SQ|NH|JL|CI|BR|MU|CZ|CA|EK|QR|TK|AY|TG|KE|OZ|"
+    r"UA|AA|DL|AS|WN|B6|HA|AC"
     r")\b"
 )
 
@@ -100,6 +103,16 @@ AIRLINE_CODE_MAP: dict[str, str] = {
     "LX": "SWISS",
     "VN": "Vietnam Airlines",
     "MH": "Malaysia Airlines",
+    "UA": "United Airlines",
+    "AA": "American Airlines",
+    "DL": "Delta Air Lines",
+    "AS": "Alaska Airlines",
+    "WN": "Southwest Airlines",
+    "B6": "JetBlue",
+    "F9": "Frontier Airlines",
+    "NK": "Spirit Airlines",
+    "HA": "Hawaiian Airlines",
+    "AC": "Air Canada",
 }
 
 
@@ -144,6 +157,23 @@ _AIRLINE_NAME_ALIASES: dict[str, str] = {
     "greater bay airlines": "HB",
     "hk express": "UO",
     "hong kong airlines": "HX",
+    "united airlines": "UA",
+    "united": "UA",
+    "american airlines": "AA",
+    "american": "AA",
+    "delta air lines": "DL",
+    "delta airlines": "DL",
+    "delta": "DL",
+    "alaska airlines": "AS",
+    "alaska": "AS",
+    "southwest airlines": "WN",
+    "southwest": "WN",
+    "jetblue": "B6",
+    "jetblue airways": "B6",
+    "frontier airlines": "F9",
+    "spirit airlines": "NK",
+    "hawaiian airlines": "HA",
+    "air canada": "AC",
 }
 
 

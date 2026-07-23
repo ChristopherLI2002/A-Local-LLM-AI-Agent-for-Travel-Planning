@@ -100,6 +100,18 @@ def is_hotel_detail_url(url: str) -> bool:
     return bool(_hotel_id_from_url(url))
 
 
+def is_hotel_list_url(url: str) -> bool:
+    """True for hk.trip.com hotel list/search pages."""
+    low = (url or "").lower()
+    if not low or "trip.com" not in low:
+        return False
+    if "/hotels/list" in low:
+        return True
+    if "/hotels/" in low and "city=" in low and "checkin" in low:
+        return True
+    return False
+
+
 def is_trusted_hotel_detail_url(url: str) -> bool:
     """True for real hotel detail pages with a plausible numeric hotelId."""
     if not is_hotel_detail_url(url):
@@ -108,6 +120,11 @@ def is_trusted_hotel_detail_url(url: str) -> bool:
     if not hid or hid in _FAKE_HOTEL_IDS:
         return False
     return True
+
+
+def is_openable_hotel_url(url: str) -> bool:
+    """Detail page or city hotel list — both OK for Check Availability."""
+    return is_trusted_hotel_detail_url(url) or is_hotel_list_url(url)
 
 
 def canonicalize_hotel_detail_url(
@@ -541,11 +558,13 @@ def resolve_booking_url(
                     canonicalize_hotel_detail_url(cand) or cand,
                 )
         best = pick_booking_url(
-            [u for u in (tool_url, parsed_url) if u],
+            [u for u in (tool_url, parsed_url, built_url) if u],
             "hotel",
-            fallback="",
+            fallback=built_url,
         )
-        return best
+        if best:
+            return best
+        return built_url
 
     if tool_url and score_booking_url(tool_url, kind) >= 50:
         return tool_url
