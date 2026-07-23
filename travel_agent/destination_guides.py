@@ -416,48 +416,125 @@ def _add_minutes(h: int, m: int, delta: int) -> tuple[int, int]:
     return total // 60, total % 60
 
 
+def _infer_transfer(prev: str, nxt: str, idea: DayIdea) -> tuple[str, int]:
+    """Guess transport method + minutes between two timetable stops."""
+    a = (prev or "").lower()
+    b = (nxt or "").lower()
+    route = (idea.route or "").lower()
+    blob = f"{a} {b} {route}"
+
+    # Airport / long transfers
+    if any(k in a for k in ("land", "arrive", "airport", "nrt", "hnd", "icn", "cdg")) or any(
+        k in b for k in ("airport", "flight departs", "transfer to airport")
+    ):
+        if "narita express" in route or "n'ex" in route or "nrt" in blob:
+            return "Narita Express / airport train", 55
+        if "keikyu" in route or "haneda" in blob or "hnd" in blob:
+            return "Keikyu / Tokyo Monorail", 40
+        if "arex" in route or "icn" in blob:
+            return "AREX airport train", 50
+        if "limousine" in route or "bus" in route:
+            return "Airport limousine bus", 70
+        return "Airport transfer", 60
+
+    # Same-neighborhood / meal near last stop
+    if any(k in b for k in ("lunch", "dinner", "ramen", "sushi", "yakitori", "cafe", "bento", "gyoza")):
+        if any(k in a for k in ("hotel", "check-in", "wake", "pack")):
+            return "Walk", 8
+        return "Walk", 10
+
+    if "hotel" in b or "check-in" in b or "wake" in a:
+        return "Walk", 8
+
+    if "free time" in b or "coffee" in b:
+        return "Walk", 8
+
+    # City rail hints from the day's route string
+    if "yamanote" in route:
+        return "JR Yamanote Line", 12
+    if "ginza line" in route or "tokyo metro" in route:
+        return "Tokyo Metro", 18
+    if "yurikamome" in route:
+        return "Yurikamome", 20
+    if "mtr" in route:
+        return "MTR", 15
+    if "metro" in route or "mrt" in route:
+        return "Metro", 15
+    if "jr " in route or "train" in route:
+        return "Train", 25
+    if "walk" in route and "line" not in route:
+        return "Walk", 15
+
+    # Day-trip style
+    if "day trip" in idea.title.lower() or any(k in blob for k in ("kamakura", "nara", "jiufen", "nikko")):
+        if "return" in b:
+            return "JR / limited express return", 60
+        return "JR / limited express", 55
+
+    return "Metro / local transit", 20
+
+
+def _with_transfers(
+    slots: list[tuple[str, str]],
+    idea: DayIdea,
+) -> str:
+    """Insert ↓ transport · ~N min lines between place rows."""
+    if not slots:
+        return ""
+    lines: list[str] = [f"{slots[0][0]}  {slots[0][1]}"]
+    for i in range(1, len(slots)):
+        method, mins = _infer_transfer(slots[i - 1][1], slots[i][1], idea)
+        lines.append(f"↓ {method} · ~{mins} min")
+        lines.append(f"{slots[i][0]}  {slots[i][1]}")
+    return "\n".join(lines)
+
+
 def format_day_body(
     idea: DayIdea,
     *,
     arrive_time: str = "",
     return_depart_time: str = "",
 ) -> str:
-    """Timetable lines: HH:MM + plain activity (no Transit/Go/Lunch labels).
-
-    Arrival day starts after the inbound flight lands.
-    Departure day finishes before the outbound/return flight departs.
-    """
+    """Timetable with place rows and ↓ transfer legs (method + ETA)."""
     title_l = idea.title.lower()
     arrive = _parse_hhmm(arrive_time)
     ret_dep = _parse_hhmm(return_depart_time)
 
     if "arrival" in title_l:
         if arrive:
-            # Immigration + bags + transfer buffer after touchdown
             land_h, land_m = arrive
             t0 = _add_minutes(land_h, land_m, 0)
-            t1 = _add_minutes(land_h, land_m, 75)   # hotel check-in
-            t2 = _add_minutes(land_h, land_m, 105)  # light nearby walk if evening
-            t3 = _add_minutes(land_h, land_m, 150)  # dinner
+            t1 = _add_minutes(land_h, land_m, 75)
+            t2 = _add_minutes(land_h, land_m, 105)
+            t3 = _add_minutes(land_h, land_m, 150)
             slots: list[tuple[str, str]] = [
-                (_fmt_hhmm(*t0), f"Land and transfer ({idea.route})"),
+                (_fmt_hhmm(*t0), "Land at airport"),
                 (_fmt_hhmm(*t1), "Hotel check-in and drop bags"),
             ]
-            # Only keep evening activities that still fit before ~23:00
             if t2[0] < 23 or (t2[0] == 22 and t2[1] <= 45):
-                # Prefer a short nearby activity over full daytime list
-                nearby = idea.also if "observatory" in idea.also.lower() or "night" in idea.also.lower() else idea.go
+                nearby = (
+                    idea.also
+                    if "observatory" in idea.also.lower() or "night" in idea.also.lower()
+                    else idea.go
+                )
                 if t2[0] >= 21:
-                    slots.append((_fmt_hhmm(*t2), f"Light neighborhood walk near hotel ({nearby.split(',')[0]})"))
+                    slots.append(
+                        (
+                            _fmt_hhmm(*t2),
+                            f"Light neighborhood walk near hotel ({nearby.split(',')[0]})",
+                        )
+                    )
                 else:
                     slots.append((_fmt_hhmm(*t2), nearby))
             if t3[0] < 23 or (t3[0] == 22 and t3[1] <= 50):
                 slots.append((_fmt_hhmm(*t3), idea.dinner))
             if len(slots) < 3:
-                slots.append((_fmt_hhmm(*_add_minutes(land_h, land_m, 90)), "Rest at hotel after the flight"))
+                slots.append(
+                    (_fmt_hhmm(*_add_minutes(land_h, land_m, 90)), "Rest at hotel after the flight")
+                )
         else:
             slots = [
-                ("11:00", f"Arrive and transfer ({idea.route})"),
+                ("11:00", "Land at airport"),
                 ("13:00", "Hotel check-in and drop bags"),
                 ("14:30", idea.go),
                 ("16:30", idea.lunch),
@@ -467,28 +544,22 @@ def format_day_body(
     elif "departure" in title_l:
         if ret_dep:
             dep_h, dep_m = ret_dep
-            # Leave hotel ~3.5h before flight for airport transfer / security
             leave_h, leave_m = _add_minutes(dep_h, dep_m, -210)
             leave_mins = leave_h * 60 + leave_m
             slots = []
             if leave_mins >= 8 * 60:
-                # Enough morning for a light outing before checkout
                 slots.append((_fmt_hhmm(*_add_minutes(leave_h, leave_m, -150)), idea.go))
                 slots.append((_fmt_hhmm(*_add_minutes(leave_h, leave_m, -75)), idea.lunch))
             elif leave_mins >= 6 * 60:
                 slots.append((_fmt_hhmm(*_add_minutes(leave_h, leave_m, -60)), idea.go))
             else:
-                # Very early flight — keep it short
                 wake_h, wake_m = _add_minutes(leave_h, leave_m, -40)
                 if wake_h * 60 + wake_m < 4 * 60:
                     wake_h, wake_m = 4, 0
-                # Ensure wake is strictly before leave
                 if (wake_h, wake_m) >= (leave_h, leave_m):
                     wake_h, wake_m = _add_minutes(leave_h, leave_m, -30)
                 slots.append((_fmt_hhmm(wake_h, wake_m), "Wake up, pack, and hotel checkout"))
-            slots.append(
-                (_fmt_hhmm(leave_h, leave_m), f"Transfer to airport ({idea.route})")
-            )
+            slots.append((_fmt_hhmm(leave_h, leave_m), "Transfer to airport"))
             slots.append((_fmt_hhmm(dep_h, dep_m), f"Flight departs at {_fmt_hhmm(dep_h, dep_m)}"))
             slots = sorted(slots, key=lambda x: x[0])
         else:
@@ -496,27 +567,29 @@ def format_day_body(
                 ("09:00", idea.go),
                 ("10:30", idea.lunch),
                 ("12:00", idea.also),
-                ("13:30", f"Depart ({idea.route})"),
+                ("13:30", "Depart for airport"),
             ]
-    elif "day trip" in title_l or "nikko" in title_l or "kamakura" in title_l or "jiufen" in title_l or "nara" in title_l:
+    elif "day trip" in title_l or any(
+        k in title_l for k in ("nikko", "kamakura", "jiufen", "nara")
+    ):
         slots = [
-            ("08:00", f"Depart ({idea.route})"),
+            ("08:00", "Depart city station"),
             ("10:00", idea.go),
             ("12:30", idea.lunch),
             ("14:00", idea.also),
-            ("17:00", "Return train / metro to city"),
+            ("17:00", "Return to city station"),
             ("19:30", idea.dinner),
         ]
     else:
+        # Place-first timetable (route used as transfer metadata, not a stop)
         slots = [
-            ("09:00", idea.route),
-            ("10:00", idea.go),
+            ("09:30", idea.go),
             ("12:30", idea.lunch),
             ("14:00", idea.also),
             ("17:30", "Free time / coffee near last stop"),
             ("19:00", idea.dinner),
         ]
-    return "\n".join(f"{t}  {a}" for t, a in slots)
+    return _with_transfers(slots, idea)
 
 
 def format_day_title(idea: DayIdea, day_num: int) -> str:

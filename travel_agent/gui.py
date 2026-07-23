@@ -73,15 +73,71 @@ C = {
     "badge_outline": "#5BB8B1",
 }
 
-FONT_BRAND = ("Georgia", 34, "bold")
-FONT_DISPLAY = ("Georgia", 18)
-FONT_UI = ("Segoe UI", 11)
-FONT_UI_BOLD = ("Segoe UI Semibold", 11)
-FONT_SMALL = ("Segoe UI", 9)
-FONT_BODY = ("Segoe UI", 11)
-FONT_INPUT = ("Segoe UI", 12)
-FONT_DAY_NUM = ("Segoe UI", 36, "bold")
-FONT_DAY_BADGE = ("Segoe UI Semibold", 8)
+FONT_SCALE_STEPS = 13  # discrete positions 0..12 (matches A——A slider)
+DEFAULT_FONT_STEP = 5  # bigger default than the old ~11pt UI
+
+
+def _font_factor(step: int) -> float:
+    """Map slider step to size multiplier (1.0 at DEFAULT_FONT_STEP)."""
+    step = max(0, min(FONT_SCALE_STEPS - 1, int(step)))
+    # step 0 ≈ 0.78x, default ≈ 1.0x, max ≈ 1.35x relative to bigger baseline
+    return 0.78 + step * ((1.35 - 0.78) / (FONT_SCALE_STEPS - 1))
+
+
+def _scaled_pt(base: int, step: int) -> int:
+    return max(8, round(base * _font_factor(step)))
+
+
+def make_fonts(step: int = DEFAULT_FONT_STEP) -> dict[str, tuple]:
+    """Build the app font set for a given slider step."""
+    # Baselines are already larger than the original Voyage defaults
+    return {
+        "brand": ("Georgia", _scaled_pt(36, step), "bold"),
+        "display": ("Georgia", _scaled_pt(20, step)),
+        "ui": ("Segoe UI", _scaled_pt(13, step)),
+        "ui_bold": ("Segoe UI Semibold", _scaled_pt(13, step)),
+        "small": ("Segoe UI", _scaled_pt(11, step)),
+        "body": ("Segoe UI", _scaled_pt(13, step)),
+        "input": ("Segoe UI", _scaled_pt(14, step)),
+        "day_num": ("Segoe UI", _scaled_pt(38, step), "bold"),
+        "day_badge": ("Segoe UI Semibold", _scaled_pt(9, step)),
+        "time": ("Segoe UI Semibold", _scaled_pt(16, step)),
+        "price": ("Segoe UI Semibold", _scaled_pt(17, step)),
+        "hotel_name": ("Segoe UI Semibold", _scaled_pt(14, step)),
+        "tiny": ("Segoe UI", _scaled_pt(9, step)),
+        "wizard": ("Georgia", _scaled_pt(28, step)),
+        "label": ("Segoe UI", _scaled_pt(9, step)),
+    }
+
+
+# Mutable current fonts (widgets read these at create/refresh time)
+FONTS = make_fonts(DEFAULT_FONT_STEP)
+FONT_BRAND = FONTS["brand"]
+FONT_DISPLAY = FONTS["display"]
+FONT_UI = FONTS["ui"]
+FONT_UI_BOLD = FONTS["ui_bold"]
+FONT_SMALL = FONTS["small"]
+FONT_BODY = FONTS["body"]
+FONT_INPUT = FONTS["input"]
+FONT_DAY_NUM = FONTS["day_num"]
+FONT_DAY_BADGE = FONTS["day_badge"]
+
+
+def apply_font_globals(step: int) -> None:
+    """Refresh module-level FONT_* aliases used across widgets."""
+    global FONT_BRAND, FONT_DISPLAY, FONT_UI, FONT_UI_BOLD, FONT_SMALL
+    global FONT_BODY, FONT_INPUT, FONT_DAY_NUM, FONT_DAY_BADGE, FONTS
+    FONTS = make_fonts(step)
+    FONT_BRAND = FONTS["brand"]
+    FONT_DISPLAY = FONTS["display"]
+    FONT_UI = FONTS["ui"]
+    FONT_UI_BOLD = FONTS["ui_bold"]
+    FONT_SMALL = FONTS["small"]
+    FONT_BODY = FONTS["body"]
+    FONT_INPUT = FONTS["input"]
+    FONT_DAY_NUM = FONTS["day_num"]
+    FONT_DAY_BADGE = FONTS["day_badge"]
+
 
 # Seoul-style day card accents (cycles per day)
 _DAY_ACCENTS = (
@@ -186,6 +242,115 @@ class GradientHeader(tk.Canvas):
             self.tag_raise(tw)
 
 
+class FontSizeSlider(tk.Canvas):
+    """Discrete A——A font slider (small A left, large A right)."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        steps: int = FONT_SCALE_STEPS,
+        value: int = DEFAULT_FONT_STEP,
+        command: Callable[[int], None] | None = None,
+        width: int = 220,
+        height: int = 36,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            master,
+            width=width,
+            height=height,
+            bg=C["paper"],
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+            **kwargs,
+        )
+        self._steps = max(2, int(steps))
+        self._value = max(0, min(self._steps - 1, int(value)))
+        self._command = command
+        self._dragging = False
+        self.bind("<Configure>", lambda _e: self._paint())
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.after(10, self._paint)
+
+    @property
+    def value(self) -> int:
+        return self._value
+
+    def set_value(self, step: int, *, notify: bool = False) -> None:
+        step = max(0, min(self._steps - 1, int(step)))
+        if step == self._value and not notify:
+            self._paint()
+            return
+        self._value = step
+        self._paint()
+        if notify and self._command:
+            self._command(self._value)
+
+    def _track_geom(self) -> tuple[float, float, float, float]:
+        w = max(self.winfo_width(), 2)
+        h = max(self.winfo_height(), 2)
+        left = 28.0
+        right = w - 28.0
+        y = h / 2
+        return left, right, y, w
+
+    def _step_from_x(self, x: float) -> int:
+        left, right, _y, _w = self._track_geom()
+        if right <= left:
+            return 0
+        t = (x - left) / (right - left)
+        t = max(0.0, min(1.0, t))
+        return int(round(t * (self._steps - 1)))
+
+    def _on_press(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        self._dragging = True
+        self.set_value(self._step_from_x(event.x), notify=True)
+
+    def _on_drag(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self._dragging:
+            self.set_value(self._step_from_x(event.x), notify=True)
+
+    def _on_release(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
+        self._dragging = False
+
+    def _paint(self, _event: object | None = None) -> None:
+        self.delete("all")
+        left, right, y, w = self._track_geom()
+        h = max(self.winfo_height(), 2)
+        # End labels: small A / large A
+        self.create_text(
+            12,
+            y,
+            text="A",
+            fill="#A8B4BE",
+            font=("Segoe UI", 10),
+        )
+        self.create_text(
+            w - 12,
+            y,
+            text="A",
+            fill="#A8B4BE",
+            font=("Segoe UI", 18, "bold"),
+        )
+        # Track
+        self.create_line(left, y, right, y, fill="#6E7A84", width=2, capstyle=tk.ROUND)
+        # Step dots
+        for i in range(self._steps):
+            t = i / (self._steps - 1)
+            x = left + (right - left) * t
+            r = 3.2
+            self.create_oval(x - r, y - r, x + r, y + r, fill="#6E7A84", outline="")
+        # Thumb
+        t = self._value / (self._steps - 1)
+        x = left + (right - left) * t
+        self.create_oval(x - 8, y - 8, x + 8, y + 8, fill="#FFFFFF", outline="#5A6570", width=1)
+        self.create_oval(x - 5.5, y - 5.5, x + 5.5, y + 5.5, fill="#FFFFFF", outline="")
+
+
 class PillButton(tk.Canvas):
     def __init__(
         self,
@@ -279,7 +444,7 @@ class Field(tk.Frame):
     def __init__(self, master: tk.Misc, label: str, textvariable: tk.StringVar) -> None:
         super().__init__(master, bg=C["paper"])
         tk.Label(
-            self, text=label.upper(), bg=C["paper"], fg=C["muted"], font=("Segoe UI", 8), anchor="w"
+            self, text=label.upper(), bg=C["paper"], fg=C["muted"], font=FONTS["tiny"], anchor="w"
         ).pack(fill="x", pady=(0, 4))
         shell = tk.Frame(self, bg=C["line"], padx=1, pady=1)
         shell.pack(fill="x")
@@ -371,7 +536,7 @@ class FlightRowCard(tk.Frame):
         dep = tk.Frame(out_row, bg="#FFFFFF")
         dep.grid(row=0, column=0, sticky="w")
         self.dep_time = tk.Label(
-            dep, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
+            dep, text="--:--", bg="#FFFFFF", fg="#111111", font=FONTS["time"]
         )
         self.dep_time.pack(anchor="w")
         self.dep_airport = tk.Label(
@@ -396,7 +561,7 @@ class FlightRowCard(tk.Frame):
         arr = tk.Frame(out_row, bg="#FFFFFF")
         arr.grid(row=0, column=2, sticky="e")
         self.arr_time = tk.Label(
-            arr, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
+            arr, text="--:--", bg="#FFFFFF", fg="#111111", font=FONTS["time"]
         )
         self.arr_time.pack(anchor="e")
         self.arr_airport = tk.Label(
@@ -443,7 +608,7 @@ class FlightRowCard(tk.Frame):
         rdep = tk.Frame(ret_row, bg="#FFFFFF")
         rdep.grid(row=0, column=0, sticky="w")
         self.ret_dep_time = tk.Label(
-            rdep, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
+            rdep, text="--:--", bg="#FFFFFF", fg="#111111", font=FONTS["time"]
         )
         self.ret_dep_time.pack(anchor="w")
         self.ret_dep_airport = tk.Label(
@@ -468,7 +633,7 @@ class FlightRowCard(tk.Frame):
         rarr = tk.Frame(ret_row, bg="#FFFFFF")
         rarr.grid(row=0, column=2, sticky="e")
         self.ret_arr_time = tk.Label(
-            rarr, text="--:--", bg="#FFFFFF", fg="#111111", font=("Segoe UI Semibold", 15)
+            rarr, text="--:--", bg="#FFFFFF", fg="#111111", font=FONTS["time"]
         )
         self.ret_arr_time.pack(anchor="e")
         self.ret_arr_airport = tk.Label(
@@ -485,7 +650,7 @@ class FlightRowCard(tk.Frame):
             text="—",
             bg="#FFFFFF",
             fg=C["trip_blue"],
-            font=("Segoe UI Semibold", 14),
+            font=FONTS["price"],
         )
         self.price.pack(anchor="w")
         self.trip_lbl = tk.Label(
@@ -677,7 +842,7 @@ class FlightRowCard(tk.Frame):
                 text=text,
                 bg="#FFFFFF",
                 fg=C["badge_teal"],
-                font=("Segoe UI", 8),
+                font=FONTS["tiny"],
                 padx=7,
                 pady=2,
             ).pack()
@@ -773,12 +938,12 @@ class HotelRowCard(tk.Frame):
             text="Hotel",
             bg="#FFFFFF",
             fg=C["trip_blue"],
-            font=("Segoe UI Semibold", 13),
+            font=FONTS["hotel_name"],
             anchor="w",
         )
         self.name_lbl.pack(side="left")
         self.stars_lbl = tk.Label(
-            left_h, text="", bg="#FFFFFF", fg="#E6A800", font=("Segoe UI", 11), anchor="w"
+            left_h, text="", bg="#FFFFFF", fg="#E6A800", font=FONT_UI, anchor="w"
         )
         self.stars_lbl.pack(side="left", padx=(8, 0))
 
@@ -791,7 +956,7 @@ class HotelRowCard(tk.Frame):
         )
         self.score_word.pack(anchor="e")
         self.reviews_lbl = tk.Label(
-            score_txt, text="", bg="#FFFFFF", fg=C["muted"], font=("Segoe UI", 8)
+            score_txt, text="", bg="#FFFFFF", fg=C["muted"], font=FONTS["tiny"]
         )
         self.reviews_lbl.pack(anchor="e")
         self.score_badge = tk.Label(
@@ -799,7 +964,7 @@ class HotelRowCard(tk.Frame):
             text="—",
             bg="#1B3A6B",
             fg="#FFFFFF",
-            font=("Segoe UI Semibold", 12),
+            font=FONTS["ui_bold"],
             padx=8,
             pady=4,
         )
@@ -848,7 +1013,7 @@ class HotelRowCard(tk.Frame):
         )
         self.beds_lbl.pack(anchor="w")
         self.social_lbl = tk.Label(
-            room_txt, text="", bg="#FFFFFF", fg="#4A5560", font=("Segoe UI", 8), anchor="w"
+            room_txt, text="", bg="#FFFFFF", fg="#4A5560", font=FONTS["tiny"], anchor="w"
         )
         self.social_lbl.pack(anchor="w", pady=(4, 0))
 
@@ -859,7 +1024,7 @@ class HotelRowCard(tk.Frame):
             text="—",
             bg="#FFFFFF",
             fg=C["trip_blue"],
-            font=("Segoe UI Semibold", 16),
+            font=FONTS["price"],
         )
         self.price_lbl.pack(anchor="e")
         self.total_lbl = tk.Label(
@@ -867,7 +1032,7 @@ class HotelRowCard(tk.Frame):
             text="",
             bg="#FFFFFF",
             fg=C["muted"],
-            font=("Segoe UI", 8),
+            font=FONTS["tiny"],
             wraplength=120,
             justify="right",
         )
@@ -929,7 +1094,7 @@ class HotelRowCard(tk.Frame):
             18,
             text=(title[:18] if title else "Hotel"),
             fill="#FFFFFF",
-            font=("Segoe UI", 8),
+            font=FONTS["tiny"],
         )
 
     def _set_hotel_photo(self, offer: HotelOffer) -> None:
@@ -1031,13 +1196,15 @@ class TravelAgentApp(tk.Tk):
         self._browser_jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self._browser_thread: threading.Thread | None = None
         self._timetable_thumb_cache: dict[str, tk.PhotoImage] = {}
+        self._font_step = DEFAULT_FONT_STEP
+        apply_font_globals(self._font_step)
 
         self.title("Voyage — Trip.Planner-style Travel Agent")
         self.geometry("1080x780")
         self.minsize(880, 600)
         self.configure(bg=C["paper"])
         try:
-            self.tk.call("tk", "scaling", 1.12)
+            self.tk.call("tk", "scaling", 1.18)
         except tk.TclError:
             pass
 
@@ -1053,6 +1220,15 @@ class TravelAgentApp(tk.Tk):
             primary=False,
             width=160,
         ).pack(side="right")
+        self.font_slider = FontSizeSlider(
+            top_bar,
+            steps=FONT_SCALE_STEPS,
+            value=self._font_step,
+            command=self._on_font_scale,
+            width=230,
+            height=34,
+        )
+        self.font_slider.pack(side="right", padx=(0, 16))
         self.step_label = tk.Label(
             top_bar,
             text="Step 1 of 3 — Destination",
@@ -1094,6 +1270,81 @@ class TravelAgentApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._boot_agent)
         self.after(200, self._enable_page_scroll)
+
+    def _on_font_scale(self, step: int) -> None:
+        old = self._font_step
+        if step == old:
+            return
+        old_f = _font_factor(old)
+        new_f = _font_factor(step)
+        self._font_step = step
+        apply_font_globals(step)
+        ratio = new_f / max(old_f, 0.01)
+        self._rescale_widget_fonts(self, ratio)
+        try:
+            self.header._paint()
+        except Exception:
+            pass
+        # Re-render itinerary cards so day/timetable fonts pick up new globals
+        if self._last_plan and self.results.winfo_ismapped():
+            try:
+                parsed = self._apply_booking_urls(parse_itinerary(self._last_plan))
+                parsed = self._ensure_days(parsed)
+                self._render_parsed(parsed)
+            except Exception:
+                pass
+        self.after(30, self._on_page_body_configure)
+
+    def _rescale_widget_fonts(self, widget: tk.Misc, ratio: float) -> None:
+        """Multiply existing widget font sizes by ratio (skip canvases)."""
+        try:
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            if isinstance(child, FontSizeSlider):
+                child._paint()
+                continue
+            if isinstance(child, (tk.Canvas,)):
+                # Pill buttons / logos redraw via their own paint when possible
+                paint = getattr(child, "_paint", None)
+                if callable(paint):
+                    try:
+                        paint()
+                    except Exception:
+                        pass
+                self._rescale_widget_fonts(child, ratio)
+                continue
+            try:
+                current = str(child.cget("font"))
+            except tk.TclError:
+                current = ""
+            if current:
+                try:
+                    actual = child.tk.call("font", "actual", current)
+                    fam = "Segoe UI"
+                    size = 11
+                    weight = "normal"
+                    slant = "roman"
+                    if isinstance(actual, (list, tuple)):
+                        opts = {
+                            str(actual[i]): actual[i + 1]
+                            for i in range(0, len(actual) - 1, 2)
+                        }
+                        fam = str(opts.get("-family", fam))
+                        size = int(float(opts.get("-size", size)))
+                        weight = str(opts.get("-weight", weight))
+                        slant = str(opts.get("-slant", slant))
+                    new_size = max(8, int(round(abs(size) * ratio)))
+                    parts: list[Any] = [fam, new_size]
+                    if weight == "bold":
+                        parts.append("bold")
+                    if slant == "italic":
+                        parts.append("italic")
+                    child.configure(font=tuple(parts))
+                except Exception:
+                    pass
+            self._rescale_widget_fonts(child, ratio)
 
     def _on_page_body_configure(self, _event: object | None = None) -> None:
         self._page_canvas.configure(scrollregion=self._page_canvas.bbox("all"))
@@ -1597,6 +1848,34 @@ class TravelAgentApp(tk.Tk):
         except Exception:
             return None
 
+    def _draw_down_arrow_icon(self, parent: tk.Misc, *, color: str, size: int = 18) -> tk.Canvas:
+        """Small canvas arrow icon (shaft + chevron head) for transfer rows."""
+        canvas = tk.Canvas(
+            parent,
+            width=size,
+            height=size + 4,
+            bg="#FFFFFF",
+            highlightthickness=0,
+            bd=0,
+        )
+        cx = size // 2
+        top = 2
+        tip = size + 1
+        # vertical shaft
+        canvas.create_line(cx, top, cx, tip - 5, fill=color, width=2, capstyle=tk.ROUND)
+        # arrow head
+        canvas.create_polygon(
+            cx,
+            tip,
+            cx - 5,
+            tip - 7,
+            cx + 5,
+            tip - 7,
+            fill=color,
+            outline=color,
+        )
+        return canvas
+
     def _add_day_card(self, day: object, *, index: int = 0) -> None:
         """Seoul-itinerary style: big day number, DAY badge, list, dark footer."""
         title = getattr(day, "title", "Day") or "Day"
@@ -1662,7 +1941,7 @@ class TravelAgentApp(tk.Tk):
                 text=day_date,
                 bg="#FFFFFF",
                 fg=C["ink"],
-                font=("Segoe UI Semibold", 11),
+                font=FONT_UI_BOLD,
                 anchor="w",
             ).pack(side="left", padx=(12, 0), pady=(10, 0))
         tk.Label(
@@ -1693,14 +1972,35 @@ class TravelAgentApp(tk.Tk):
             text="TIMETABLE",
             bg="#FFFFFF",
             fg=accent,
-            font=("Segoe UI Semibold", 8),
+            font=FONT_DAY_BADGE,
             anchor="w",
         ).pack(fill="x", pady=(0, 6))
 
-        for line in activities[:10]:
-            tm = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)\s+(.*)$", line)
+        for line in activities[:16]:
+            transfer = re.match(r"^↓\s*(.+?)\s*·\s*~?(\d+)\s*min\.?$", line.strip())
+            if not transfer:
+                # tolerate "↓ Method ~12 min" without middle dot
+                transfer = re.match(r"^↓\s*(.+?)\s+~?(\d+)\s*min\.?$", line.strip())
             row = tk.Frame(body_frame, bg="#FFFFFF")
             row.pack(fill="x", pady=2)
+            if transfer:
+                method = transfer.group(1).strip()
+                mins = transfer.group(2).strip()
+                link = tk.Frame(row, bg="#FFFFFF")
+                link.pack(fill="x", padx=(34, 0), pady=(2, 4))
+                arrow = self._draw_down_arrow_icon(link, color=accent, size=16)
+                arrow.pack(side="left", padx=(0, 8))
+                tk.Label(
+                    link,
+                    text=f"{method}  ·  ~{mins} min",
+                    bg="#FFFFFF",
+                    fg=C["ink_soft"],
+                    font=FONT_SMALL,
+                    anchor="w",
+                ).pack(side="left")
+                continue
+
+            tm = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)\s+(.*)$", line)
             if tm:
                 time_txt = f"{int(tm.group(1)):02d}:{tm.group(2)}"
                 detail = tm.group(3).strip()
@@ -1722,7 +2022,7 @@ class TravelAgentApp(tk.Tk):
                     text=detail,
                     bg="#FFFFFF",
                     fg="#1A1A1A",
-                    font=("Segoe UI", 10),
+                    font=FONT_BODY,
                     justify="left",
                     anchor="w",
                     wraplength=340,
@@ -1740,7 +2040,7 @@ class TravelAgentApp(tk.Tk):
                     text=line,
                     bg="#FFFFFF",
                     fg="#1A1A1A",
-                    font=("Segoe UI", 10),
+                    font=FONT_BODY,
                     justify="left",
                     anchor="w",
                     wraplength=480,
