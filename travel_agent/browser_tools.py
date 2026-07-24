@@ -186,6 +186,16 @@ _CITY_STAY_FALLBACKS: dict[str, dict[str, str]] = {
         "image_query": "Piccadilly Circus London",
         "features": "West End · Piccadilly Circus · compact city stay",
     },
+    "miami": {
+        "name": "The Confidante Miami Beach",
+        "image_query": "Miami Beach hotel oceanfront",
+        "features": "Miami Beach · Art Deco · oceanfront",
+    },
+    "orlando": {
+        "name": "Universal's Cabana Bay Beach Resort",
+        "image_query": "Orlando hotel resort pool",
+        "features": "Near Universal · family resort · pool",
+    },
 }
 
 
@@ -227,6 +237,8 @@ def _build_suggested_day_flow(
     destination: str = "",
     attractions: list[str] | None = None,
     regional_route: object | None = None,
+    arrive_time: str = "",
+    return_depart_time: str = "",
 ) -> str:
     """Emit one Day N block per trip day with named sights and meals."""
     from travel_agent.destination_guides import (
@@ -247,7 +259,12 @@ def _build_suggested_day_flow(
     lines: list[str] = []
     for i, idea in enumerate(ideas, start=1):
         lines.append(format_day_title(idea, i) + ":")
-        for bullet in format_day_body(idea).splitlines():
+        body = format_day_body(
+            idea,
+            arrive_time=arrive_time if i == 1 else "",
+            return_depart_time=return_depart_time if i == n else "",
+        )
+        for bullet in body.splitlines():
             lines.append(bullet.replace("• ", "- ", 1) if bullet.startswith("• ") else f"- {bullet}")
     return "\n".join(lines)
 
@@ -481,6 +498,8 @@ class TripBrowser:
         self.last_hotel_list_url: str = ""
         # Preferred booking link: a specific hotel detail page (hotelId=…)
         self.last_hotel_detail_url: str = ""
+        # Real hotel title scraped from that detail page
+        self.last_hotel_name: str = ""
         self.last_proposed_route: object | None = None
         self.last_flight_card: dict[str, str] = {}
         # Frozen after plan_trip so later search_flights calls cannot wipe open-jaw times
@@ -1109,11 +1128,22 @@ class TripBrowser:
                 or detail_links[0]
             )
             detail_links[0] = rec_detail
-        self.last_hotel_detail_url = rec_detail if is_trusted_hotel_detail_url(rec_detail) else ""
+        if not is_trusted_hotel_detail_url(rec_detail):
+            built = self._resolve_top_hotel_detail_url(
+                checkin=checkin, checkout=checkout, adults=adults_n, rooms=rooms_n
+            )
+            if built:
+                rec_detail = built
+                if detail_links:
+                    detail_links[0] = built
+                else:
+                    detail_links.append(built)
+        self.last_hotel_detail_url = (
+            rec_detail if is_trusted_hotel_detail_url(rec_detail) else ""
+        )
+        self.last_hotel_name = ""
 
-        # Booking link = hotel detail page (not the search list)
-        booking_url = self.last_hotel_detail_url or list_url
-        details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
+        # Open the detail page to get the real hotel name (+ image)
         rec_name = hotel_names[0] if hotel_names else ""
         hotel_card = self._scrape_top_hotel_card(
             city=city_name,
@@ -1122,23 +1152,41 @@ class TripBrowser:
         )
         if hotel_card.get("name") and not rec_name:
             rec_name = hotel_card["name"]
+
+        if self.last_hotel_detail_url:
+            meta = self._scrape_hotel_detail_meta(self.last_hotel_detail_url)
+            if meta.get("name") and _hotel_name_plausible_for_city(meta["name"], city_name):
+                rec_name = meta["name"]
+                self.last_hotel_name = rec_name
+                hotel_card["name"] = rec_name
+            elif rec_name and _hotel_name_plausible_for_city(rec_name, city_name):
+                if not rec_name.lower().startswith(("hotels in ", "recommended hotel")):
+                    self.last_hotel_name = rec_name
+            if meta.get("image_url") and not hotel_card.get("image_url"):
+                hotel_card["image_url"] = meta["image_url"]
+            if meta.get("score") and not hotel_card.get("score"):
+                hotel_card["score"] = meta["score"]
+                hotel_card["score_label"] = meta.get("score_label", "")
+            if meta.get("stars") and not hotel_card.get("stars"):
+                hotel_card["stars"] = meta["stars"]
+        elif rec_name and _hotel_name_plausible_for_city(rec_name, city_name):
+            if not rec_name.lower().startswith(("hotels in ", "recommended hotel")):
+                self.last_hotel_name = rec_name
+
+        # Booking link = hotel detail page (not the search list)
+        booking_url = self.last_hotel_detail_url or list_url
+        details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
         card_block = ""
         if hotel_card:
-            if rec_detail and not hotel_card.get("image_url"):
-                # Scrape image from detail, then return to list for plan_trip continuity
-                list_before = page.url or list_url
-                img = self.scrape_hotel_image_url(rec_detail)
+            if self.last_hotel_detail_url and not hotel_card.get("image_url"):
+                img = self.scrape_hotel_image_url(self.last_hotel_detail_url)
                 if img:
                     hotel_card["image_url"] = img
-                if self._hotel_list_url_ok(list_before):
-                    try:
-                        self._safe_goto(list_before)
-                        page.wait_for_timeout(1500)
-                    except Exception:
-                        pass
+            # Prefer the scraped listing title in the structured card
+            display_name = self.last_hotel_name or hotel_card.get("name") or rec_name
             card_block = (
                 "Structured hotel card:\n"
-                f"- Hotel: {hotel_card.get('name', rec_name)}\n"
+                f"- Hotel: {display_name}\n"
                 f"- Stars: {hotel_card.get('stars', '')}\n"
                 f"- Score: {hotel_card.get('score', '')}\n"
                 f"- Location: {hotel_card.get('location', city_name)}\n"
@@ -1150,6 +1198,7 @@ class TripBrowser:
                 + f"- Nightly: {hotel_card.get('price_label', '')}\n"
                 + f"- Reviews: {hotel_card.get('reviews', '')}\n"
             )
+            rec_name = display_name or rec_name
 
         content = body if prices and len(body) > 200 else snippet
         how = (
@@ -1171,12 +1220,104 @@ class TripBrowser:
             f"Hotel list URL: {list_url}\n"
             f"{price_note}\n"
             + (f"Recommended hotel name: {rec_name}\n" if rec_name else "")
-            + (f"Recommended hotel detail link: {rec_detail}\n" if rec_detail else "")
+            + (
+                f"Recommended hotel detail link: {self.last_hotel_detail_url}\n"
+                if self.last_hotel_detail_url
+                else ""
+            )
             + (f"{details}\n" if details else "")
             + (f"{card_block}\n" if card_block else "")
             + f"\n{content}",
             limit=9000,
         )
+
+    def _scrape_hotel_detail_meta(self, detail_url: str) -> dict[str, str]:
+        """Open a hotel detail page and read name / score / cover image."""
+        page = self._require_page()
+        out: dict[str, str] = {}
+        if not detail_url or "trip.com" not in detail_url.lower():
+            return out
+        try:
+            self._safe_goto(detail_url)
+            page.wait_for_timeout(3200)
+            self._dismiss_popups()
+        except Exception:
+            return out
+
+        # Confirm we landed on a detail/book page with hotelId
+        try:
+            cur = page.url or ""
+        except Exception:
+            cur = detail_url
+        from travel_agent.trip_urls import is_trusted_hotel_detail_url
+
+        if is_trusted_hotel_detail_url(cur):
+            # Prefer the live navigated URL (Trip.com may rewrite path)
+            self.last_hotel_detail_url = ensure_locale_curr(normalize_trip_url(cur))
+        elif is_trusted_hotel_detail_url(detail_url):
+            self.last_hotel_detail_url = ensure_locale_curr(normalize_trip_url(detail_url))
+
+        # Name: og:title, then h1, then document title
+        name = ""
+        try:
+            og = page.locator("meta[property='og:title']")
+            if og.count():
+                name = (og.first.get_attribute("content") or "").strip()
+        except Exception:
+            name = ""
+        if not name:
+            try:
+                h1 = page.locator("h1").first
+                if h1.count():
+                    name = (h1.inner_text(timeout=1500) or "").strip()
+            except Exception:
+                pass
+        if not name:
+            try:
+                name = (page.title() or "").strip()
+            except Exception:
+                name = ""
+        # Clean Trip.com suffixes: "Foo Hotel | Trip.com" / "Foo - Miami"
+        if name:
+            name = re.split(r"\s*[|\u2013\u2014]\s*", name)[0].strip()
+            name = re.sub(r"\s+[-–—]\s+(Trip\.com|Hotels?).*$", "", name, flags=re.I)
+            name = re.sub(r"\s+", " ", name).strip()
+            if (
+                name
+                and 3 < len(name) < 90
+                and "http" not in name.lower()
+                and not name.lower().startswith(("hotels in ", "recommended hotel"))
+            ):
+                out["name"] = name
+
+        try:
+            og_img = page.locator("meta[property='og:image']")
+            if og_img.count():
+                content = (og_img.first.get_attribute("content") or "").strip()
+                if content.startswith("http"):
+                    out["image_url"] = _prefer_hotel_photo_url(content)
+        except Exception:
+            pass
+
+        try:
+            body = page.inner_text("body")[:4000]
+        except Exception:
+            body = ""
+        score_m = re.search(r"\b([89](?:\.\d)?|10(?:\.0)?)\b", body)
+        if score_m:
+            out["score"] = score_m.group(1)
+            try:
+                val = float(out["score"])
+                out["score_label"] = (
+                    "Great" if val >= 9 else "Very Good" if val >= 8 else "Good"
+                )
+            except ValueError:
+                out["score_label"] = "Guest rating"
+        stars_m = re.search(r"(?i)([1-5])\s*[- ]?star", body)
+        if stars_m:
+            out["stars"] = stars_m.group(1)
+
+        return out
 
     def _resolve_top_hotel_detail_url(
         self,
@@ -2496,19 +2637,30 @@ class TripBrowser:
                     else f"Stay · {hotel_city}"
                 ),
                 "name": (
-                    stay0_card.get("name")
-                    if stay0_card.get("name")
-                    and _hotel_name_plausible_for_city(stay0_card["name"], hotel_city)
-                    else (
+                    (getattr(self, "last_hotel_name", "") or "").strip()
+                    or (
+                        stay0_card.get("name")
+                        if stay0_card.get("name")
+                        and _hotel_name_plausible_for_city(stay0_card["name"], hotel_city)
+                        and not stay0_card["name"].lower().startswith(
+                            ("hotels in ", "recommended hotel")
+                        )
+                        else ""
+                    )
+                    or (
                         recommended_hotel_names[0]
                         if recommended_hotel_names
-                        else f"Hotels in {hotel_city}"
+                        else ""
                     )
+                    or f"Hotels in {hotel_city}"
                 ),
                 "url": (
-                    recommended_hotel_detail_links[0]
-                    if recommended_hotel_detail_links
-                    else recommended_hotel_url
+                    (getattr(self, "last_hotel_detail_url", "") or "").strip()
+                    or (
+                        recommended_hotel_detail_links[0]
+                        if recommended_hotel_detail_links
+                        else recommended_hotel_url
+                    )
                 ),
                 "price_label": f"HK${hotel_low:,.0f}" if hotel_low is not None else "",
                 "total_label": (
@@ -2673,6 +2825,8 @@ class TripBrowser:
             destination=hotel_city or destination,
             attractions=attractions or None,
             regional_route=regional,
+            arrive_time=flight_card_fields.get("flight_arrive", "") or "",
+            return_depart_time=flight_card_fields.get("flight_return_depart", "") or "",
         )
         sections.append(
             f"""{n}) SUGGESTED DAY FLOW
@@ -3568,26 +3722,38 @@ Transport modes: {", ".join(modes)}
             lowest=float(nightly) if nightly is not None else None,
         )
         card_name = card.get("name") or ""
-        if card_name and _hotel_name_plausible_for_city(card_name, stay_city):
+        live_name = (getattr(self, "last_hotel_name", "") or "").strip()
+        if live_name and not live_name.lower().startswith(
+            ("hotels in ", "recommended hotel")
+        ):
+            stay_rec["name"] = live_name
+        elif card_name and _hotel_name_plausible_for_city(card_name, stay_city):
             # Prefer a real listing title over the generic "Hotels in …"
-            if not card_name.lower().startswith("hotels in "):
+            if not card_name.lower().startswith(("hotels in ", "recommended hotel")):
                 stay_rec["name"] = card_name
         elif name:
             stay_rec["name"] = name
+
+        # Prefer detail URL from this search
+        if getattr(self, "last_hotel_detail_url", ""):
+            stay_rec["url"] = self.last_hotel_detail_url
+        elif detail:
+            stay_rec["url"] = detail
 
         for k in ("score", "score_label", "stars", "reviews", "price_label"):
             if card.get(k):
                 stay_rec[k] = card[k]
 
         img = card.get("image_url") or ""
+        detail_for_img = stay_rec.get("url") or detail
         # Reject LoremFlickr-looking tiny/generic if we can get a real detail photo
-        if detail and (
+        if detail_for_img and (
             not img
             or "loremflickr" in img.lower()
-            or stay_rec["name"].lower().startswith("hotels in ")
+            or stay_rec["name"].lower().startswith(("hotels in ", "recommended hotel"))
         ):
             try:
-                detail_img = self.scrape_hotel_image_url(detail)
+                detail_img = self.scrape_hotel_image_url(detail_for_img)
             except Exception:
                 detail_img = ""
             if detail_img:
@@ -3604,9 +3770,11 @@ Transport modes: {", ".join(modes)}
             img = _city_hotel_fallback_image(stay_city)
         stay_rec["image_url"] = img
 
-        # Still generic? use curated city hotel
-        if stay_rec["name"].lower().startswith("hotels in "):
-            stay_rec["name"] = fb["name"]
+        # Still generic? use curated city hotel name only (keep detail URL)
+        if stay_rec["name"].lower().startswith(("hotels in ", "recommended hotel")):
+            curated = (fb.get("name") or "").strip()
+            if curated and not curated.lower().startswith("recommended hotel"):
+                stay_rec["name"] = curated
             if not stay_rec.get("features"):
                 stay_rec["features"] = fb.get("features", "")
             if "loremflickr" in (stay_rec.get("image_url") or "").lower() or not stay_rec.get(

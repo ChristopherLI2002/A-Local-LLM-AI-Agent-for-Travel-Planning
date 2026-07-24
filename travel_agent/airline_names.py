@@ -193,18 +193,76 @@ def airline_name_to_code(name: str) -> str:
     if _AIRLINE_RE.search(text):
         token = _AIRLINE_RE.search(text)
         if token:
-            cand = token.group(1).upper()
-            if len(cand) == 2 and cand in AIRLINE_CODE_MAP:
-                return cand
+            cand = (token.group(1) or "").strip()
+            if len(cand) == 2 and cand.upper() in AIRLINE_CODE_MAP:
+                return cand.upper()
+            alias = _AIRLINE_NAME_ALIASES.get(cand.lower())
+            if alias:
+                return alias
+            for code, full in AIRLINE_CODE_MAP.items():
+                if full.lower() == cand.lower():
+                    return code
     return ""
 
 
+def split_airline_names(airline: str) -> list[str]:
+    """Split \"Cathay Pacific, American Airlines\" into distinct carrier names."""
+    text = (airline or "").strip()
+    if not text:
+        return []
+
+    found: list[str] = []
+    # Prefer known airline name matches (handles joint labels)
+    for m in _AIRLINE_RE.finditer(text):
+        token = (m.group(1) or "").strip()
+        if not token:
+            continue
+        full = expand_airline_code(token)
+        if full and full not in found:
+            found.append(full)
+    if found:
+        return found
+
+    # Fallback: comma / slash / ampersand separators
+    parts = re.split(r"\s*[,/&+]+\s*|\s+/\s+|\s+and\s+", text, flags=re.I)
+    for part in parts:
+        part = part.strip(" ·|-")
+        if not part or not is_plausible_airline_name(part):
+            continue
+        full = expand_airline_code(part)
+        if full and full not in found:
+            found.append(full)
+    return found or ([text] if is_plausible_airline_name(text) else [])
+
+
+def airline_logo_urls(airline: str) -> list[str]:
+    """Trip.com CDN logo URLs for every carrier in a multi-airline string."""
+    names = split_airline_names(airline)
+    if not names and (airline or "").strip():
+        names = [airline.strip()]
+    urls: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        code = airline_name_to_code(name)
+        if not code:
+            code = airline_name_to_code(name.split(",")[0].strip())
+        if not code:
+            continue
+        url = (
+            "https://static.tripcdn.com/packages/flight/airline-logo/latest/"
+            f"airline_logo/3x/{code.lower()}.png"
+        )
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
 def airline_logo_url(airline: str) -> str:
-    """Trip.com CDN URL for a carrier logo (PNG, 3x)."""
-    code = airline_name_to_code(airline)
-    if not code:
-        return ""
-    return (
-        "https://static.tripcdn.com/packages/flight/airline-logo/latest/"
-        f"airline_logo/3x/{code.lower()}.png"
-    )
+    """Trip.com CDN URL for a carrier logo (PNG, 3x).
+
+    For multi-carrier strings (\"A, B\"), returns the first carrier's logo.
+    Prefer ``airline_logo_urls`` when painting stacked icons.
+    """
+    urls = airline_logo_urls(airline)
+    return urls[0] if urls else ""

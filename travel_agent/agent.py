@@ -274,6 +274,13 @@ class TravelAgent:
                         self.booking_links["hotel"] = live_detail
                 if found.get("hotel_name"):
                     self.booking_links["hotel_name"] = found["hotel_name"]
+                live_name = (
+                    getattr(self.browser, "last_hotel_name", "") or ""
+                ).strip()
+                if live_name and not live_name.lower().startswith(
+                    ("hotels in ", "recommended hotel")
+                ):
+                    self.booking_links["hotel_name"] = live_name
                 if found.get("flight_price"):
                     self.booking_links["flight_price"] = found["flight_price"]
                 if found.get("flight_option"):

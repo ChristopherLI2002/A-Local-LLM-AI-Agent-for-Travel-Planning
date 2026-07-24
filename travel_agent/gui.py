@@ -16,11 +16,16 @@ from io import BytesIO
 from typing import Any
 from tkinter import messagebox, scrolledtext
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from travel_agent.agent import TravelAgent
 from travel_agent.config import settings
-from travel_agent.airline_names import airline_logo_url, is_plausible_airline_name
+from travel_agent.airline_names import (
+    airline_logo_url,
+    airline_logo_urls,
+    is_plausible_airline_name,
+    split_airline_names,
+)
 from travel_agent.itinerary_parse import (
     FlightOffer,
     HotelOffer,
@@ -749,6 +754,7 @@ class FlightRowCard(tk.Frame):
         setattr(self, photo_attr, None)
         canvas.delete("all")
         sz = self._LOGO_SIZE
+        canvas.configure(width=sz, height=sz)
         cx = sz // 2
         # Soft rounded square (not the old triangle placeholder)
         pad = max(2, sz // 14)
@@ -782,6 +788,27 @@ class FlightRowCard(tk.Frame):
         )
         return urllib.request.urlopen(req, timeout=10).read()
 
+    def _decode_logo_tile(self, data: bytes, tile: int) -> Image.Image | None:
+        try:
+            if len(data) < 200:
+                return None
+            img = Image.open(BytesIO(data)).convert("RGBA")
+            pad = max(2, tile // 10)
+            box = tile - pad * 2
+            scale = min(box / max(img.width, 1), box / max(img.height, 1))
+            new_w = max(1, round(img.width * scale))
+            new_h = max(1, round(img.height * scale))
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            canvas_img = Image.new("RGBA", (tile, tile), (255, 255, 255, 0))
+            canvas_img.paste(
+                resized,
+                ((tile - new_w) // 2, (tile - new_h) // 2),
+                resized,
+            )
+            return canvas_img
+        except Exception:
+            return None
+
     def _load_logo_photo(
         self,
         *,
@@ -790,52 +817,66 @@ class FlightRowCard(tk.Frame):
         canvas: tk.Canvas,
         photo_attr: str,
     ) -> None:
-        initials = "".join(w[0] for w in airline.split()[:3] if w) or "TP"
-        # Prefer Trip.com CDN by IATA code — scraped URLs are often tiny/broken
-        cdn = airline_logo_url(airline).strip()
-        candidates = [u for u in (cdn, (logo_url or "").strip()) if u.startswith("http")]
-        # Dedupe while preserving order
-        seen: set[str] = set()
-        urls: list[str] = []
-        for u in candidates:
-            if u not in seen:
-                seen.add(u)
-                urls.append(u)
+        """Paint one or more airline logos (stacked like Trip.com for codeshares)."""
+        names = split_airline_names(airline) or (
+            [airline.strip()] if (airline or "").strip() else ["TP"]
+        )
+        # Collect CDN urls for every carrier; keep scraped url as last-resort for #1
+        urls = airline_logo_urls(airline)
+        scraped = (logo_url or "").strip()
+        if scraped.startswith("http") and scraped not in urls:
+            # Only append scraped if we have a single carrier and no CDN yet
+            if len(urls) <= 1:
+                urls = list(urls) + [scraped]
+
+        initials = "".join(
+            w[0] for w in re.sub(r"[,/&+]", " ", names[0]).split()[:2] if w
+        ) or "TP"
+
         if not urls:
             self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
             return
-        last_err: Exception | None = None
-        for url in urls:
+
+        tile = self._LOGO_SIZE
+        # Trip.com-style overlap: second logo offset down-right
+        overlap = max(10, tile // 3) if len(urls) > 1 else 0
+        n = min(len(urls), 3)
+        canvas_w = tile + overlap * (n - 1)
+        canvas_h = tile + overlap * (n - 1)
+        canvas.configure(width=canvas_w, height=canvas_h)
+        canvas.delete("all")
+
+        photos: list[tk.PhotoImage] = []
+        for i, url in enumerate(urls[:n]):
             try:
                 data = self._fetch_logo_bytes(url)
-                if len(data) < 200:
-                    continue
-                target = self._LOGO_SIZE
-                img = Image.open(BytesIO(data)).convert("RGBA")
-                # Fit inside square with padding so logos aren't clipped
-                pad = max(2, target // 10)
-                box = target - pad * 2
-                scale = min(box / max(img.width, 1), box / max(img.height, 1))
-                new_w = max(1, round(img.width * scale))
-                new_h = max(1, round(img.height * scale))
-                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                canvas_img = Image.new("RGBA", (target, target), (255, 255, 255, 0))
-                canvas_img.paste(
-                    resized,
-                    ((target - new_w) // 2, (target - new_h) // 2),
-                    resized,
-                )
-                photo = ImageTk.PhotoImage(canvas_img)
-                setattr(self, photo_attr, photo)
-                canvas.delete("all")
-                cx = target // 2
-                canvas.create_image(cx, cx, image=photo)
-                return
-            except Exception as exc:
-                last_err = exc
+            except Exception:
                 continue
-        _ = last_err
-        self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
+            tile_img = self._decode_logo_tile(data, tile)
+            if tile_img is None:
+                continue
+            # White disc behind each logo so overlapping edges stay clean
+            disc = Image.new("RGBA", (tile, tile), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(disc)
+            inset = 1
+            draw.ellipse(
+                (inset, inset, tile - 1 - inset, tile - 1 - inset),
+                fill=(255, 255, 255, 255),
+                outline=(220, 226, 232, 255),
+            )
+            disc.alpha_composite(tile_img)
+            photo = ImageTk.PhotoImage(disc)
+            photos.append(photo)
+            ox = i * overlap
+            oy = i * overlap
+            canvas.create_image(ox + tile // 2, oy + tile // 2, image=photo)
+
+        if not photos:
+            self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
+            return
+
+        # Keep references so Tk doesn't GC the images
+        setattr(self, photo_attr, photos[0] if len(photos) == 1 else photos)
 
     def _set_airline_logo(self, offer: FlightOffer) -> None:
         self._load_logo_photo(
@@ -849,7 +890,8 @@ class FlightRowCard(tk.Frame):
         airline = offer.return_airline or offer.airline
         self._load_logo_photo(
             airline=airline,
-            logo_url=offer.return_airline_logo or (offer.airline_logo if not offer.return_airline else ""),
+            logo_url=offer.return_airline_logo
+            or (offer.airline_logo if not offer.return_airline else ""),
             canvas=self.ret_logo,
             photo_attr="_ret_logo_photo",
         )
@@ -3007,30 +3049,69 @@ class TravelAgentApp(tk.Tk):
             city = (rec.get("city") or "").strip()
             name = (rec.get("name") or "").strip()
             low = name.lower()
-            bad = (
+            china_wrong = any(
+                m in low
+                for m in ("lishui", "high speed railway", "高铁", "火车站")
+            )
+            generic = (
                 not name
                 or low.startswith("hotels in ")
-                or any(
+                or low.startswith("recommended hotel")
+            )
+            live_name = ""
+            live_detail = ""
+            live_list = ""
+            if self.agent:
+                live_name = (
+                    getattr(self.agent.browser, "last_hotel_name", "") or ""
+                ).strip()
+                live_detail = (
+                    getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+                ).strip()
+                live_list = (
+                    getattr(self.agent.browser, "last_hotel_list_url", "") or ""
+                ).strip()
+                if not live_name:
+                    live_name = (self.agent.booking_links.get("hotel_name") or "").strip()
+
+            # Prefer the real Trip.com hotel title scraped from the detail page
+            if live_name and not live_name.lower().startswith(
+                ("hotels in ", "recommended hotel")
+            ):
+                rec["name"] = live_name
+                name = live_name
+                low = name.lower()
+                generic = False
+                china_wrong = any(
                     m in low
                     for m in ("lishui", "high speed railway", "高铁", "火车站")
                 )
-            )
-            if bad and city:
+
+            saved_url = (rec.get("url") or "").strip()
+            if (generic or china_wrong) and city:
                 fb = _fallback_stay_hotel(city)
-                rec["name"] = fb["name"]
-                if fb.get("features"):
-                    rec["features"] = fb["features"]
+                # Only replace with curated fallback when we still lack a real name
+                if generic and not live_name:
+                    curated = (fb.get("name") or "").strip()
+                    if curated and not curated.lower().startswith("recommended hotel"):
+                        rec["name"] = curated
+                    if fb.get("features") and not rec.get("features"):
+                        rec["features"] = fb["features"]
+                if china_wrong:
+                    # Drop wrong-region detail links only
+                    saved_url = ""
+                    rec["url"] = ""
                 if not (rec.get("image_url") or "").startswith("http") or "loremflickr" in (
                     rec.get("image_url") or ""
                 ).lower():
-                    rec["image_url"] = fb.get("image_url") or rec.get("image_url", "")
+                    if fb.get("image_url"):
+                        rec["image_url"] = fb["image_url"]
                 if not rec.get("stars"):
                     rec["stars"] = fb.get("stars", "4")
                 if not rec.get("score"):
                     rec["score"] = fb.get("score", "")
                     rec["score_label"] = fb.get("score_label", "")
-                # Drop wrong-city detail links when we reject the listing name
-                rec["url"] = ""
+
             if not (rec.get("image_url") or "").startswith("http"):
                 try:
                     from travel_agent.attraction_images import lookup_image
@@ -3041,19 +3122,10 @@ class TravelAgentApp(tk.Tk):
                 except Exception:
                     pass
 
-            # Prefer Playwright hotel detail; keep live list only as fallback
+            # Prefer Playwright hotel detail; never wipe a good detail URL for a generic name
             checkin = (rec.get("checkin") or "").strip()
             checkout = (rec.get("checkout") or "").strip()
-            raw_url = (rec.get("url") or "").strip()
-            live_detail = ""
-            live_list = ""
-            if self.agent:
-                live_detail = (
-                    getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
-                ).strip()
-                live_list = (
-                    getattr(self.agent.browser, "last_hotel_list_url", "") or ""
-                ).strip()
+            raw_url = (rec.get("url") or saved_url or "").strip()
             if is_trusted_hotel_detail_url(raw_url):
                 rec["url"] = (
                     canonicalize_hotel_detail_url(
@@ -3548,6 +3620,8 @@ class TravelAgentApp(tk.Tk):
             return (
                 not name
                 or name in {"Recommended hotel", "Hotel"}
+                or low.startswith("recommended hotel")
+                or low.startswith("hotels in ")
                 or name.startswith("#")
                 or "day-by-day" in low
                 or "sample hotel" in low
@@ -3558,7 +3632,10 @@ class TravelAgentApp(tk.Tk):
 
         if self.agent:
             links = self.agent.booking_links
-            cand = links.get("hotel_name") or ""
+            live_name = (
+                getattr(self.agent.browser, "last_hotel_name", "") or ""
+            ).strip()
+            cand = live_name or links.get("hotel_name") or ""
             if cand and not _bad_name(cand):
                 # Reject China rail-station hotels mapped onto Western cities
                 low = cand.lower()
@@ -3571,6 +3648,22 @@ class TravelAgentApp(tk.Tk):
                     offer.name = hotel_name
             elif hotel_name and not _bad_name(hotel_name):
                 offer.name = hotel_name
+            # Force detail booking URL when Playwright found one
+            live_detail = (
+                getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+            ).strip()
+            if live_detail and is_trusted_hotel_detail_url(live_detail):
+                offer.url = (
+                    canonicalize_hotel_detail_url(
+                        live_detail,
+                        checkin=offer.checkin or "",
+                        checkout=offer.checkout or "",
+                        city=offer.city or offer.location or dest or "",
+                    )
+                    or live_detail
+                )
+            elif links.get("hotel") and is_trusted_hotel_detail_url(links["hotel"]):
+                offer.url = links["hotel"]
             if links.get("hotel_price"):
                 offer.price_label = links["hotel_price"]
             if links.get("hotel_total"):
@@ -3727,16 +3820,21 @@ class TravelAgentApp(tk.Tk):
         except Exception:
             pass
         parsed = self._apply_booking_urls(parse_itinerary(text))
-        parsed = self._ensure_days(parsed)
-        # Paint flight card from the live scrape snapshot (airline / times / 2 links)
+        # Apply live flight times BEFORE building day cards (Day 1 must start after landing)
         live = dict(getattr(self, "_live_flight_card", None) or {})
         if not live.get("flight_depart") and self.agent:
             live = dict(
                 getattr(self.agent.browser, "last_plan_flight_card", None) or {}
             )
-        # Only replace the offer when we have real times — URL-only cards keep --:--
         if live.get("flight_depart"):
             parsed.flight_offer = self._flight_offer_from_live_card(live)
+            if self.agent and live.get("flight_arrive"):
+                self.agent.booking_links["flight_arrive"] = live["flight_arrive"]
+            if self.agent and live.get("flight_return_depart"):
+                self.agent.booking_links["flight_return_depart"] = live[
+                    "flight_return_depart"
+                ]
+        parsed = self._ensure_days(parsed)
         self._render_parsed(parsed)
         if parsed.flight_offer and parsed.flight_offer.depart_time not in {"", "--:--"}:
             self.flight_row.set_offer(parsed.flight_offer)
@@ -3784,6 +3882,24 @@ class TravelAgentApp(tk.Tk):
                 return
             offer = self._flight_offer_from_live_card(oj)
             self.flight_row.set_offer(offer)
+            # Rebuild Day 1 / departure day so sightseeing can't start before landing
+            if self.agent:
+                if oj.get("flight_arrive"):
+                    self.agent.booking_links["flight_arrive"] = oj["flight_arrive"]
+                if oj.get("flight_return_depart"):
+                    self.agent.booking_links["flight_return_depart"] = oj[
+                        "flight_return_depart"
+                    ]
+            if self._last_plan:
+                try:
+                    parsed = self._apply_booking_urls(parse_itinerary(self._last_plan))
+                    if oj.get("flight_depart"):
+                        parsed.flight_offer = offer
+                    parsed = self._ensure_days(parsed)
+                    self._render_parsed(parsed)
+                    self.flight_row.set_offer(offer)
+                except Exception:
+                    pass
             self._set_status("Flight card updated from Trip.com", C["ok"])
 
         self._set_status(
@@ -3815,10 +3931,25 @@ class TravelAgentApp(tk.Tk):
 
         arrive_time = ""
         return_depart_time = ""
+        # Prefer live scrape card (most accurate), then booking_links, then offer
+        live = dict(getattr(self, "_live_flight_card", None) or {})
+        if not live.get("flight_arrive") and self.agent:
+            live = dict(
+                getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            )
+        if live.get("flight_arrive") and live["flight_arrive"] not in {"", "--:--"}:
+            arrive_time = live["flight_arrive"].strip()
+        if live.get("flight_return_depart") and live["flight_return_depart"] not in {
+            "",
+            "--:--",
+        }:
+            return_depart_time = live["flight_return_depart"].strip()
         if self.agent:
             links = self.agent.booking_links
-            arrive_time = (links.get("flight_arrive") or "").strip()
-            return_depart_time = (links.get("flight_return_depart") or "").strip()
+            if not arrive_time:
+                arrive_time = (links.get("flight_arrive") or "").strip()
+            if not return_depart_time:
+                return_depart_time = (links.get("flight_return_depart") or "").strip()
         if parsed.flight_offer:
             if not arrive_time and parsed.flight_offer.arrive_time not in {"", "--:--"}:
                 arrive_time = parsed.flight_offer.arrive_time

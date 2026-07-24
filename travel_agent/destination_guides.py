@@ -896,7 +896,10 @@ def format_day_body(
     arrive_time: str = "",
     return_depart_time: str = "",
 ) -> str:
-    """Timetable with place rows and ↓ transfer legs (method + ETA)."""
+    """Timetable with place rows and ↓ transfer legs (method + ETA).
+
+    Arrival day never schedules activities before the flight lands.
+    """
     title_l = idea.title.lower()
     arrive = _parse_hhmm(arrive_time)
     ret_dep = _parse_hhmm(return_depart_time)
@@ -904,10 +907,9 @@ def format_day_body(
     if "arrival" in title_l:
         if arrive:
             land_h, land_m = arrive
-            t0 = _add_minutes(land_h, land_m, 0)
-            t1 = _add_minutes(land_h, land_m, 75)
-            t2 = _add_minutes(land_h, land_m, 105)
-            t3 = _add_minutes(land_h, land_m, 150)
+            land_mins = land_h * 60 + land_m
+            t0 = (land_h, land_m)
+            t1 = _add_minutes(land_h, land_m, 75)  # immigration + transfer
             slots: list[tuple[str, str]] = [
                 (_fmt_hhmm(*t0), "Land at airport"),
                 (_fmt_hhmm(*t1), "Hotel check-in and drop bags"),
@@ -917,41 +919,67 @@ def format_day_body(
                 if "observatory" in idea.also.lower() or "night" in idea.also.lower()
                 else idea.go
             )
-            if t2[0] < 23 or (t2[0] == 22 and t2[1] <= 45):
-                if t2[0] >= 21:
+            # Late evening arrival (≥18:00): short evening only — no daytime sightseeing
+            if land_mins >= 18 * 60:
+                dinner_at = _add_minutes(land_h, land_m, 105)
+                if dinner_at[0] < 23 or (dinner_at[0] == 22 and dinner_at[1] <= 45):
+                    meal = idea.dinner or "Easy dinner near the hotel"
+                    if land_mins >= 21 * 60:
+                        slots.append(
+                            (
+                                _fmt_hhmm(*_add_minutes(land_h, land_m, 90)),
+                                "Rest at hotel after the flight",
+                            )
+                        )
+                    else:
+                        slots.append((_fmt_hhmm(*dinner_at), meal))
+                else:
                     slots.append(
                         (
-                            _fmt_hhmm(*t2),
-                            f"Light neighborhood walk near hotel ({nearby.split(',')[0]})",
+                            _fmt_hhmm(*_add_minutes(land_h, land_m, 90)),
+                            "Rest at hotel after the flight",
                         )
                     )
-                else:
-                    slots.append((_fmt_hhmm(*t2), nearby))
-            # Morning/afternoon arrivals: include lunch before dinner
-            if t2[0] < 15:
-                t_lunch = _add_minutes(land_h, land_m, 180)
-                t_also = _add_minutes(land_h, land_m, 270)
-                t_dinner = _add_minutes(land_h, land_m, 540)
-                if idea.lunch:
-                    slots.append((_fmt_hhmm(*t_lunch), idea.lunch))
-                if idea.also and idea.also != nearby:
-                    slots.append((_fmt_hhmm(*t_also), idea.also))
-                if t_dinner[0] < 22 or (t_dinner[0] == 21):
-                    slots.append((_fmt_hhmm(*t_dinner), idea.dinner))
-            elif t3[0] < 23 or (t3[0] == 22 and t3[1] <= 50):
-                slots.append((_fmt_hhmm(*t3), idea.dinner))
-            if len(slots) < 3:
-                slots.append(
-                    (_fmt_hhmm(*_add_minutes(land_h, land_m, 90)), "Rest at hotel after the flight")
-                )
+            else:
+                t2 = _add_minutes(land_h, land_m, 105)
+                t3 = _add_minutes(land_h, land_m, 150)
+                if t2[0] < 23 or (t2[0] == 22 and t2[1] <= 45):
+                    if t2[0] >= 21:
+                        slots.append(
+                            (
+                                _fmt_hhmm(*t2),
+                                f"Light neighborhood walk near hotel ({nearby.split(',')[0]})",
+                            )
+                        )
+                    else:
+                        slots.append((_fmt_hhmm(*t2), nearby))
+                # Morning/afternoon arrivals: include lunch before dinner
+                if t2[0] < 15:
+                    t_lunch = _add_minutes(land_h, land_m, 180)
+                    t_also = _add_minutes(land_h, land_m, 270)
+                    t_dinner = _add_minutes(land_h, land_m, 540)
+                    if idea.lunch:
+                        slots.append((_fmt_hhmm(*t_lunch), idea.lunch))
+                    if idea.also and idea.also != nearby:
+                        slots.append((_fmt_hhmm(*t_also), idea.also))
+                    if t_dinner[0] < 22 or (t_dinner[0] == 21):
+                        slots.append((_fmt_hhmm(*t_dinner), idea.dinner))
+                elif t3[0] < 23 or (t3[0] == 22 and t3[1] <= 50):
+                    slots.append((_fmt_hhmm(*t3), idea.dinner))
+                if len(slots) < 3:
+                    slots.append(
+                        (
+                            _fmt_hhmm(*_add_minutes(land_h, land_m, 90)),
+                            "Rest at hotel after the flight",
+                        )
+                    )
         else:
+            # No live arrival yet — evening-leaning stub (never morning sightseeing)
             slots = [
-                ("11:00", "Land at airport"),
-                ("13:00", "Hotel check-in and drop bags"),
-                ("14:30", idea.go),
-                ("16:30", idea.lunch),
-                ("18:00", idea.also),
-                ("19:30", idea.dinner),
+                ("18:00", "Land at airport (time from flight card)"),
+                ("19:15", "Hotel check-in and drop bags"),
+                ("20:00", "Easy dinner near the hotel" if not idea.dinner else idea.dinner),
+                ("21:00", "Rest at hotel after the flight"),
             ]
     elif "departure" in title_l:
         if ret_dep:
