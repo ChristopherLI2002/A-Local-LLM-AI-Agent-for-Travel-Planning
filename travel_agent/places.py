@@ -91,6 +91,15 @@ _CITY_TO_CODE: dict[str, str] = {
     "la": "lax",
     "san diego": "san",
     "san": "san",
+    "miami": "mia",
+    "mia": "mia",
+    "orlando": "mco",
+    "mco": "mco",
+    "tampa": "tpa",
+    "tpa": "tpa",
+    "florida": "mia",  # default hub when region not expanded
+    "fl": "mia",
+    "fl usa": "mia",
     "vancouver": "yvr",
     "yvr": "yvr",
     "toronto": "yyz",
@@ -132,24 +141,31 @@ def normalize_place(value: str) -> str:
 
 
 def to_flight_code(value: str) -> str:
-    """Map a city/airport name or code to a Trip.com flight city code."""
+    """Map a city/airport name or code to a Trip.com flight city code (IATA)."""
     key = normalize_place(value)
     if not key:
         return ""
     if key in _CITY_TO_CODE:
         return _CITY_TO_CODE[key]
-    # Already a 3-letter code
+    # Already a known 3-letter IATA in our map
+    if re.fullmatch(r"[a-z]{3}", key) and key in _CITY_TO_CODE:
+        return _CITY_TO_CODE[key]
     if re.fullmatch(r"[a-z]{3}", key):
+        # Accept unknown 3-letter tokens as codes (Trip.com city codes)
         return key
-    # Try last token (e.g. "Paris France")
+    # Try tokens (e.g. "Miami Florida", "Paris France")
     parts = key.split()
     if len(parts) > 1:
-        for part in (parts[0], parts[-1]):
+        for part in parts:
             if part in _CITY_TO_CODE:
                 return _CITY_TO_CODE[part]
+            if re.fullmatch(r"[a-z]{3}", part) and part in _CITY_TO_CODE:
+                return _CITY_TO_CODE[part]
+        for part in parts:
             if re.fullmatch(r"[a-z]{3}", part):
                 return part
-    return key.replace(" ", "")
+    # Never return multi-letter junk like "florida" as an airport code
+    return ""
 
 
 # Trip.com hotel list requires numeric city= IDs (city names return 0 results).
@@ -165,9 +181,9 @@ _HOTEL_CITY_IDS: dict[str, tuple[str, str]] = {
     "tyo": ("228", "Tokyo"),
     "nrt": ("228", "Tokyo"),
     "hnd": ("228", "Tokyo"),
-    "osaka": ("60", "Osaka"),
-    "osa": ("60", "Osaka"),
-    "kix": ("60", "Osaka"),
+    "osaka": ("219", "Osaka"),
+    "osa": ("219", "Osaka"),
+    "kix": ("219", "Osaka"),
     "taipei": ("617", "Taipei"),
     "tpe": ("617", "Taipei"),
     "seoul": ("274", "Seoul"),
@@ -196,32 +212,47 @@ _HOTEL_CITY_IDS: dict[str, tuple[str, str]] = {
     "macau": ("59", "Macau"),
     "macao": ("59", "Macau"),
     "mfm": ("59", "Macau"),
-    "rome": ("213", "Rome"),
-    "rom": ("213", "Rome"),
-    "fco": ("213", "Rome"),
-    "barcelona": ("375", "Barcelona"),
-    "bcn": ("375", "Barcelona"),
-    "amsterdam": ("316", "Amsterdam"),
-    "ams": ("316", "Amsterdam"),
+    "rome": ("343", "Rome"),
+    "rom": ("343", "Rome"),
+    "fco": ("343", "Rome"),
+    "barcelona": ("40795", "Barcelona"),
+    "bcn": ("40795", "Barcelona"),
+    "amsterdam": ("176", "Amsterdam"),
+    "ams": ("176", "Amsterdam"),
     "dubai": ("220", "Dubai"),
     "dxb": ("220", "Dubai"),
-    "sydney": ("158", "Sydney"),
-    "syd": ("158", "Sydney"),
-    "melbourne": ("152", "Melbourne"),
-    "mel": ("152", "Melbourne"),
+    "sydney": ("501", "Sydney"),
+    "syd": ("501", "Sydney"),
+    "melbourne": ("358", "Melbourne"),
+    "mel": ("358", "Melbourne"),
+    # US city IDs verified against hk.trip.com /hotels/list titles
+    # (wrong IDs previously mapped SF→Lishui, Miami→Leshan, etc.)
     "los angeles": ("347", "Los Angeles"),
     "lax": ("347", "Los Angeles"),
     "la": ("347", "Los Angeles"),
-    "san francisco": ("346", "San Francisco"),
-    "sfo": ("346", "San Francisco"),
-    "california": ("346", "San Francisco"),
-    "ca": ("346", "San Francisco"),
-    "san diego": ("348", "San Diego"),
-    "san": ("348", "San Diego"),
+    "san francisco": ("313", "San Francisco"),
+    "sfo": ("313", "San Francisco"),
+    "california": ("313", "San Francisco"),
+    "ca": ("313", "San Francisco"),
+    "san diego": ("698", "San Diego"),
+    "san": ("698", "San Diego"),
+    "miami": ("25773", "Miami"),
+    "mia": ("25773", "Miami"),
+    "florida": ("25773", "Miami"),
+    "fl": ("25773", "Miami"),
+    "orlando": ("1187", "Orlando"),
+    "mco": ("1187", "Orlando"),
+    "tampa": ("1399", "Tampa"),
+    "tpa": ("1399", "Tampa"),
     "manila": ("364", "Manila"),
     "mnl": ("364", "Manila"),
-    "kuala lumpur": ("45", "Kuala Lumpur"),
-    "kul": ("45", "Kuala Lumpur"),
+    "kuala lumpur": ("315", "Kuala Lumpur"),
+    "kul": ("315", "Kuala Lumpur"),
+    "jakarta": ("524", "Jakarta"),
+    "jkt": ("524", "Jakarta"),
+    "bali": ("723", "Bali"),
+    "denpasar": ("723", "Bali"),
+    "dps": ("723", "Bali"),
 }
 
 

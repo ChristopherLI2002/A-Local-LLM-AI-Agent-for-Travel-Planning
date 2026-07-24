@@ -1373,6 +1373,7 @@ class TravelAgentApp(tk.Tk):
         self._show_wizard_step(1)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._set_status("Starting Ollama…", C["accent_deep"])
         self.after(120, self._boot_agent)
         self.after(200, self._enable_page_scroll)
 
@@ -2362,6 +2363,7 @@ class TravelAgentApp(tk.Tk):
             pass
         if self.agent:
             self.agent.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
+            self.agent.browser.last_proposed_route = None
 
         self._show_results()
         self.flight_row.set_loading("Comparing flights on Trip.com…")
@@ -2371,7 +2373,7 @@ class TravelAgentApp(tk.Tk):
         loading.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         tk.Label(
             loading,
-            text="Building your itinerary… this can take a few minutes.",
+            text="Building your itinerary… status updates appear at the top.",
             bg="#FFFFFF",
             fg=C["muted"],
             font=FONT_BODY,
@@ -2441,7 +2443,8 @@ class TravelAgentApp(tk.Tk):
             multi_stays = list(
                 getattr(self.agent.browser, "last_hotel_stays", None) or []
             )
-            if len(multi_stays) > 1:
+            # plan_trip already scraped hotels — don't run another slow hub search
+            if multi_stays:
                 pass
             elif not is_trusted_hotel_detail_url(self.agent.booking_links.get("hotel", "")):
                 if hotel_city and hotel_checkin:
@@ -2468,15 +2471,21 @@ class TravelAgentApp(tk.Tk):
                 if ctx.get("return_date"):
                     links["flight_return_date"] = ctx["return_date"]
             elif ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
-                dest_code = arrive or to_flight_code(ctx["destination"]).upper()
-                live_flight = fetch_flight_card(
-                    self.agent.browser,
-                    origin=ctx["origin"],
-                    destination=dest_code or ctx["destination"],
-                    depart_date=ctx["depart_date"],
-                    return_date=ctx.get("return_date") or checkout,
-                )
-                self._merge_live_flight(live_flight)
+                # Skip if plan_trip already populated flight card fields
+                if self.agent.booking_links.get("flight_airline") or self.agent.booking_links.get(
+                    "flight"
+                ):
+                    pass
+                else:
+                    dest_code = arrive or to_flight_code(ctx["destination"]).upper()
+                    live_flight = fetch_flight_card(
+                        self.agent.browser,
+                        origin=ctx["origin"],
+                        destination=dest_code or ctx["destination"],
+                        depart_date=ctx["depart_date"],
+                        return_date=ctx.get("return_date") or checkout,
+                    )
+                    self._merge_live_flight(live_flight)
         except Exception:
             pass
 
@@ -2838,12 +2847,30 @@ class TravelAgentApp(tk.Tk):
         if not offer:
             return
         ctx = self._trip_context
-        origin = to_flight_code(ctx.get("origin", "Hong Kong") or "Hong Kong").upper()
-        dest = (
-            (ctx.get("arrive_airport") or "").strip().upper()
-            or to_flight_code(ctx.get("destination", "") or "").upper()
+
+        def _iata(raw: str, *, fallback: str = "") -> str:
+            """Force airports to 3-letter IATA (never 'FLORIDA' / city names)."""
+            code = to_flight_code((raw or "").strip())
+            if code and re.fullmatch(r"[A-Za-z]{3}", code):
+                return code.upper()
+            fb = to_flight_code((fallback or "").strip())
+            if fb and re.fullmatch(r"[A-Za-z]{3}", fb):
+                return fb.upper()
+            only = re.sub(r"[^A-Za-z]", "", (raw or ""))
+            if re.fullmatch(r"[A-Za-z]{3}", only):
+                return only.upper()
+            return "—"
+
+        origin = _iata(ctx.get("origin", "Hong Kong") or "Hong Kong", fallback="HKG")
+        dest = _iata(
+            ctx.get("arrive_airport") or "",
+            fallback=ctx.get("destination", "") or "",
         )
-        ret_from = (ctx.get("depart_airport") or "").strip().upper() or dest
+        if dest == "—":
+            dest = _iata(ctx.get("destination", "") or "", fallback="MIA")
+        ret_from = _iata(ctx.get("depart_airport") or "", fallback=dest)
+        if ret_from == "—":
+            ret_from = dest
 
         if self.agent:
             links = self.agent.booking_links
@@ -2855,9 +2882,9 @@ class TravelAgentApp(tk.Tk):
             if links.get("flight_arrive"):
                 offer.arrive_time = links["flight_arrive"]
             if links.get("flight_from"):
-                offer.depart_airport = links["flight_from"]
+                offer.depart_airport = _iata(links["flight_from"], fallback=origin)
             if links.get("flight_to"):
-                offer.arrive_airport = links["flight_to"]
+                offer.arrive_airport = _iata(links["flight_to"], fallback=dest)
             if links.get("flight_duration") and "night" not in links["flight_duration"].lower():
                 offer.duration = links["flight_duration"]
             if links.get("flight_stops"):
@@ -2883,9 +2910,13 @@ class TravelAgentApp(tk.Tk):
             if links.get("flight_return_arrive"):
                 offer.return_arrive_time = links["flight_return_arrive"]
             if links.get("flight_return_from"):
-                offer.return_depart_airport = links["flight_return_from"]
+                offer.return_depart_airport = _iata(
+                    links["flight_return_from"], fallback=ret_from
+                )
             if links.get("flight_return_to"):
-                offer.return_arrive_airport = links["flight_return_to"]
+                offer.return_arrive_airport = _iata(
+                    links["flight_return_to"], fallback=origin
+                )
             if links.get("flight_return_duration") and "night" not in links[
                 "flight_return_duration"
             ].lower():
@@ -2950,29 +2981,30 @@ class TravelAgentApp(tk.Tk):
             if alt.stops and alt.stops != "Direct":
                 offer.stops = alt.stops
             if alt.depart_airport and alt.depart_airport not in {"", "—"}:
-                offer.depart_airport = alt.depart_airport
+                offer.depart_airport = _iata(alt.depart_airport, fallback=origin)
             if alt.arrive_airport and alt.arrive_airport not in {"", "—"}:
-                offer.arrive_airport = alt.arrive_airport
+                offer.arrive_airport = _iata(alt.arrive_airport, fallback=dest)
 
         # Open-jaw regional trips: ALWAYS use context airports (scrape often
         # returns a same-city round-trip that must not win over the plan).
-        is_open_jaw = bool(ret_from and dest and ret_from != dest)
+        is_open_jaw = bool(ret_from and dest and ret_from != dest and dest != "—")
         if is_open_jaw:
             offer.arrive_airport = dest
             offer.return_depart_airport = ret_from
-            offer.return_arrive_airport = origin or offer.return_arrive_airport or "HKG"
+            offer.return_arrive_airport = origin or "HKG"
             offer.trip_label = "Open-jaw"
             offer.badge = f"Open-jaw · {dest} in / {ret_from} out"
             if self.agent:
                 self.agent.booking_links["flight_to"] = dest
                 self.agent.booking_links["flight_return_from"] = ret_from
-                self.agent.booking_links["flight_return_to"] = (
-                    origin or offer.return_arrive_airport or "HKG"
-                )
+                self.agent.booking_links["flight_return_to"] = origin or "HKG"
         else:
             if origin and offer.depart_airport in {"", "—", "HKG"}:
                 offer.depart_airport = origin
-            if dest and offer.arrive_airport in {"", "—"}:
+            if dest and dest != "—" and (
+                offer.arrive_airport in {"", "—"}
+                or len(re.sub(r"[^A-Za-z]", "", offer.arrive_airport)) != 3
+            ):
                 offer.arrive_airport = dest
             if ret_from and offer.return_depart_airport in {"", "—"}:
                 offer.return_depart_airport = ret_from
@@ -2980,6 +3012,18 @@ class TravelAgentApp(tk.Tk):
                 offer.return_depart_time or ret_from
             ):
                 offer.return_arrive_airport = origin
+
+        # Final sanitize — never leave multi-word / region names on the card
+        offer.depart_airport = _iata(offer.depart_airport, fallback=origin)
+        offer.arrive_airport = _iata(offer.arrive_airport, fallback=dest)
+        if offer.return_depart_airport:
+            offer.return_depart_airport = _iata(
+                offer.return_depart_airport, fallback=ret_from
+            )
+        if offer.return_arrive_airport:
+            offer.return_arrive_airport = _iata(
+                offer.return_arrive_airport, fallback=origin
+            )
         # Fill dates from trip context when scraper didn't emit them
         if not offer.depart_date and ctx.get("depart_date"):
             offer.depart_date = str(ctx["depart_date"])
@@ -3119,6 +3163,30 @@ class TravelAgentApp(tk.Tk):
 
     def _apply_plan(self, text: str) -> None:
         self._last_plan = text
+        # Prefer the agent's proposed rough route for airports / multi-stay cards
+        try:
+            route = (
+                getattr(self.agent.browser, "last_proposed_route", None)
+                if self.agent
+                else None
+            )
+            if route is not None and getattr(route, "stays", None):
+                self._trip_context["arrive_airport"] = (
+                    route.arrive_airport or ""
+                ).upper()
+                self._trip_context["depart_airport"] = (
+                    route.depart_airport or ""
+                ).upper()
+                self._trip_context["region"] = getattr(route, "label", "") or ""
+                self._trip_context["stays"] = ";".join(
+                    f"{s.city}|{s.nights}|{s.checkin}|{s.checkout}|{s.airport}"
+                    for s in route.stays
+                )
+                self._trip_context["internal_note"] = getattr(
+                    route, "internal_note", ""
+                ) or ""
+        except Exception:
+            pass
         parsed = self._apply_booking_urls(parse_itinerary(text))
         parsed = self._ensure_days(parsed)
         self._render_parsed(parsed)
@@ -3268,8 +3336,21 @@ class TravelAgentApp(tk.Tk):
     def _boot_agent(self) -> None:
         def worker_loop() -> None:
             try:
+                from travel_agent.ollama_lifecycle import ensure_ollama_running
+
+                def progress(msg: str) -> None:
+                    self.after(0, lambda m=msg: self._set_status(m, C["accent_deep"]))
+
+                progress("Starting Ollama…")
+                # Only start if needed — forced restart flashes Ollama helper windows
+                ensure_ollama_running(restart=False, on_progress=progress)
+
                 settings.headless = self.headless
-                agent = TravelAgent(model=self.model)
+                agent = TravelAgent(
+                    model=self.model,
+                    on_tool_start=self._on_tool_start,
+                    on_tool_end=self._on_tool_end,
+                )
                 agent.start()
                 self.agent = agent
                 mode = "headless" if self.headless else "browser visible"
@@ -3281,13 +3362,14 @@ class TravelAgentApp(tk.Tk):
                 )
             except Exception as exc:
                 self.after(
-                    0, lambda e=exc: self._set_status(f"Browser failed: {e}", C["danger"])
+                    0, lambda e=exc: self._set_status(f"Startup failed: {e}", C["danger"])
                 )
                 self.after(
                     0,
                     lambda e=exc: messagebox.showerror(
                         "Startup error",
-                        f"{e}\n\nRun: playwright install chromium",
+                        f"{e}\n\n"
+                        "Need Ollama on PATH and: playwright install chromium",
                     ),
                 )
                 return
@@ -3313,6 +3395,48 @@ class TravelAgentApp(tk.Tk):
         )
         self._browser_thread.start()
 
+    def _on_tool_start(self, name: str, args: dict) -> None:
+        """Update status while Trip.com tools run (browser thread → Tk)."""
+        labels = {
+            "propose_trip_route": "Proposing rough route…",
+            "plan_trip": "Planning trip (flights + hotels on Trip.com)…",
+            "search_flights": "Searching flights on Trip.com…",
+            "search_hotels": "Searching hotels on Trip.com…",
+            "compare_flight_prices": "Comparing flight prices…",
+            "compare_hotel_prices": "Comparing hotel prices…",
+            "search_trains": "Searching trains…",
+            "search_transfers": "Searching transfers…",
+            "search_cars": "Searching cars…",
+            "search_attractions": "Looking up attractions…",
+        }
+        dest = ""
+        if isinstance(args, dict):
+            dest = (
+                args.get("destination")
+                or args.get("hotel_city")
+                or args.get("city")
+                or ""
+            )
+        msg = labels.get(name, f"Running {name}…")
+        if dest:
+            msg = f"{msg} ({dest})"
+        self.after(0, lambda m=msg: self._set_status(m, C["accent_deep"]))
+        if name in {"search_flights", "compare_flight_prices", "plan_trip"}:
+            self.after(
+                0,
+                lambda: self.flight_row.set_loading("Searching Trip.com flights…"),
+            )
+        if name in {"search_hotels", "compare_hotel_prices", "plan_trip"}:
+            self.after(
+                0,
+                lambda: self.hotel_row.set_loading("Searching Trip.com hotels…"),
+            )
+
+    def _on_tool_end(self, name: str, preview: str) -> None:
+        snippet = (preview or "").replace("\n", " ").strip()[:80]
+        msg = f"Finished {name}" + (f" · {snippet}…" if snippet else "")
+        self.after(0, lambda m=msg: self._set_status(m, C["muted"]))
+
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.header.set_status(text, color or C["muted"])
 
@@ -3328,9 +3452,19 @@ class TravelAgentApp(tk.Tk):
 
     def _on_close(self) -> None:
         try:
+            self._set_status("Closing… stopping Ollama", C["muted"])
+        except Exception:
+            pass
+        try:
             self._browser_jobs.put(None)
             if self._browser_thread and self._browser_thread.is_alive():
                 self._browser_thread.join(timeout=5)
+        except Exception:
+            pass
+        try:
+            from travel_agent.ollama_lifecycle import stop_ollama
+
+            stop_ollama()
         except Exception:
             pass
         self.destroy()

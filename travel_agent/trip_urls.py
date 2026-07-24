@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from travel_agent.config import settings
-from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
+from travel_agent.places import to_flight_code, to_hotel_city
 from travel_agent.airline_names import is_plausible_airline_name, airline_logo_url
 
 _TRIP_HOST_RE = re.compile(
@@ -107,7 +107,9 @@ def is_hotel_list_url(url: str) -> bool:
         return False
     if "/hotels/list" in low:
         return True
-    if "/hotels/" in low and "city=" in low and "checkin" in low:
+    if "/hotels/" in low and "checkin" in low and (
+        "city=" in low or "destname=" in low or "keyword=" in low or "cityname=" in low
+    ):
         return True
     return False
 
@@ -161,10 +163,10 @@ def canonicalize_hotel_detail_url(
         qs["checkOut"] = qs.pop("checkout")
 
     if city and not qs.get("cityId"):
-        city_id = to_hotel_city_id(city)
-        if city_id:
-            qs["cityId"] = city_id
-            qs.setdefault("cityEnName", to_hotel_city(city))
+        # Do not inject hardcoded city IDs — Trip.com detail links already
+        # identify the property; optional cityEnName is display-only.
+        if city:
+            qs.setdefault("cityEnName", to_hotel_city(city) or city)
 
     qs.setdefault("adult", "2")
     qs.setdefault("children", "0")
@@ -325,10 +327,16 @@ def build_hotel_list_url(
     adults: int = 2,
     rooms: int = 1,
 ) -> str:
-    """Build a stable hk.trip.com hotel list URL from trip parameters."""
-    city_name = to_hotel_city(city)
-    city_id = to_hotel_city_id(city) or to_hotel_city_id(city_name)
+    """Build a Trip.com hotel search link without hardcoded city IDs.
+
+    Prefer the live URL returned by Playwright hub search when available.
+    This fallback uses keyword + cityName so Check Availability still opens
+    a usable search (Trip.com resolves the destination itself).
+    """
+    city_name = to_hotel_city(city) or (city or "").strip() or "Destination"
     params: dict[str, Any] = {
+        "cityName": city_name,
+        "keyword": city_name,
         "checkin": checkin,
         "checkout": checkout,
         "adult": max(1, min(int(adults or 2), 8)),
@@ -336,13 +344,6 @@ def build_hotel_list_url(
         "locale": settings.trip_locale,
         "curr": settings.trip_currency,
     }
-    if city_id:
-        params["city"] = city_id
-        params["cityName"] = city_name
-    else:
-        params["city"] = city_name
-        params["cityName"] = city_name
-        params["keyword"] = city_name
     url = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
     return ensure_locale_curr(url)
 

@@ -69,3 +69,20 @@ travel_agent/
 - Live prices and booking links come from Trip.com page/tool output; the model must not invent `www.trip.com` URLs.
 - No embedded map (desktop limitation); use day-by-day cards + Open Trip.Planner / booking links instead.
 - Default model: `qwen2.5:7b` (`OLLAMA_MODEL` or `-m` to override).
+
+## Test suite (50 trip examples)
+
+```bash
+# Fast logic checks (no browser)
+python -m tests.run_trip_examples
+
+# Full live Trip.com scrape for all 50 (same plan_trip path as the GUI; hours)
+python -m tests.run_trip_examples_live
+
+# Resume after interrupt, or run a subset
+python -m tests.run_trip_examples_live --resume
+python -m tests.run_trip_examples_live --ids 1,27,50
+python -m tests.run_trip_examples_live --mode scrape   # faster flights+hotels only
+```
+
+Results land in `tests/live_results/` (`progress.jsonl`, per-example transcripts, `summary.json`).

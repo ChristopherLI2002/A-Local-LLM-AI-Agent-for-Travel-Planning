@@ -13,43 +13,49 @@ from travel_agent.trip_urls import extract_booking_urls, is_trusted_hotel_detail
 
 SYSTEM_PROMPT = """You are Voyage — a Trip.Planner-style AI travel concierge for Trip.com Hong Kong (hk.trip.com, HKD).
 
-Like Trip.Planner, you turn three inputs (destination, duration, travel style) into a
+Like Trip.Planner, you turn destination, duration, and travel style into a
 personalised itinerary with bookable flight and hotel picks.
 
+Workflow (STRICT order):
+1) FIRST call propose_trip_route — decide fly-into city/airport, fly-out city/airport,
+   nights per city, and the rough transfer path. Do NOT search Trip.com yet.
+2) THEN call plan_trip (preferred) — or search_flights / search_hotels — using the
+   arrive_airport / return_airport (and stay cities) from the rough route.
+3) Write the final itinerary from live tool results only.
+
 Tools:
-- plan_trip: primary (compares flight/hotel dates, returns hk.trip.com links + prices)
+- propose_trip_route: rough route only (required first)
+- plan_trip: primary live scrape (flights + hotels + links)
 - compare_flight_prices / compare_hotel_prices: extra ranking if needed
 - search_flights / search_hotels / search_trains / search_transfers / search_cars
-- search_attractions: pull named sights from hk.trip.com/things-to-do for the city
+- search_attractions: named sights from hk.trip.com/things-to-do
 - browse_url / click_text / get_page_summary
 
 Output rules (plain text, no HTML):
-1) Start with "Recommended flight" including airline, from/to airports, depart/arrive times,
-   duration, stops, baggage if known, HKD price, and exact hk.trip.com URL
-2) Then "Recommended hotel" with hotel name, stars, score/reviews, location, features,
-   room/beds, nightly + total HKD, and exact hk.trip.com hotel DETAIL URL (/hotels/detail/?hotelId=...)
-3) Then "Day-by-day itinerary" with EXACT lines "Day 1:", "Day 2:", ... (one block per
-   trip day — never skip this section; never replace it with only price comparisons).
-   Each day MUST be a timetable with clock times only (no Transit/Go/Lunch labels), e.g.
-   "09:00 Tokyo Metro Ginza Line to Asakusa"
-   "10:00 Senso-ji Temple"
-   "12:30 Asakusa Okonomiyaki Sometaro"
-   "19:00 Gyukatsu Motomura"
-4) End with "Budget snapshot"
+1) Optionally open with a short "Rough route" blurb (arrive/return hubs + city order)
+2) "Recommended flight" — airline, from/to IATA airports, times, duration, stops,
+   baggage if known, HKD price, exact hk.trip.com URL
+3) "Recommended hotel" — name, stars, score/reviews, location, features, room/beds,
+   nightly + total HKD, exact hotel DETAIL URL (/hotels/detail/?hotelId=...)
+   For multi-city routes, one hotel block per stay city
+4) "Day-by-day itinerary" with EXACT lines "Day 1:", "Day 2:", ... (one block per
+   trip day). Timetable with clock times and named places/restaurants only.
+5) "Budget snapshot"
 
 Hard rules:
-- Prefer Recommended hotel detail link / Hotel option link from tools (not list/search URLs).
+- NEVER call plan_trip / search_flights / search_hotels before propose_trip_route
+  in the same user request.
+- Prefer Recommended hotel detail link / Hotel option link from tools.
 - NEVER invent www.trip.com generic /search URLs or fake prices.
 - Only use https://hk.trip.com/... links that appear in tool results.
-- Round-trip flights; hotel stay matches full trip length (use the user's return_date).
-- Travel style must change the itinerary pace (Culture vs Food vs Family, etc.).
+- Match hotels to the rough-route stay windows (not always the full trip in one city).
+- Travel style must change itinerary pace (Culture vs Food vs Family, etc.).
 - When refining, keep the same section headings so the UI can re-parse the plan.
-- Do NOT dump raw tool tables as the final answer — rewrite into the four sections above.
-- Do NOT use vague lines like "local dinner and unwind" or "flexible free time" — name places.
-- For regions like California, plan a MULTI-CITY trip (not one hotel):
-  e.g. San Francisco then Los Angeles, with open-jaw flights (SFO in / LAX out),
-  one Recommended hotel block per city stay, and day cards that move between cities.
-- Use search_attractions / Trip.com things-to-do for named sights in each city.
+- Do NOT dump raw tool tables as the final answer — rewrite into the sections above.
+- Do NOT use vague lines like "local dinner and unwind" — name places.
+- For regions like California / Florida, multi-city + open-jaw
+  (e.g. SFO in / LAX out, or MIA in / MCO out).
+- Use search_attractions for named sights in each city.
 """
 
 
@@ -79,10 +85,12 @@ class TravelAgent:
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
+        self.browser.last_proposed_route = None
 
     def chat(self, user_message: str) -> str:
         self.messages.append({"role": "user", "content": user_message})
         self.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
+        route_ready = self.browser.last_proposed_route is not None
 
         for _ in range(settings.max_tool_rounds):
             response = self.client.chat(
@@ -109,10 +117,69 @@ class TravelAgent:
                 else:
                     args = dict(raw_args or {})
 
+                # Enforce rough-route-before-scrape when the model skips propose
+                scrape_tools = {
+                    "plan_trip",
+                    "search_flights",
+                    "search_hotels",
+                    "compare_flight_prices",
+                    "compare_hotel_prices",
+                }
+                if name in scrape_tools and not route_ready:
+                    propose_args = {
+                        "destination": args.get("destination")
+                        or args.get("city")
+                        or args.get("hotel_city")
+                        or "destination",
+                        "nights": args.get("nights") or 7,
+                        "depart_date": args.get("depart_date") or args.get("checkin") or "",
+                        "origin": args.get("origin") or "Hong Kong",
+                        "interests": args.get("interests") or "",
+                    }
+                    if args.get("depart_date") and args.get("return_date"):
+                        try:
+                            from datetime import date as _date
+
+                            d0 = _date.fromisoformat(str(args["depart_date"])[:10])
+                            d1 = _date.fromisoformat(str(args["return_date"])[:10])
+                            propose_args["nights"] = max(1, (d1 - d0).days)
+                        except ValueError:
+                            pass
+                    if self.on_tool_start:
+                        self.on_tool_start("propose_trip_route", propose_args)
+                    propose_result = dispatch_tool(
+                        self.browser, "propose_trip_route", propose_args
+                    )
+                    route_ready = True
+                    if self.on_tool_end:
+                        preview = (
+                            propose_result
+                            if len(propose_result) <= 500
+                            else propose_result[:500] + "..."
+                        )
+                        self.on_tool_end("propose_trip_route", preview)
+                    # Keep protocol clean: do not invent a tool message; plan_trip
+                    # output already includes the ROUGH TRIP ROUTE block.
+                    if name == "plan_trip":
+                        route = self.browser.last_proposed_route
+                        if route is not None:
+                            if not args.get("arrive_airport"):
+                                args["arrive_airport"] = getattr(
+                                    route, "arrive_airport", ""
+                                )
+                            if not args.get("return_airport"):
+                                args["return_airport"] = getattr(
+                                    route, "depart_airport", ""
+                                )
+                            if not args.get("hotel_city") and getattr(route, "stays", None):
+                                args["hotel_city"] = route.stays[0].city
+
                 if self.on_tool_start:
                     self.on_tool_start(name, args)
 
                 result = dispatch_tool(self.browser, name, args)
+                if name == "propose_trip_route":
+                    route_ready = True
 
                 found = extract_booking_urls(result)
                 if found.get("flight"):
