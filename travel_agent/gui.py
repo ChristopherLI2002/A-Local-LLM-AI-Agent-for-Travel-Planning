@@ -36,6 +36,7 @@ from travel_agent.trip_urls import (
     canonicalize_hotel_detail_url,
     fetch_flight_card,
     fetch_hotel_detail_link,
+    is_hotel_list_url,
     is_openable_hotel_url,
     is_trusted_hotel_detail_url,
     resolve_booking_url,
@@ -571,6 +572,21 @@ class FlightRowCard(tk.Frame):
         )
         self.arr_airport.pack(anchor="e")
 
+        # Outbound search link — directly under the outbound leg
+        self.out_link_row = tk.Frame(times, bg="#FFFFFF")
+        self.out_link_row.pack(fill="x", pady=(8, 0))
+        self.select_btn = tk.Label(
+            self.out_link_row,
+            text="Open outbound search",
+            bg=C["trip_blue"],
+            fg="#FFFFFF",
+            font=FONT_UI_BOLD,
+            padx=12,
+            pady=5,
+            cursor="hand2",
+        )
+        self.select_btn.pack(side="left")
+
         # --- Return leg ---
         self.return_block = tk.Frame(times, bg="#FFFFFF")
         self.return_block.pack(fill="x", pady=(12, 0))
@@ -643,6 +659,24 @@ class FlightRowCard(tk.Frame):
         )
         self.ret_arr_airport.pack(anchor="e")
 
+        # Return search link — directly under the return leg
+        self.ret_link_row = tk.Frame(self.return_block, bg="#FFFFFF")
+        self.ret_link_row.pack(fill="x", pady=(8, 0))
+        self.return_select_btn = tk.Label(
+            self.ret_link_row,
+            text="Open return search",
+            bg="#FFFFFF",
+            fg=C["trip_blue"],
+            font=FONT_UI_BOLD,
+            padx=12,
+            pady=5,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground=C["trip_blue"],
+            highlightcolor=C["trip_blue"],
+        )
+        self.return_select_btn.pack(side="left")
+
         bottom = tk.Frame(self.card, bg="#FFFFFF")
         bottom.pack(fill="x", pady=(10, 0))
         price_col = tk.Frame(bottom, bg="#FFFFFF")
@@ -659,24 +693,22 @@ class FlightRowCard(tk.Frame):
             price_col, text="Return", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL
         )
         self.trip_lbl.pack(anchor="w")
-        self.select_btn = tk.Label(
-            bottom,
-            text="Select",
-            bg=C["trip_blue"],
-            fg="#FFFFFF",
-            font=FONT_UI_BOLD,
-            padx=14,
-            pady=6,
-            cursor="hand2",
-        )
-        self.select_btn.pack(side="right")
+
         self._url = ""
+        self._return_url = ""
         self.select_btn.bind("<Button-1>", self._open)
         self.select_btn.bind(
             "<Enter>", lambda _e: self.select_btn.configure(bg=C["trip_blue_hover"])
         )
         self.select_btn.bind(
             "<Leave>", lambda _e: self.select_btn.configure(bg=C["trip_blue"])
+        )
+        self.return_select_btn.bind("<Button-1>", self._open_return)
+        self.return_select_btn.bind(
+            "<Enter>", lambda _e: self.return_select_btn.configure(fg=C["trip_blue_hover"])
+        )
+        self.return_select_btn.bind(
+            "<Leave>", lambda _e: self.return_select_btn.configure(fg=C["trip_blue"])
         )
 
         self.set_loading("Waiting for plan…")
@@ -830,6 +862,15 @@ class FlightRowCard(tk.Frame):
         else:
             messagebox.showinfo("No link", "Generate an itinerary first to get a booking link.")
 
+    def _open_return(self, _e: object | None = None) -> None:
+        url = self._return_url or self._url
+        if url and "trip.com" in url.lower():
+            webbrowser.open(url)
+        elif url:
+            messagebox.showwarning("Invalid link", "No valid Trip.com return search link yet.")
+        else:
+            messagebox.showinfo("No link", "Generate an itinerary first to get a return search link.")
+
     def set_loading(self, message: str) -> None:
         self._clear_badges()
         self._add_badge(message, filled=False)
@@ -855,6 +896,10 @@ class FlightRowCard(tk.Frame):
         self.price.configure(text="…")
         self.trip_lbl.configure(text="")
         self._url = ""
+        self._return_url = ""
+        self.select_btn.configure(text="Open outbound search")
+        if self.ret_link_row.winfo_ismapped():
+            self.ret_link_row.pack_forget()
 
     def _clear_badges(self) -> None:
         for child in self.badges.winfo_children():
@@ -897,19 +942,25 @@ class FlightRowCard(tk.Frame):
             text=f"Outbound · {out_date}" if out_date else "Outbound"
         )
         self._set_airline_logo(offer)
-        self.airline_lbl.configure(text=offer.airline)
-        self.dep_time.configure(text=offer.depart_time)
-        self.arr_time.configure(text=offer.arrive_time)
-        self.dep_airport.configure(text=offer.depart_airport)
-        self.arr_airport.configure(text=offer.arrive_airport)
-        self.duration.configure(text=offer.duration)
-        self.stops.configure(text=offer.stops)
-        self.price.configure(text=offer.price_label)
+        self.airline_lbl.configure(text=offer.airline or "See Trip.com for airline")
+        self.dep_time.configure(text=offer.depart_time or "--:--")
+        self.arr_time.configure(text=offer.arrive_time or "--:--")
+        self.dep_airport.configure(text=offer.depart_airport or "—")
+        self.arr_airport.configure(text=offer.arrive_airport or "—")
+        self.duration.configure(text=offer.duration or "—")
+        self.stops.configure(text=offer.stops or "Direct")
+        self.price.configure(text=offer.price_label or "See Trip.com")
         self.trip_lbl.configure(text=offer.trip_label)
         self._url = offer.url
+        self._return_url = getattr(offer, "return_url", "") or ""
         self.after(30, self._draw_path)
 
-        has_return = bool(offer.return_depart_time and offer.return_depart_time != "--:--")
+        has_return = bool(
+            (offer.return_depart_time and offer.return_depart_time != "--:--")
+            or (offer.return_depart_airport and offer.return_depart_airport not in {"", "—"})
+            or (offer.trip_label or "").lower().startswith("open-jaw")
+            or self._return_url
+        )
         if has_return:
             if not self.return_block.winfo_ismapped():
                 self.return_block.pack(fill="x", pady=(12, 0))
@@ -917,18 +968,35 @@ class FlightRowCard(tk.Frame):
             self.leg_ret_lbl.configure(
                 text=f"Return · {ret_date}" if ret_date else "Return"
             )
-            ret_name = offer.return_airline or offer.airline or "—"
+            ret_name = offer.return_airline or (
+                offer.airline
+                if is_plausible_airline_name(offer.airline)
+                else "See Trip.com for airline"
+            )
             self.return_airline_lbl.configure(text=ret_name)
             self._set_return_airline_logo(offer)
-            self.ret_dep_time.configure(text=offer.return_depart_time)
+            self.ret_dep_time.configure(text=offer.return_depart_time or "--:--")
             self.ret_arr_time.configure(text=offer.return_arrive_time or "--:--")
             self.ret_dep_airport.configure(text=offer.return_depart_airport or "—")
             self.ret_arr_airport.configure(text=offer.return_arrive_airport or "—")
             self.ret_duration.configure(text=offer.return_duration or "—")
             self.ret_stops.configure(text=offer.return_stops or "Direct")
             self.after(30, self._draw_ret_path)
+            # Return search link under the return leg
+            if self._return_url:
+                if not self.ret_link_row.winfo_ismapped():
+                    self.ret_link_row.pack(fill="x", pady=(8, 0))
+                self.return_select_btn.configure(text="Open return search")
+            elif self.ret_link_row.winfo_ismapped():
+                self.ret_link_row.pack_forget()
+            self.select_btn.configure(
+                text="Open outbound search" if self._return_url else "Select"
+            )
         else:
             self.return_block.pack_forget()
+            self.select_btn.configure(text="Select")
+            if self.ret_link_row.winfo_ismapped():
+                self.ret_link_row.pack_forget()
 
 
 class HotelRowCard(tk.Frame):
@@ -1267,21 +1335,21 @@ class HotelRowCard(tk.Frame):
         self.social_lbl.configure(text=offer.social_proof)
         self.price_lbl.configure(text=offer.price_label)
         self.total_lbl.configure(text=offer.total_label or "Total (incl. taxes & fees): see Trip.com")
-        # Prefer a city/date list URL when the offer link is missing or unusable
+        # Prefer a city/date hotel detail URL when the offer link is missing
         url = (offer.url or "").strip()
-        if not is_openable_hotel_url(url) and offer.city and offer.checkin and offer.checkout:
-            url = build_hotel_list_url(
-                city=offer.city,
-                checkin=offer.checkin,
-                checkout=offer.checkout,
-            )
-        elif is_trusted_hotel_detail_url(url):
+        if is_trusted_hotel_detail_url(url):
             url = canonicalize_hotel_detail_url(
                 url,
                 checkin=offer.checkin or "",
                 checkout=offer.checkout or "",
                 city=offer.city or offer.location or "",
             ) or url
+        elif not is_openable_hotel_url(url) and offer.city and offer.checkin and offer.checkout:
+            url = build_hotel_list_url(
+                city=offer.city,
+                checkin=offer.checkin,
+                checkout=offer.checkout,
+            )
         self._url = url
 
 
@@ -1297,6 +1365,8 @@ class TravelAgentApp(tk.Tk):
         self._last_plan = ""
         self._style_vars: dict[str, tk.BooleanVar] = {}
         self._trip_context: dict[str, str] = {}
+        self._live_flight_card: dict[str, str] = {}
+        self._live_flight_error: str = ""
         # Playwright sync API is thread-bound: one long-lived worker owns the browser.
         self._browser_jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self._browser_thread: threading.Thread | None = None
@@ -2364,6 +2434,11 @@ class TravelAgentApp(tk.Tk):
         if self.agent:
             self.agent.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
             self.agent.browser.last_proposed_route = None
+            self.agent.browser.last_flight_card = {}
+            self.agent.browser.last_plan_flight_card = {}
+            self.agent.browser.last_hotel_stays = []
+        self._live_flight_card = {}
+        self._live_flight_error = ""
 
         self._show_results()
         self.flight_row.set_loading("Comparing flights on Trip.com…")
@@ -2384,9 +2459,30 @@ class TravelAgentApp(tk.Tk):
         def job() -> str:
             assert self.agent is not None
             answer = self.agent.chat(query)
-            # Live card refresh must not wipe a finished itinerary on navigation errors
+            # Guarantee open-jaw times exist before the UI paints the card
+            try:
+                self._ensure_open_jaw_flight_card()
+            except Exception as exc:
+                self._live_flight_error = str(exc)
             try:
                 self._refresh_live_booking_cards()
+            except Exception:
+                pass
+            # Snapshot for the main-thread UI paint (do not rely only on browser state)
+            try:
+                plan = (
+                    getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+                )
+                # Only overwrite if the scrape actually has times (URLs alone are not enough)
+                if plan.get("flight_depart"):
+                    self._live_flight_card = dict(plan)
+                elif not getattr(self, "_live_flight_card", {}).get("flight_depart") and plan:
+                    # Keep URLs for buttons, but do not pretend times exist
+                    merged = dict(getattr(self, "_live_flight_card", None) or {})
+                    for k, v in plan.items():
+                        if v and (k in {"flight", "flight_return"} or not merged.get(k)):
+                            merged[k] = v
+                    self._live_flight_card = merged
             except Exception:
                 pass
             return answer
@@ -2397,6 +2493,104 @@ class TravelAgentApp(tk.Tk):
             on_err=lambda e: self._apply_plan(f"Error: {e}"),
             done=lambda: self._set_busy(False),
         )
+
+    def _ensure_open_jaw_flight_card(self) -> None:
+        """Scrape open-jaw legs when the flight card would otherwise show --:--."""
+        if not self.agent:
+            return
+        ctx = self._trip_context
+        arrive = (ctx.get("arrive_airport") or "").strip().upper()
+        ret_from = (ctx.get("depart_airport") or "").strip().upper()
+        route = getattr(self.agent.browser, "last_proposed_route", None)
+        if route is not None:
+            ra = (getattr(route, "arrive_airport", "") or "").strip().upper()
+            rd = (getattr(route, "depart_airport", "") or "").strip().upper()
+            if ra:
+                arrive = ra
+                ctx["arrive_airport"] = ra
+            if rd:
+                ret_from = rd
+                ctx["depart_airport"] = rd
+        # Last resort: rebuild regional route from destination
+        if not (arrive and ret_from and arrive != ret_from):
+            try:
+                from travel_agent.regions import build_regional_route
+
+                nights = 7
+                try:
+                    d0 = ctx.get("depart_date") or ""
+                    d1 = ctx.get("return_date") or ""
+                    if d0 and d1:
+                        nights = max(
+                            1,
+                            (date.fromisoformat(d1) - date.fromisoformat(d0)).days,
+                        )
+                except ValueError:
+                    pass
+                built = build_regional_route(
+                    ctx.get("destination", "") or "",
+                    nights,
+                    depart_date=ctx.get("depart_date") or None,
+                )
+                if built:
+                    arrive = (built.arrive_airport or "").upper()
+                    ret_from = (built.depart_airport or "").upper()
+                    ctx["arrive_airport"] = arrive
+                    ctx["depart_airport"] = ret_from
+            except Exception:
+                pass
+        if not (arrive and ret_from and arrive != ret_from):
+            return
+        depart = ctx.get("depart_date") or ""
+        ret_date = ctx.get("return_date") or ""
+        if not depart or not ret_date:
+            return
+
+        plan = getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+        # Reuse only when both legs have real clock times (not empty placeholders)
+        time_ok = re.fullmatch(r"[0-2]?\d:[0-5]\d", (plan.get("flight_depart") or "").strip())
+        ret_ok = re.fullmatch(
+            r"[0-2]?\d:[0-5]\d", (plan.get("flight_return_depart") or "").strip()
+        )
+        complete = bool(
+            time_ok
+            and ret_ok
+            and plan.get("flight_airline")
+            and (plan.get("flight") or self.agent.booking_links.get("flight"))
+            and (plan.get("flight_return") or self.agent.booking_links.get("flight_return"))
+        )
+        if complete:
+            self._merge_live_flight(
+                {k: v for k, v in plan.items() if k.startswith("flight") and v}
+            )
+            self._live_flight_card = {
+                k: v for k, v in plan.items() if k.startswith("flight") and v
+            }
+            return
+
+        # Always open two Trip.com one-way search pages and pick top fares
+        self.after(
+            0,
+            lambda: self._set_status(
+                f"Open-jaw: searching {arrive} outbound + {ret_from} return…",
+                C["accent_deep"],
+            ),
+        )
+        oj = self.agent.browser.search_open_jaw_flights(
+            origin=ctx.get("origin", "Hong Kong") or "Hong Kong",
+            arrive_airport=arrive,
+            return_airport=ret_from,
+            depart_date=depart,
+            return_date=ret_date,
+            adults=1,
+        )
+        self._merge_live_flight(oj)
+        self._live_flight_card = dict(oj)
+        if not oj.get("flight_depart"):
+            raise RuntimeError(
+                f"Trip.com returned no outbound times for {arrive} "
+                f"(check network / try again)"
+            )
 
     def _refresh_live_booking_cards(self) -> None:
         """Refresh flight/hotel card fields from Trip.com (browser thread only)."""
@@ -2434,16 +2628,41 @@ class TravelAgentApp(tk.Tk):
 
         arrive = (ctx.get("arrive_airport") or "").strip().upper()
         ret_from = (ctx.get("depart_airport") or "").strip().upper()
+
+        # Airports often live on the proposed route before _apply_plan copies them
+        # into trip context — without this, open-jaw force-scrape never runs and
+        # the card stays at --:-- while the badge still shows SFO/SAN later.
+        route = getattr(self.agent.browser, "last_proposed_route", None)
+        if route is not None:
+            ra = (getattr(route, "arrive_airport", "") or "").strip().upper()
+            rd = (getattr(route, "depart_airport", "") or "").strip().upper()
+            if ra:
+                arrive = ra
+                ctx["arrive_airport"] = ra
+            if rd:
+                ret_from = rd
+                ctx["depart_airport"] = rd
+            if getattr(route, "stays", None) and not stays_raw:
+                try:
+                    ctx["stays"] = ";".join(
+                        f"{s.city}|{s.nights}|{s.checkin}|{s.checkout}|{s.airport}"
+                        for s in route.stays
+                    )
+                    hotel_city = route.stays[0].city
+                    if route.stays[0].checkin:
+                        hotel_checkin = route.stays[0].checkin
+                    if route.stays[0].checkout:
+                        hotel_checkout = route.stays[0].checkout
+                except Exception:
+                    pass
+
         open_jaw = bool(arrive and ret_from and arrive != ret_from)
 
         # Hotel photo/details first — flight goto must not discard hotel image work
         try:
-            # Skip when plan_trip already filled multi-city stays (refresh would
-            # collapse them into one California/SFO hotel).
             multi_stays = list(
                 getattr(self.agent.browser, "last_hotel_stays", None) or []
             )
-            # plan_trip already scraped hotels — don't run another slow hub search
             if multi_stays:
                 pass
             elif not is_trusted_hotel_detail_url(self.agent.booking_links.get("hotel", "")):
@@ -2460,9 +2679,28 @@ class TravelAgentApp(tk.Tk):
             pass
 
         try:
-            # Never re-scrape vague region as same-city RT — that overwrites open-jaw
+            links = self.agent.booking_links
+            # Always re-apply frozen plan card first
+            plan_card = (
+                getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            )
+            for k, v in plan_card.items():
+                if v and k.startswith("flight"):
+                    cur = links.get(k) or ""
+                    if not cur or cur in {"--:--", "See Trip.com", "n/a"}:
+                        links[k] = v
+                    elif k in {
+                        "flight_depart",
+                        "flight_arrive",
+                        "flight_airline",
+                        "flight_return_depart",
+                        "flight_return_arrive",
+                        "flight_return_airline",
+                        "flight_price",
+                    }:
+                        links[k] = v
+
             if open_jaw:
-                links = self.agent.booking_links
                 links["flight_to"] = arrive
                 links["flight_return_from"] = ret_from
                 links["flight_return_to"] = to_flight_code(
@@ -2470,13 +2708,35 @@ class TravelAgentApp(tk.Tk):
                 ).upper() or "HKG"
                 if ctx.get("return_date"):
                     links["flight_return_date"] = ctx["return_date"]
+                if ctx.get("depart_date"):
+                    links.setdefault("flight_date", ctx["depart_date"])
+
+                # Missing times/airline/price → scrape both open-jaw legs now
+                sparse = not links.get("flight_depart") or not links.get(
+                    "flight_airline"
+                )
+                if sparse and ctx.get("depart_date") and ctx.get("return_date"):
+                    self.after(
+                        0,
+                        lambda: self._set_status(
+                            "Fetching open-jaw flight times from Trip.com…",
+                            C["accent_deep"],
+                        ),
+                    )
+                    oj = self.agent.browser.search_open_jaw_flights(
+                        origin=ctx.get("origin", "Hong Kong") or "Hong Kong",
+                        arrive_airport=arrive,
+                        return_airport=ret_from,
+                        depart_date=ctx["depart_date"],
+                        return_date=ctx["return_date"],
+                        adults=1,
+                    )
+                    self._merge_live_flight(oj)
             elif ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
-                # Skip if plan_trip already populated flight card fields
-                if self.agent.booking_links.get("flight_airline") or self.agent.booking_links.get(
-                    "flight"
+                if not (
+                    self.agent.booking_links.get("flight_airline")
+                    or self.agent.booking_links.get("flight_depart")
                 ):
-                    pass
-                else:
                     dest_code = arrive or to_flight_code(ctx["destination"]).upper()
                     live_flight = fetch_flight_card(
                         self.agent.browser,
@@ -2486,8 +2746,17 @@ class TravelAgentApp(tk.Tk):
                         return_date=ctx.get("return_date") or checkout,
                     )
                     self._merge_live_flight(live_flight)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Keep going — itinerary text still renders — but surface why card is empty
+            try:
+                self.after(
+                    0,
+                    lambda e=exc: self._set_status(
+                        f"Flight card refresh failed: {e}", C["danger"]
+                    ),
+                )
+            except Exception:
+                pass
 
     def _merge_live_hotel(self, live: dict[str, str]) -> None:
         """Copy scraped hotel detail fields into agent.booking_links."""
@@ -2535,6 +2804,8 @@ class TravelAgentApp(tk.Tk):
             return
         if live.get("flight"):
             self.agent.booking_links["flight"] = live["flight"]
+        if live.get("flight_return"):
+            self.agent.booking_links["flight_return"] = live["flight_return"]
         for key in (
             "flight_airline",
             "flight_depart",
@@ -2555,6 +2826,8 @@ class TravelAgentApp(tk.Tk):
             "flight_return_stops",
             "flight_return_airline_logo",
             "flight_return_date",
+            "flight_outbound_price",
+            "flight_return_price",
         ):
             if live.get(key):
                 self.agent.booking_links[key] = live[key]
@@ -2576,6 +2849,15 @@ class TravelAgentApp(tk.Tk):
             return_date=None if trip_type == "oneway" else ret,
             trip_type=trip_type,
         )
+        if trip_type == "oneway" and ret_from and ret:
+            ret_url = build_flight_search_url(
+                origin=ret_from,
+                destination=ctx.get("origin", "Hong Kong"),
+                depart_date=ret,
+                trip_type="oneway",
+            )
+            if self.agent and not self.agent.booking_links.get("flight_return"):
+                self.agent.booking_links["flight_return"] = ret_url
         checkout = ret
         hotel_city = ctx["destination"]
         hotel_checkin = ctx["depart_date"]
@@ -2595,11 +2877,28 @@ class TravelAgentApp(tk.Tk):
                 ).isoformat()
             except ValueError:
                 checkout = ctx["depart_date"]
-        hotel = build_hotel_list_url(
-            city=hotel_city,
-            checkin=hotel_checkin,
-            checkout=checkout,
-        )
+        # Prefer live Playwright detail URL; list only if no hotelId page
+        hotel = ""
+        if self.agent:
+            hotel = (
+                getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+            ).strip()
+            if not hotel:
+                hotel = (self.agent.booking_links.get("hotel") or "").strip()
+            if not hotel:
+                hotel = (
+                    getattr(self.agent.browser, "last_hotel_list_url", "") or ""
+                ).strip()
+        if not hotel or (
+            "/hotels/detail" not in hotel.lower()
+            and "hotelid=" not in hotel.lower()
+            and "/hotels/list" not in hotel.lower()
+        ):
+            hotel = build_hotel_list_url(
+                city=hotel_city,
+                checkin=hotel_checkin,
+                checkout=checkout,
+            )
         return flight, hotel
 
     def _apply_booking_urls(self, parsed: ParsedItinerary) -> ParsedItinerary:
@@ -2742,10 +3041,19 @@ class TravelAgentApp(tk.Tk):
                 except Exception:
                     pass
 
-            # Always attach a working Trip.com link for this stay's city + dates
+            # Prefer Playwright hotel detail; keep live list only as fallback
             checkin = (rec.get("checkin") or "").strip()
             checkout = (rec.get("checkout") or "").strip()
             raw_url = (rec.get("url") or "").strip()
+            live_detail = ""
+            live_list = ""
+            if self.agent:
+                live_detail = (
+                    getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+                ).strip()
+                live_list = (
+                    getattr(self.agent.browser, "last_hotel_list_url", "") or ""
+                ).strip()
             if is_trusted_hotel_detail_url(raw_url):
                 rec["url"] = (
                     canonicalize_hotel_detail_url(
@@ -2756,6 +3064,24 @@ class TravelAgentApp(tk.Tk):
                     )
                     or raw_url
                 )
+            elif live_detail and is_trusted_hotel_detail_url(live_detail):
+                rec["url"] = (
+                    canonicalize_hotel_detail_url(
+                        live_detail,
+                        checkin=checkin,
+                        checkout=checkout,
+                        city=city,
+                    )
+                    or live_detail
+                )
+            elif raw_url and is_hotel_list_url(raw_url) and (
+                "cityid=" in raw_url.lower() or "city=" in raw_url.lower()
+            ):
+                rec["url"] = raw_url
+            elif live_list and is_hotel_list_url(live_list) and (
+                "cityid=" in live_list.lower() or "city=" in live_list.lower()
+            ):
+                rec["url"] = live_list
             elif city and checkin and checkout:
                 rec["url"] = build_hotel_list_url(
                     city=city, checkin=checkin, checkout=checkout
@@ -2873,6 +3199,41 @@ class TravelAgentApp(tk.Tk):
             ret_from = dest
 
         if self.agent:
+            # Live scrape card wins over sparse/empty booking_links
+            try:
+                plan_card = (
+                    getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+                )
+                live_card = getattr(self.agent.browser, "last_flight_card", None) or {}
+                # Prefer frozen plan card (open-jaw merge) when it has times
+                prefer = plan_card if plan_card.get("flight_depart") or plan_card.get(
+                    "flight_airline"
+                ) else (plan_card or live_card)
+                if not prefer.get("flight_depart") and live_card.get("flight_depart"):
+                    prefer = {**prefer, **{k: v for k, v in live_card.items() if v}}
+                for k, v in prefer.items():
+                    if not v:
+                        continue
+                    cur = self.agent.booking_links.get(k) or ""
+                    # Prefer non-empty scrape; overwrite placeholders
+                    if not cur or cur in {"--:--", "See Trip.com", "n/a"}:
+                        self.agent.booking_links[k] = v
+                    elif k in {
+                        "flight_depart",
+                        "flight_arrive",
+                        "flight_airline",
+                        "flight_return_depart",
+                        "flight_return_arrive",
+                        "flight_return_airline",
+                        "flight_price",
+                        "flight_duration",
+                        "flight_stops",
+                        "flight_return_duration",
+                        "flight_return_stops",
+                    }:
+                        self.agent.booking_links[k] = v
+            except Exception:
+                pass
             links = self.agent.booking_links
             airline = links.get("flight_airline", "")
             if is_plausible_airline_name(airline):
@@ -2930,6 +3291,60 @@ class TravelAgentApp(tk.Tk):
                 offer.return_airline_logo = ret_cdn
             elif is_plausible_airline_name(offer.return_airline):
                 offer.return_airline_logo = airline_logo_url(offer.return_airline)
+            if links.get("flight"):
+                offer.url = links["flight"] or offer.url
+            if links.get("flight_return"):
+                offer.return_url = links["flight_return"]
+
+            # Direct apply from frozen plan card onto the offer (bypass any stale links)
+            plan_direct = (
+                getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            )
+            if plan_direct.get("flight_depart") and (
+                not offer.depart_time or offer.depart_time == "--:--"
+            ):
+                offer.depart_time = plan_direct["flight_depart"]
+            if plan_direct.get("flight_arrive") and (
+                not offer.arrive_time or offer.arrive_time == "--:--"
+            ):
+                offer.arrive_time = plan_direct["flight_arrive"]
+            if is_plausible_airline_name(plan_direct.get("flight_airline", "")) and (
+                not is_plausible_airline_name(offer.airline)
+                or offer.airline in {"", "Trip.com fare", "See Trip.com for airline"}
+            ):
+                offer.airline = plan_direct["flight_airline"]
+                offer.airline_logo = (
+                    plan_direct.get("flight_airline_logo")
+                    or airline_logo_url(offer.airline)
+                )
+            if plan_direct.get("flight_price") and offer.price_label in {
+                "",
+                "See Trip.com",
+            }:
+                offer.price_label = plan_direct["flight_price"]
+            if plan_direct.get("flight_duration") and offer.duration in {"", "—"}:
+                if "night" not in plan_direct["flight_duration"].lower():
+                    offer.duration = plan_direct["flight_duration"]
+            if plan_direct.get("flight_stops"):
+                offer.stops = plan_direct["flight_stops"]
+            if plan_direct.get("flight_return_depart") and (
+                not offer.return_depart_time or offer.return_depart_time == "--:--"
+            ):
+                offer.return_depart_time = plan_direct["flight_return_depart"]
+            if plan_direct.get("flight_return_arrive") and (
+                not offer.return_arrive_time or offer.return_arrive_time == "--:--"
+            ):
+                offer.return_arrive_time = plan_direct["flight_return_arrive"]
+            if is_plausible_airline_name(plan_direct.get("flight_return_airline", "")):
+                offer.return_airline = plan_direct["flight_return_airline"]
+                offer.return_airline_logo = (
+                    plan_direct.get("flight_return_airline_logo")
+                    or airline_logo_url(offer.return_airline)
+                )
+            if plan_direct.get("flight") and not offer.url:
+                offer.url = plan_direct["flight"]
+            if plan_direct.get("flight_return"):
+                offer.return_url = plan_direct["flight_return"]
             if links.get("flight_option") and (
                 offer.airline in {"", "Trip.com fare"} or offer.depart_time == "--:--"
             ):
@@ -2998,6 +3413,26 @@ class TravelAgentApp(tk.Tk):
                 self.agent.booking_links["flight_to"] = dest
                 self.agent.booking_links["flight_return_from"] = ret_from
                 self.agent.booking_links["flight_return_to"] = origin or "HKG"
+            # Guarantee both search-page links for open-jaw
+            if not offer.url and ctx.get("depart_date"):
+                offer.url = build_flight_search_url(
+                    origin=origin or "HKG",
+                    destination=dest,
+                    depart_date=str(ctx["depart_date"]),
+                    trip_type="oneway",
+                )
+            if not offer.return_url and ctx.get("return_date"):
+                offer.return_url = build_flight_search_url(
+                    origin=ret_from,
+                    destination=origin or "HKG",
+                    depart_date=str(ctx["return_date"]),
+                    trip_type="oneway",
+                )
+            if self.agent:
+                if offer.url:
+                    self.agent.booking_links["flight"] = offer.url
+                if offer.return_url:
+                    self.agent.booking_links["flight_return"] = offer.return_url
         else:
             if origin and offer.depart_airport in {"", "—", "HKG"}:
                 offer.depart_airport = origin
@@ -3030,15 +3465,66 @@ class TravelAgentApp(tk.Tk):
         if not offer.return_date and ctx.get("return_date"):
             offer.return_date = str(ctx["return_date"])
         # Friendly label when airline still unknown but we have a live fare
-        if not is_plausible_airline_name(offer.airline) or offer.airline in {"", "Trip.com fare"}:
-            if origin and dest:
-                offer.airline = f"{origin} → {dest} flight"
-            else:
-                offer.airline = "Recommended flight"
+        if not is_plausible_airline_name(offer.airline) or offer.airline in {
+            "",
+            "Trip.com fare",
+        }:
+            # Never put the route into the airline name slot
+            offer.airline = "See Trip.com for airline"
+        # Final pass: scraped open-jaw card always wins over placeholders
+        if self.agent:
+            plan = getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            if plan.get("flight_depart"):
+                offer.depart_time = plan["flight_depart"]
+            if plan.get("flight_arrive"):
+                offer.arrive_time = plan["flight_arrive"]
+            if is_plausible_airline_name(plan.get("flight_airline", "")):
+                offer.airline = plan["flight_airline"]
+                offer.airline_logo = (
+                    plan.get("flight_airline_logo") or airline_logo_url(offer.airline)
+                )
+            if plan.get("flight_price"):
+                offer.price_label = plan["flight_price"]
+            if plan.get("flight_duration") and "night" not in plan["flight_duration"].lower():
+                offer.duration = plan["flight_duration"]
+            if plan.get("flight_stops"):
+                offer.stops = plan["flight_stops"]
+            if plan.get("flight_return_depart"):
+                offer.return_depart_time = plan["flight_return_depart"]
+            if plan.get("flight_return_arrive"):
+                offer.return_arrive_time = plan["flight_return_arrive"]
+            if is_plausible_airline_name(plan.get("flight_return_airline", "")):
+                offer.return_airline = plan["flight_return_airline"]
+                offer.return_airline_logo = (
+                    plan.get("flight_return_airline_logo")
+                    or airline_logo_url(offer.return_airline)
+                )
+            if plan.get("flight_return_duration") and "night" not in plan[
+                "flight_return_duration"
+            ].lower():
+                offer.return_duration = plan["flight_return_duration"]
+            if plan.get("flight_return_stops"):
+                offer.return_stops = plan["flight_return_stops"]
+            if plan.get("flight"):
+                offer.url = plan["flight"]
+            if plan.get("flight_return"):
+                offer.return_url = plan["flight_return"]
         if offer.badge in {"", "Recommended"} and offer.price_label not in {"", "See Trip.com"}:
             offer.badge = "Live Trip.com fare"
         if is_plausible_airline_name(offer.airline) and not offer.airline_logo:
             offer.airline_logo = airline_logo_url(offer.airline)
+        # Open-jaw: always show the return leg block (airports/dates even if times pending)
+        if is_open_jaw:
+            if not offer.return_depart_time:
+                offer.return_depart_time = "--:--"
+            if not offer.return_arrive_time:
+                offer.return_arrive_time = "--:--"
+            if not offer.return_depart_airport:
+                offer.return_depart_airport = ret_from
+            if not offer.return_arrive_airport:
+                offer.return_arrive_airport = origin or "HKG"
+            if not offer.return_date and ctx.get("return_date"):
+                offer.return_date = str(ctx["return_date"])
         if offer.return_depart_time:
             if not is_open_jaw:
                 offer.trip_label = "Round-trip"
@@ -3161,6 +3647,59 @@ class TravelAgentApp(tk.Tk):
         if not offer.social_proof:
             offer.social_proof = "Live rates from Trip.com Hong Kong"
 
+    def _flight_offer_from_live_card(self, card: dict[str, str]) -> FlightOffer:
+        """Build a FlightOffer directly from a scraped open-jaw / flight card dict."""
+        from travel_agent.itinerary_parse import FlightOffer
+
+        ctx = self._trip_context
+        origin = to_flight_code(ctx.get("origin", "Hong Kong") or "Hong Kong").upper() or "HKG"
+        dest = (ctx.get("arrive_airport") or "").strip().upper()
+        ret_from = (ctx.get("depart_airport") or "").strip().upper()
+        airline = card.get("flight_airline", "")
+        ret_airline = card.get("flight_return_airline", "")
+        offer = FlightOffer(
+            airline=airline if is_plausible_airline_name(airline) else "",
+            airline_logo=card.get("flight_airline_logo", "")
+            or (airline_logo_url(airline) if is_plausible_airline_name(airline) else ""),
+            depart_date=card.get("flight_date") or ctx.get("depart_date", ""),
+            depart_time=card.get("flight_depart", ""),
+            depart_airport=card.get("flight_from") or origin,
+            arrive_time=card.get("flight_arrive", ""),
+            arrive_airport=card.get("flight_to") or dest,
+            duration=card.get("flight_duration", ""),
+            stops=card.get("flight_stops") or "Direct",
+            price_label=card.get("flight_price", ""),
+            return_airline=ret_airline if is_plausible_airline_name(ret_airline) else "",
+            return_airline_logo=card.get("flight_return_airline_logo", "")
+            or (
+                airline_logo_url(ret_airline)
+                if is_plausible_airline_name(ret_airline)
+                else ""
+            ),
+            return_date=card.get("flight_return_date") or ctx.get("return_date", ""),
+            return_depart_time=card.get("flight_return_depart", ""),
+            return_depart_airport=card.get("flight_return_from") or ret_from,
+            return_arrive_time=card.get("flight_return_arrive", ""),
+            return_arrive_airport=card.get("flight_return_to") or origin,
+            return_duration=card.get("flight_return_duration", ""),
+            return_stops=card.get("flight_return_stops") or "Direct",
+            url=card.get("flight", ""),
+            return_url=card.get("flight_return", ""),
+        )
+        if dest and ret_from and dest != ret_from:
+            offer.trip_label = "Open-jaw"
+            offer.badge = f"Open-jaw · {dest} in / {ret_from} out"
+            offer.arrive_airport = dest
+            offer.return_depart_airport = ret_from
+            offer.return_arrive_airport = origin
+        else:
+            offer.trip_label = "Round-trip"
+            if offer.price_label:
+                offer.badge = "Live Trip.com fare"
+        if not is_plausible_airline_name(offer.airline):
+            offer.airline = "See Trip.com for airline"
+        return offer
+
     def _apply_plan(self, text: str) -> None:
         self._last_plan = text
         # Prefer the agent's proposed rough route for airports / multi-stay cards
@@ -3189,8 +3728,70 @@ class TravelAgentApp(tk.Tk):
             pass
         parsed = self._apply_booking_urls(parse_itinerary(text))
         parsed = self._ensure_days(parsed)
+        # Paint flight card from the live scrape snapshot (airline / times / 2 links)
+        live = dict(getattr(self, "_live_flight_card", None) or {})
+        if not live.get("flight_depart") and self.agent:
+            live = dict(
+                getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            )
+        # Only replace the offer when we have real times — URL-only cards keep --:--
+        if live.get("flight_depart"):
+            parsed.flight_offer = self._flight_offer_from_live_card(live)
         self._render_parsed(parsed)
+        if parsed.flight_offer and parsed.flight_offer.depart_time not in {"", "--:--"}:
+            self.flight_row.set_offer(parsed.flight_offer)
+        err = getattr(self, "_live_flight_error", "") or ""
+        if err:
+            self._set_status(f"Flight scrape: {err}", C["danger"])
+        # If still empty, scrape again in the background and refresh just the flight card
+        need_refill = (
+            not parsed.flight_offer
+            or parsed.flight_offer.depart_time in {"", "--:--"}
+            or not is_plausible_airline_name(parsed.flight_offer.airline or "")
+        )
+        arrive = (self._trip_context.get("arrive_airport") or "").strip().upper()
+        ret_from = (self._trip_context.get("depart_airport") or "").strip().upper()
+        if need_refill and arrive and ret_from and arrive != ret_from:
+            self._queue_open_jaw_refill()
         self._append_chat("System", "Itinerary ready. Refine below if you like.", "agent")
+
+    def _queue_open_jaw_refill(self) -> None:
+        """Re-scrape open-jaw legs after the plan paints, then update the flight card."""
+        ctx = dict(self._trip_context)
+
+        def job() -> dict[str, str]:
+            assert self.agent is not None
+            arrive = (ctx.get("arrive_airport") or "").strip().upper()
+            ret_from = (ctx.get("depart_airport") or "").strip().upper()
+            oj = self.agent.browser.search_open_jaw_flights(
+                origin=ctx.get("origin", "Hong Kong") or "Hong Kong",
+                arrive_airport=arrive,
+                return_airport=ret_from,
+                depart_date=ctx.get("depart_date") or "",
+                return_date=ctx.get("return_date") or "",
+                adults=1,
+            )
+            self._merge_live_flight(oj)
+            self._live_flight_card = dict(oj)
+            return oj
+
+        def on_ok(oj: dict[str, str]) -> None:
+            if not oj.get("flight_depart"):
+                self._set_status(
+                    "Still waiting on Trip.com flight times — try Open outbound search.",
+                    C["danger"],
+                )
+                return
+            offer = self._flight_offer_from_live_card(oj)
+            self.flight_row.set_offer(offer)
+            self._set_status("Flight card updated from Trip.com", C["ok"])
+
+        self._set_status(
+            "Refreshing flight times from Trip.com…", C["accent_deep"]
+        )
+        self._run_browser_job(job, on_ok=on_ok, on_err=lambda e: self._set_status(
+            f"Flight refill failed: {e}", C["danger"]
+        ))
 
     def _ensure_days(self, parsed: ParsedItinerary) -> ParsedItinerary:
         """Always show Seoul-style day cards for the trip length."""

@@ -73,6 +73,7 @@ class FlightOffer:
     return_stops: str = ""
     return_airline_logo: str = ""
     url: str = ""
+    return_url: str = ""
     raw: str = ""
 
 

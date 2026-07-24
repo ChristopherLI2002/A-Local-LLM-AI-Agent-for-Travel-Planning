@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from travel_agent.config import settings
-from travel_agent.places import to_flight_code, to_hotel_city
+from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
 from travel_agent.airline_names import is_plausible_airline_name, airline_logo_url
 
 _TRIP_HOST_RE = re.compile(
@@ -66,9 +66,13 @@ def normalize_trip_url(url: str) -> str:
 
 
 def _has_numeric_city(url: str) -> bool:
+    """True when the hotel list URL includes Trip.com's numeric city id."""
     qs = parse_qs(urlparse(url).query)
-    city = (qs.get("city") or [""])[0]
-    return bool(re.fullmatch(r"\d{1,6}", city))
+    for key in ("cityId", "cityid", "city", "optionId", "optionid"):
+        val = (qs.get(key) or [""])[0]
+        if re.fullmatch(r"\d{1,8}", val or ""):
+            return True
+    return False
 
 
 def _qs(url: str) -> dict[str, str]:
@@ -221,7 +225,7 @@ def score_booking_url(url: str, kind: str) -> int:
         elif re.search(r"hotelid=\d+|hotel-detail-\d+", low):
             score += 40
         elif "/hotels/list" in low and _has_numeric_city(norm):
-            score += 25
+            score += 90
         elif "/hotels/list" in low:
             score += 10
         elif "/hotels/" in low:
@@ -230,6 +234,9 @@ def score_booking_url(url: str, kind: str) -> int:
             score -= 60
         if re.search(r"hotel-detail(?!-\d)", low) and "hotelid=" not in low:
             score -= 80
+        # Keyword-only list links (no cityId) often resolve to the wrong city
+        if "/hotels/list" in low and not _has_numeric_city(norm):
+            score -= 40
     else:
         if "hk.trip.com" in low:
             score += 20
@@ -247,7 +254,18 @@ def pick_booking_url(urls: list[str], kind: str, fallback: str = "") -> str:
         if trusted:
             best = max(trusted, key=lambda u: score_booking_url(u, kind))
             return _finalize(kind, best)
-        return _finalize(kind, fallback) if is_trusted_hotel_detail_url(fallback) else ""
+        # No detail page — prefer a list URL that includes cityId
+        lists = [
+            u
+            for u in candidates + ([fallback] if fallback else [])
+            if u and "/hotels/list" in u.lower() and _has_numeric_city(u)
+        ]
+        if lists:
+            best = max(lists, key=lambda u: score_booking_url(u, kind))
+            return ensure_locale_curr(normalize_trip_url(best))
+        if fallback and "/hotels/" in fallback.lower():
+            return ensure_locale_curr(normalize_trip_url(fallback))
+        return ""
     if fallback and "trip.com" in fallback.lower():
         candidates.append(fallback)
     if not candidates:
@@ -327,16 +345,18 @@ def build_hotel_list_url(
     adults: int = 2,
     rooms: int = 1,
 ) -> str:
-    """Build a Trip.com hotel search link without hardcoded city IDs.
+    """Build a Trip.com hotel list URL for the correct city.
 
-    Prefer the live URL returned by Playwright hub search when available.
-    This fallback uses keyword + cityName so Check Availability still opens
-    a usable search (Trip.com resolves the destination itself).
+    Prefer the live Playwright result URL when available. This fallback includes
+    ``cityId`` when known (verified IDs in places.py) so Check Availability does
+    not open the wrong city — keyword-only links are unreliable on Trip.com.
     """
     city_name = to_hotel_city(city) or (city or "").strip() or "Destination"
+    city_id = to_hotel_city_id(city) or to_hotel_city_id(city_name)
     params: dict[str, Any] = {
         "cityName": city_name,
-        "keyword": city_name,
+        "destName": city_name,
+        "searchWord": city_name,
         "checkin": checkin,
         "checkout": checkout,
         "adult": max(1, min(int(adults or 2), 8)),
@@ -344,6 +364,14 @@ def build_hotel_list_url(
         "locale": settings.trip_locale,
         "curr": settings.trip_currency,
     }
+    if city_id:
+        params["cityId"] = city_id
+        params["optionId"] = city_id
+        params["searchType"] = "CT"
+        params["searchValue"] = f"19|{city_id}*19*{city_id}"
+    else:
+        # Last resort — Trip.com may still mis-resolve keyword-only searches
+        params["keyword"] = city_name
     url = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
     return ensure_locale_curr(url)
 
@@ -395,12 +423,13 @@ def extract_booking_urls(text: str) -> dict[str, str]:
         ):
             out["hotel_name"] = name
 
-    # Structured cards emitted by search_flights / search_hotels
-    flight_card = re.search(
-        r"(?is)Structured flight card:\s*(.*?)(?:\n\n|Structured hotel|Canonical|City/keyword|Hotel search|Flight search|$)",
+    # Structured cards emitted by search_flights / search_hotels.
+    # Merge ALL cards — plan_trip may emit a summary card first (sometimes
+    # missing times) then a richer card inside the raw excerpt.
+    for flight_card in re.finditer(
+        r"(?is)Structured flight card:\s*(.*?)(?=\nStructured |\nCanonical |\nCity/keyword|\nHotel search|\nFlight search|\n--- |\n\n[A-Z]|\Z)",
         text,
-    )
-    if flight_card:
+    ):
         block = flight_card.group(1)
         for key, dest in (
             (r"(?im)^-\s*Airline:\s*(.+)$", "flight_airline"),
@@ -423,6 +452,8 @@ def extract_booking_urls(text: str) -> dict[str, str]:
             (r"(?im)^-\s*Return duration:\s*(.+)$", "flight_return_duration"),
             (r"(?im)^-\s*Return stops:\s*(.+)$", "flight_return_stops"),
         ):
+            if out.get(dest):
+                continue
             m = re.search(key, block)
             if m:
                 val = m.group(1).strip()
@@ -558,6 +589,10 @@ def resolve_booking_url(
                     "hotel",
                     canonicalize_hotel_detail_url(cand) or cand,
                 )
+        # Prefer live list URLs that include cityId over keyword-only builds
+        for cand in (tool_url, parsed_url, built_url):
+            if cand and "/hotels/list" in cand.lower() and _has_numeric_city(cand):
+                return ensure_locale_curr(normalize_trip_url(cand))
         best = pick_booking_url(
             [u for u in (tool_url, parsed_url, built_url) if u],
             "hotel",

@@ -21,7 +21,12 @@ from travel_agent.pricing import (
     pick_cheapest_from_comparison,
     summarize_prices,
 )
-from travel_agent.trip_urls import ensure_locale_curr, normalize_trip_url, extract_booking_urls
+from travel_agent.trip_urls import (
+    build_flight_search_url,
+    ensure_locale_curr,
+    normalize_trip_url,
+    extract_booking_urls,
+)
 
 TRIP_HOME = f"{settings.trip_base_url}/?locale={settings.trip_locale}&curr={settings.trip_currency}"
 
@@ -413,6 +418,15 @@ def parse_trip_com_flight_rows(
                 elif re.search(r"(?i)\d+\s*stop", cur):
                     stop_m = re.search(r"(?i)(\d+)\s*stop", cur)
                     stops = f"{stop_m.group(1)} stop" if stop_m else "1 stop"
+                elif re.search(
+                    r"(?i)\d+\s*h(?:ours?)?\s*\d*\s*m?(?:ins?)?\s+in\s+\w+", cur
+                ) or re.search(r"(?i)\d+h\s*\d*m\s+in\s+", cur):
+                    # e.g. "2h 19m in San Francisco"
+                    lay = re.sub(r"\s+", " ", cur).strip()
+                    if stops == "Direct":
+                        stops = f"1 stop · {lay}"
+                    elif "·" not in stops:
+                        stops = f"{stops} · {lay}"
                 elif " in " in cur.lower() and "stop" not in stops.lower():
                     stops = "1 stop"
                 elif _TIME_LINE_RE.match(cur) and not _is_filter_time(cur) and not arr:
@@ -463,7 +477,14 @@ class TripBrowser:
         self.page: Page | None = None
         self.last_attractions: list[str] = []
         self.last_hotel_stays: list[dict[str, str]] = []
+        # Live /hotels/list URL from the last Playwright type→autocomplete→Search
+        self.last_hotel_list_url: str = ""
+        # Preferred booking link: a specific hotel detail page (hotelId=…)
+        self.last_hotel_detail_url: str = ""
         self.last_proposed_route: object | None = None
+        self.last_flight_card: dict[str, str] = {}
+        # Frozen after plan_trip so later search_flights calls cannot wipe open-jaw times
+        self.last_plan_flight_card: dict[str, str] = {}
 
     def start(self) -> None:
         self._pw = sync_playwright().start()
@@ -753,10 +774,10 @@ class TripBrowser:
 
         page.on("response", _on_flight_api)
         self._safe_goto(canonical)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(4000)
         self._dismiss_popups()
         # Fares hydrate after calendar/API calls — wait until listing rows appear
-        for _ in range(24):
+        for _ in range(36):
             try:
                 probe = page.inner_text("body")
             except Exception:
@@ -768,7 +789,7 @@ class TripBrowser:
                 break
             page.wait_for_timeout(1000)
         page.mouse.wheel(0, 1800)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
         self._dismiss_popups()
         try:
             page.remove_listener("response", _on_flight_api)
@@ -843,6 +864,29 @@ class TripBrowser:
         card["depart_date"] = depart_date
         if is_round and params.get("rdate"):
             card["return_date"] = str(params["rdate"])
+        # Remember for the GUI even when the LLM rewrite drops times
+        self.last_flight_card = {
+            "flight_airline": card.get("airline", ""),
+            "flight_airline_logo": card.get("airline_logo", ""),
+            "flight_date": card.get("depart_date", ""),
+            "flight_depart": card.get("depart_time", ""),
+            "flight_arrive": card.get("arrive_time", ""),
+            "flight_from": card.get("depart_airport", origin.upper()),
+            "flight_to": card.get("arrive_airport", destination.upper()),
+            "flight_duration": card.get("duration", ""),
+            "flight_stops": card.get("stops", "Direct"),
+            "flight_price": card.get("price_label", ""),
+            "flight_return_airline": card.get("return_airline", ""),
+            "flight_return_airline_logo": card.get("return_airline_logo", ""),
+            "flight_return_date": card.get("return_date", ""),
+            "flight_return_depart": card.get("return_depart_time", ""),
+            "flight_return_arrive": card.get("return_arrive_time", ""),
+            "flight_return_from": card.get("return_depart_airport", ""),
+            "flight_return_to": card.get("return_arrive_airport", ""),
+            "flight_return_duration": card.get("return_duration", ""),
+            "flight_return_stops": card.get("return_stops", ""),
+            "flight": ensure_locale_curr(canonical),
+        }
         card_block = ""
         if card:
             airline_line = card.get("airline") or ""
@@ -902,9 +946,18 @@ class TripBrowser:
         adults: int = 2,
         rooms: int = 1,
     ) -> str:
-        """Search hotels via Trip.com hub form (type city name — no hardcoded city IDs)."""
+        """Search hotels by typing the city on Trip.com hub (Playwright autocomplete).
+
+        Flow: open /hotels/ → type city in \"Where to?\" → pick suggestion → Search
+        → open the top hotel detail page. Booking link = hotel detail (not the list).
+        """
+        from urllib.parse import unquote_plus
+
         page = self._require_page()
-        city_name = to_hotel_city(city) or (city or "").strip()
+        # Human city name for typing — never URL-encoded "Los+Angeles"
+        city_name = to_hotel_city(city) or unquote_plus((city or "").strip())
+        city_name = city_name.replace("+", " ")
+        city_name = re.sub(r"\s+", " ", city_name).strip()
         checkin = checkin or _default_depart(14)
         try:
             checkout = checkout or (
@@ -919,29 +972,40 @@ class TripBrowser:
             f"{settings.trip_base_url}/hotels/"
             f"?locale={settings.trip_locale}&curr={settings.trip_currency}"
         )
-        self._safe_goto(hub)
-        page.wait_for_timeout(2000)
-        self._dismiss_popups()
 
-        filled = self._try_fill_hotel_form(
-            city_name, checkin, checkout, adults_n, rooms_n
-        )
-        if not filled:
-            # Retry once after a fresh hub load
+        filled = False
+        for attempt in range(3):
             self._safe_goto(hub)
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(1800 + attempt * 500)
             self._dismiss_popups()
-            self._try_fill_hotel_form(
+            filled = self._try_fill_hotel_form(
                 city_name, checkin, checkout, adults_n, rooms_n
             )
+            if filled and self._hotel_list_url_ok(page.url or ""):
+                break
+            filled = False
 
-        # If autocomplete landed on list with wrong dates, patch query and reload
+        # If still on hub, one more explicit type+Enter attempt
+        if not self._hotel_list_url_ok(page.url or ""):
+            try:
+                self._safe_goto(hub)
+                page.wait_for_timeout(1500)
+                self._dismiss_popups()
+                self._try_fill_hotel_form(
+                    city_name, checkin, checkout, adults_n, rooms_n
+                )
+            except Exception:
+                pass
+
+        # Patch dates on the live list URL Trip.com built after autocomplete
         try:
             cur = page.url or ""
         except Exception:
             cur = ""
-        if "/hotels/" in cur.lower() and "list" in cur.lower():
-            patched = self._patch_hotel_list_dates(cur, checkin, checkout, adults_n, rooms_n)
+        if self._hotel_list_url_ok(cur):
+            patched = self._patch_hotel_list_dates(
+                cur, checkin, checkout, adults_n, rooms_n
+            )
             if patched and patched != cur:
                 self._safe_goto(patched)
                 page.wait_for_timeout(2000)
@@ -949,9 +1013,9 @@ class TripBrowser:
 
         self._wait_for_results(
             keywords=["HK$", "HKD", "hotel", "guest", "star", "review", "night"],
-            attempts=14,
+            attempts=16,
         )
-        for _ in range(10):
+        for _ in range(12):
             try:
                 probe = page.inner_text("body")
             except Exception:
@@ -985,40 +1049,71 @@ class TripBrowser:
             else "Parsed prices: NONE — page may still be loading or blocked."
         )
         final_url = page.url if "trip.com" in (page.url or "") else hub
-        # Prefer the live result URL Trip.com built after autocomplete
-        if re.search(r"[?&]city=\d+", final_url) or "/hotels/list" in final_url.lower():
-            canonical = ensure_locale_curr(normalize_trip_url(final_url))
-            canonical = self._patch_hotel_list_dates(
-                canonical, checkin, checkout, adults_n, rooms_n
-            ) or canonical
-        else:
-            from travel_agent.trip_urls import build_hotel_list_url
 
-            canonical = build_hotel_list_url(
-                city=city_name,
-                checkin=checkin,
-                checkout=checkout,
-                adults=adults_n,
-                rooms=rooms_n,
+        # Keep the live list URL for reference
+        if self._hotel_list_url_ok(final_url):
+            list_url = ensure_locale_curr(normalize_trip_url(final_url))
+            list_url = self._patch_hotel_list_dates(
+                list_url, checkin, checkout, adults_n, rooms_n
+            ) or list_url
+        else:
+            list_url = (
+                f"{settings.trip_base_url}/hotels/"
+                f"?locale={settings.trip_locale}&curr={settings.trip_currency}"
+            )
+            price_note += (
+                f" | WARN: hub type-search did not reach a list URL for '{city_name}'."
             )
 
-        detail_links = []
+        self.last_hotel_list_url = list_url
+
+        detail_links: list[str] = []
         hotel_names: list[str] = []
-        for u, label in self._extract_hotel_detail_options(limit=8):
-            nu = normalize_trip_url(u)
+        for u, label in self._extract_hotel_detail_options(limit=10):
+            nu = ensure_locale_curr(normalize_trip_url(u))
             low = nu.lower()
             if "/hotels/" not in low or "all-cities" in low:
                 continue
             if "hotelid=" in low or re.search(r"hotel-detail-\d+", low) or re.search(
                 r"/hotels/[^/?]+-\d+", low
             ):
-                detail_links.append(ensure_locale_curr(nu))
+                detail_links.append(nu)
                 if label and label not in hotel_names:
                     hotel_names.append(label)
             if len(detail_links) >= 3:
                 break
+
+        # If list anchors had no hotelId, mine page HTML / click top card
+        if not detail_links:
+            built = self._resolve_top_hotel_detail_url(
+                checkin=checkin, checkout=checkout, adults=adults_n, rooms=rooms_n
+            )
+            if built:
+                detail_links.append(built)
+
+        # Canonicalize the top detail link with stay dates
+        from travel_agent.trip_urls import (
+            canonicalize_hotel_detail_url,
+            is_trusted_hotel_detail_url,
+        )
+
+        rec_detail = ""
+        if detail_links:
+            rec_detail = (
+                canonicalize_hotel_detail_url(
+                    detail_links[0],
+                    checkin=checkin,
+                    checkout=checkout,
+                    city=city_name,
+                )
+                or detail_links[0]
+            )
+            detail_links[0] = rec_detail
+        self.last_hotel_detail_url = rec_detail if is_trusted_hotel_detail_url(rec_detail) else ""
+
+        # Booking link = hotel detail page (not the search list)
+        booking_url = self.last_hotel_detail_url or list_url
         details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
-        rec_detail = detail_links[0] if detail_links else ""
         rec_name = hotel_names[0] if hotel_names else ""
         hotel_card = self._scrape_top_hotel_card(
             city=city_name,
@@ -1029,40 +1124,136 @@ class TripBrowser:
             rec_name = hotel_card["name"]
         card_block = ""
         if hotel_card:
-            # Prefer list-card photo; only open detail when missing (detail often
-            # redirects to /hotels/booknew and races later flight navigations)
             if rec_detail and not hotel_card.get("image_url"):
+                # Scrape image from detail, then return to list for plan_trip continuity
+                list_before = page.url or list_url
                 img = self.scrape_hotel_image_url(rec_detail)
                 if img:
                     hotel_card["image_url"] = img
+                if self._hotel_list_url_ok(list_before):
+                    try:
+                        self._safe_goto(list_before)
+                        page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
             card_block = (
                 "Structured hotel card:\n"
                 f"- Hotel: {hotel_card.get('name', rec_name)}\n"
                 f"- Stars: {hotel_card.get('stars', '')}\n"
                 f"- Score: {hotel_card.get('score', '')}\n"
                 f"- Location: {hotel_card.get('location', city_name)}\n"
-                f"- Nightly: {hotel_card.get('price_label', '')}\n"
-                f"- Reviews: {hotel_card.get('reviews', '')}\n"
                 + (
                     f"- Image: {hotel_card['image_url']}\n"
                     if hotel_card.get("image_url")
                     else ""
                 )
+                + f"- Nightly: {hotel_card.get('price_label', '')}\n"
+                + f"- Reviews: {hotel_card.get('reviews', '')}\n"
             )
-        content = body if prices and len(body) > 400 else snippet
-        return _clean_text(
-            f"Hotel search URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
-            f"Canonical search URL: {canonical}\n"
-            + (f"Recommended hotel detail link: {rec_detail}\n" if rec_detail else "")
-            + (f"Recommended hotel name: {rec_name}\n" if rec_name else "")
-            + (f"{card_block}" if card_block else "")
-            + f"City/keyword: {city_name} (via hub form search)\n"
-            + f"Check-in: {checkin} | Check-out: {checkout}\n"
-            f"Adults: {adults_n} | Rooms: {rooms_n}\n"
-            f"{price_note}\n"
-            + (f"{details}\n" if details else "")
-            + f"\n{content}"
+
+        content = body if prices and len(body) > 200 else snippet
+        how = (
+            "Playwright hub search: typed city → autocomplete → Search → hotel detail"
+            if self.last_hotel_detail_url
+            else (
+                "Playwright hub search: typed city → autocomplete → Search (list only)"
+                if self._hotel_list_url_ok(list_url)
+                else "Playwright hub search FAILED to resolve list (check city name)"
+            )
         )
+        return _clean_text(
+            f"Hotel search method: {how}\n"
+            f"City/keyword typed: {city_name}\n"
+            f"Check-in: {checkin} | Check-out: {checkout}\n"
+            f"Adults: {adults_n} | Rooms: {rooms_n}\n"
+            f"Live result URL: {ensure_locale_curr(normalize_trip_url(final_url))}\n"
+            f"Canonical search URL: {booking_url}\n"
+            f"Hotel list URL: {list_url}\n"
+            f"{price_note}\n"
+            + (f"Recommended hotel name: {rec_name}\n" if rec_name else "")
+            + (f"Recommended hotel detail link: {rec_detail}\n" if rec_detail else "")
+            + (f"{details}\n" if details else "")
+            + (f"{card_block}\n" if card_block else "")
+            + f"\n{content}",
+            limit=9000,
+        )
+
+    def _resolve_top_hotel_detail_url(
+        self,
+        *,
+        checkin: str,
+        checkout: str,
+        adults: int = 2,
+        rooms: int = 1,
+    ) -> str:
+        """Build a hotel detail URL from list-page hotelIds when anchors are sparse."""
+        from travel_agent.trip_urls import (
+            canonicalize_hotel_detail_url,
+            is_trusted_hotel_detail_url,
+        )
+
+        page = self._require_page()
+        html = ""
+        try:
+            html = page.content() or ""
+        except Exception:
+            html = ""
+        # Prefer explicit hotelId values embedded in list HTML/JSON
+        ids: list[str] = []
+        for m in re.finditer(
+            r"(?:hotelId|hotelid|masterhotelid)[\"'\s:=]+(\d{5,10})",
+            html,
+            re.I,
+        ):
+            hid = m.group(1)
+            if hid not in ids:
+                ids.append(hid)
+            if len(ids) >= 5:
+                break
+        if not ids:
+            # Last resort: click the first hotel card and capture navigation
+            try:
+                card = page.locator(
+                    "a[href*='hotelId='], a[href*='hotelid='], "
+                    "a[href*='/hotels/detail'], a[href*='hotel-detail-']"
+                ).first
+                if card.count():
+                    with page.expect_navigation(timeout=12000, wait_until="domcontentloaded"):
+                        card.click(timeout=5000)
+                    page.wait_for_timeout(1500)
+                    cur = page.url or ""
+                    if is_trusted_hotel_detail_url(cur):
+                        return (
+                            canonicalize_hotel_detail_url(
+                                cur, checkin=checkin, checkout=checkout
+                            )
+                            or ensure_locale_curr(normalize_trip_url(cur))
+                        )
+            except Exception:
+                pass
+            return ""
+
+        for hid in ids:
+            raw = (
+                f"{settings.trip_base_url}/hotels/detail/"
+                f"?hotelId={hid}&checkIn={checkin}&checkOut={checkout}"
+                f"&adult={max(1, adults)}&crn={max(1, rooms)}"
+                f"&locale={settings.trip_locale}&curr={settings.trip_currency}"
+            )
+            cand = canonicalize_hotel_detail_url(
+                raw, checkin=checkin, checkout=checkout
+            ) or ensure_locale_curr(raw)
+            if is_trusted_hotel_detail_url(cand):
+                return cand
+        return ""
+
+    @staticmethod
+    def _hotel_list_url_ok(url: str) -> bool:
+        low = (url or "").lower()
+        if "/hotels/list" not in low:
+            return False
+        # Trip.com sets cityId (or city=) after a successful autocomplete pick
+        return bool(re.search(r"[?&]city(?:id)?=\d+", low, re.I))
 
     def _patch_hotel_list_dates(
         self,
@@ -1456,6 +1647,154 @@ class TripBrowser:
         text = format_route_proposal(route, origin=origin or "Hong Kong")
         return text
 
+    def search_open_jaw_flights(
+        self,
+        *,
+        origin: str,
+        arrive_airport: str,
+        return_airport: str,
+        depart_date: str,
+        return_date: str,
+        adults: int = 1,
+    ) -> dict[str, str]:
+        """Open two Trip.com one-way searches; pick top fare on each; fill card.
+
+        Returns a merged card with:
+          - outbound fields + ``flight`` (outbound search URL)
+          - return_* fields + ``flight_return`` (return search URL)
+        """
+        origin_code = to_flight_code(origin).upper()
+        arrive_code = to_flight_code(arrive_airport).upper() or arrive_airport.upper()
+        return_from = to_flight_code(return_airport).upper() or return_airport.upper()
+        adults_n = max(1, min(int(adults or 1), 9))
+
+        # Always emit both search-page links (even if scrape is slow/empty)
+        out_url = build_flight_search_url(
+            origin=origin_code,
+            destination=arrive_code,
+            depart_date=depart_date,
+            trip_type="oneway",
+            adults=adults_n,
+        )
+        ret_url = build_flight_search_url(
+            origin=return_from,
+            destination=origin_code,
+            depart_date=return_date,
+            trip_type="oneway",
+            adults=adults_n,
+        )
+
+        out_text = self.search_flights(
+            origin=origin_code,
+            destination=arrive_code,
+            depart_date=depart_date,
+            trip_type="oneway",
+            adults=adults_n,
+            include_return_leg=False,
+        )
+        out_snap = dict(self.last_flight_card or {})
+        out_fields = extract_booking_urls(out_text)
+        for k, v in out_snap.items():
+            if v and (not out_fields.get(k) or k in {
+                "flight_depart", "flight_arrive", "flight_airline", "flight_price",
+            }):
+                out_fields[k] = v
+        if out_fields.get("flight"):
+            out_url = out_fields["flight"]
+
+        ret_text = self.search_flights(
+            origin=return_from,
+            destination=origin_code,
+            depart_date=return_date,
+            trip_type="oneway",
+            adults=adults_n,
+            include_return_leg=False,
+        )
+        ret_snap = dict(self.last_flight_card or {})
+        ret_fields = extract_booking_urls(ret_text)
+        for k, v in ret_snap.items():
+            if v and (not ret_fields.get(k) or k in {
+                "flight_depart", "flight_arrive", "flight_airline", "flight_price",
+            }):
+                ret_fields[k] = v
+        if ret_fields.get("flight"):
+            ret_url = ret_fields["flight"]
+
+        # Retry outbound once if the first page didn't yield times
+        if not out_fields.get("flight_depart"):
+            try:
+                self._require_page().wait_for_timeout(2500)
+                out_text = self.search_flights(
+                    origin=origin_code,
+                    destination=arrive_code,
+                    depart_date=depart_date,
+                    trip_type="oneway",
+                    adults=adults_n,
+                    include_return_leg=False,
+                )
+                out_snap = dict(self.last_flight_card or {})
+                out_fields = extract_booking_urls(out_text)
+                for k, v in out_snap.items():
+                    if v:
+                        out_fields[k] = v
+                if out_fields.get("flight"):
+                    out_url = out_fields["flight"]
+            except Exception:
+                pass
+
+        card: dict[str, str] = {
+            "flight": out_url,
+            "flight_return": ret_url,
+            "flight_from": origin_code,
+            "flight_to": arrive_code,
+            "flight_return_from": return_from,
+            "flight_return_to": origin_code,
+            "flight_date": depart_date,
+            "flight_return_date": return_date,
+            "flight_airline": out_fields.get("flight_airline", ""),
+            "flight_airline_logo": out_fields.get("flight_airline_logo", ""),
+            "flight_depart": out_fields.get("flight_depart", ""),
+            "flight_arrive": out_fields.get("flight_arrive", ""),
+            "flight_duration": out_fields.get("flight_duration", ""),
+            "flight_stops": out_fields.get("flight_stops", "") or "Direct",
+            "flight_return_airline": ret_fields.get("flight_airline", ""),
+            "flight_return_airline_logo": ret_fields.get("flight_airline_logo", ""),
+            "flight_return_depart": ret_fields.get("flight_depart", ""),
+            "flight_return_arrive": ret_fields.get("flight_arrive", ""),
+            "flight_return_duration": ret_fields.get("flight_duration", ""),
+            "flight_return_stops": ret_fields.get("flight_stops", "") or "Direct",
+        }
+
+        out_p = summarize_prices("outbound", out_text).get("lowest_hkd")
+        ret_p = summarize_prices("return", ret_text).get("lowest_hkd")
+        if out_p is None and out_fields.get("flight_price"):
+            try:
+                out_p = float(re.sub(r"[^\d.]", "", out_fields["flight_price"]) or "0") or None
+            except ValueError:
+                out_p = None
+        if ret_p is None and ret_fields.get("flight_price"):
+            try:
+                ret_p = float(re.sub(r"[^\d.]", "", ret_fields["flight_price"]) or "0") or None
+            except ValueError:
+                ret_p = None
+        if out_p is not None and ret_p is not None:
+            card["flight_price"] = _fmt_hkd(round(float(out_p) + float(ret_p), 2))
+            card["flight_outbound_price"] = _fmt_hkd(out_p)
+            card["flight_return_price"] = _fmt_hkd(ret_p)
+        elif out_p is not None:
+            card["flight_price"] = _fmt_hkd(out_p)
+            card["flight_outbound_price"] = card["flight_price"]
+        elif ret_p is not None:
+            card["flight_price"] = _fmt_hkd(ret_p)
+            card["flight_return_price"] = card["flight_price"]
+        elif out_fields.get("flight_price"):
+            card["flight_price"] = out_fields["flight_price"]
+
+        self.last_flight_card = {k: v for k, v in card.items() if v}
+        self.last_plan_flight_card = dict(self.last_flight_card)
+        self._last_open_jaw_raw = (out_text, ret_text)
+        return dict(self.last_plan_flight_card)
+
     def plan_trip(
         self,
         origin: str,
@@ -1535,19 +1874,9 @@ class TripBrowser:
         )
         multi_stay = bool(regional and len(regional.stays) > 1)
 
-        # Pull live attraction names from Trip.com things-to-do for the day plan
+        # Flights first (before attractions/hotels) so fare pages are not blocked
+        # after heavy things-to-do scraping — empty scrapes show as --:-- in the GUI.
         attractions: list[str] = []
-        try:
-            # For regions, scrape each stay city
-            if regional:
-                for stay in regional.stays:
-                    attractions.extend(
-                        self.scrape_attractions(stay.city, limit=8)[:6]
-                    )
-            else:
-                attractions = self.scrape_attractions(hotel_city or destination, limit=18)
-        except Exception:
-            attractions = list(self.last_attractions or [])
 
         raw_blocks: list[str] = []
         sections: list[str] = []
@@ -1584,6 +1913,13 @@ class TripBrowser:
                     adults=adults,
                     include_return_leg=False,
                 )
+                # Preserve outbound scrape BEFORE return search overwrites last_flight_card
+                out_card_snap = dict(self.last_flight_card or {})
+                out_fields = extract_booking_urls(out_text)
+                for k, v in out_card_snap.items():
+                    if v and not out_fields.get(k):
+                        out_fields[k] = v
+
                 ret_text = self.search_flights(
                     origin=return_from_code,
                     destination=origin,
@@ -1592,6 +1928,12 @@ class TripBrowser:
                     adults=adults,
                     include_return_leg=False,
                 )
+                ret_card_snap = dict(self.last_flight_card or {})
+                ret_fields = extract_booking_urls(ret_text)
+                for k, v in ret_card_snap.items():
+                    if v and not ret_fields.get(k):
+                        ret_fields[k] = v
+
                 flight_text = (
                     f"OPEN-JAW REGIONAL FLIGHTS ({regional.label if regional else destination})\n"
                     f"Outbound: {origin.upper()} → {arrive_code.upper()}\n"
@@ -1600,9 +1942,11 @@ class TripBrowser:
                     f"{ret_text}"
                 )
                 recommended_flight_date = depart_date
-                out_fields = extract_booking_urls(out_text)
-                ret_fields = extract_booking_urls(ret_text)
-                recommended_flight_url = out_fields.get("flight") or ""
+                recommended_flight_url = (
+                    out_fields.get("flight")
+                    or out_card_snap.get("flight")
+                    or ""
+                )
                 flight_compare_text = (
                     f"Open-jaw on requested dates "
                     f"(outbound {depart_date}, return {return_date})"
@@ -1611,36 +1955,128 @@ class TripBrowser:
                 # Combine prices when both legs report HKD
                 out_p = summarize_prices("outbound", out_text).get("lowest_hkd")
                 ret_p = summarize_prices("return", ret_text).get("lowest_hkd")
+                if out_p is None and out_fields.get("flight_price"):
+                    try:
+                        out_p = float(
+                            re.sub(r"[^\d.]", "", out_fields["flight_price"]) or "0"
+                        ) or None
+                    except ValueError:
+                        out_p = None
+                if ret_p is None and ret_fields.get("flight_price"):
+                    try:
+                        ret_p = float(
+                            re.sub(r"[^\d.]", "", ret_fields["flight_price"]) or "0"
+                        ) or None
+                    except ValueError:
+                        ret_p = None
                 if out_p is not None and ret_p is not None:
                     recommended_flight_price = round(float(out_p) + float(ret_p), 2)
                 else:
                     recommended_flight_price = out_p or ret_p
-                flight_card_fields = {**out_fields, **{
-                    k: v for k, v in ret_fields.items() if k.startswith("flight_return") or k.startswith("return")
-                }}
+                flight_card_fields = dict(out_fields)
                 # Map return leg into return_* fields for the card
                 if ret_fields.get("flight_airline"):
                     flight_card_fields["flight_return_airline"] = ret_fields["flight_airline"]
+                if ret_fields.get("flight_airline_logo"):
+                    flight_card_fields["flight_return_airline_logo"] = ret_fields[
+                        "flight_airline_logo"
+                    ]
                 if ret_fields.get("flight_depart"):
                     flight_card_fields["flight_return_depart"] = ret_fields["flight_depart"]
                 if ret_fields.get("flight_arrive"):
                     flight_card_fields["flight_return_arrive"] = ret_fields["flight_arrive"]
                 if ret_fields.get("flight_from"):
                     flight_card_fields["flight_return_from"] = ret_fields["flight_from"]
+                else:
+                    flight_card_fields["flight_return_from"] = return_from_code.upper()
                 if ret_fields.get("flight_to"):
                     flight_card_fields["flight_return_to"] = ret_fields["flight_to"]
-                if ret_fields.get("flight_airline_logo"):
-                    flight_card_fields["flight_return_airline_logo"] = ret_fields[
-                        "flight_airline_logo"
+                else:
+                    flight_card_fields["flight_return_to"] = to_flight_code(origin).upper()
+                if ret_fields.get("flight_duration"):
+                    flight_card_fields["flight_return_duration"] = ret_fields[
+                        "flight_duration"
                     ]
+                if ret_fields.get("flight_stops"):
+                    flight_card_fields["flight_return_stops"] = ret_fields["flight_stops"]
                 flight_card_fields.setdefault("flight_return_date", return_date)
+                flight_card_fields.setdefault("flight_date", depart_date)
                 # Always pin open-jaw airports (scraper may echo wrong city)
+                flight_card_fields["flight_from"] = to_flight_code(origin).upper()
                 flight_card_fields["flight_to"] = arrive_code.upper()
                 flight_card_fields["flight_return_from"] = return_from_code.upper()
                 flight_card_fields["flight_return_to"] = to_flight_code(origin).upper()
-                for k, v in out_fields.items():
-                    if k.startswith("flight_") and not k.startswith("flight_return"):
-                        flight_card_fields.setdefault(k, v)
+                if recommended_flight_price is not None:
+                    flight_card_fields["flight_price"] = _fmt_hkd(recommended_flight_price)
+                # Persist merged open-jaw card for the GUI (do not lose outbound times)
+                self.last_flight_card = {
+                    k: v
+                    for k, v in flight_card_fields.items()
+                    if isinstance(v, str) and k.startswith("flight")
+                }
+                self.last_flight_card["flight"] = recommended_flight_url or self.last_flight_card.get(
+                    "flight", ""
+                )
+                # Retry once if outbound times never loaded (common after slow pages)
+                if not self.last_flight_card.get("flight_depart"):
+                    try:
+                        saved_return = {
+                            k: v
+                            for k, v in self.last_flight_card.items()
+                            if k.startswith("flight_return") and v
+                        }
+                        page = self._require_page()
+                        page.wait_for_timeout(2500)
+                        retry_out = self.search_flights(
+                            origin=origin,
+                            destination=arrive_code,
+                            depart_date=depart_date,
+                            trip_type="oneway",
+                            adults=adults,
+                            include_return_leg=False,
+                        )
+                        retry_snap = dict(self.last_flight_card or {})
+                        retry_fields = extract_booking_urls(retry_out)
+                        for k, v in retry_snap.items():
+                            if v and not retry_fields.get(k):
+                                retry_fields[k] = v
+                        for k, v in retry_fields.items():
+                            if v and k.startswith("flight") and not k.startswith(
+                                "flight_return"
+                            ):
+                                flight_card_fields[k] = v
+                                self.last_flight_card[k] = v
+                        # Restore return leg (retry overwrote last_flight_card)
+                        for k, v in saved_return.items():
+                            self.last_flight_card[k] = v
+                            flight_card_fields[k] = v
+                        for k, v in (ret_fields or {}).items():
+                            if not v:
+                                continue
+                            mapped = {
+                                "flight_airline": "flight_return_airline",
+                                "flight_airline_logo": "flight_return_airline_logo",
+                                "flight_depart": "flight_return_depart",
+                                "flight_arrive": "flight_return_arrive",
+                                "flight_duration": "flight_return_duration",
+                                "flight_stops": "flight_return_stops",
+                            }.get(k)
+                            if mapped and not self.last_flight_card.get(mapped):
+                                self.last_flight_card[mapped] = v
+                                flight_card_fields[mapped] = v
+                        self.last_flight_card["flight_return_from"] = return_from_code.upper()
+                        self.last_flight_card["flight_return_to"] = to_flight_code(
+                            origin
+                        ).upper()
+                        self.last_flight_card["flight_from"] = to_flight_code(origin).upper()
+                        self.last_flight_card["flight_to"] = arrive_code.upper()
+                        self.last_flight_card["flight"] = (
+                            recommended_flight_url
+                            or self.last_flight_card.get("flight", "")
+                        )
+                    except Exception:
+                        pass
+                self.last_plan_flight_card = dict(self.last_flight_card)
                 flight_prices = summarize_prices("open-jaw", flight_text)
                 flight_snippets = flight_prices.get("snippets") or []
                 if flight_snippets:
@@ -1664,16 +2100,36 @@ class TripBrowser:
                     "Structured flight card:\n"
                     f"- Route: open-jaw {to_flight_code(origin).upper()}→{arrive_code.upper()} "
                     f"/ {return_from_code.upper()}→{to_flight_code(origin).upper()}\n"
-                    + (f"- Airline: {recommended_flight_airline}\n" if recommended_flight_airline else "")
+                    + (
+                        f"- Airline: {recommended_flight_airline}\n"
+                        if recommended_flight_airline
+                        else ""
+                    )
+                    + (
+                        f"- Airline logo: {flight_card_fields['flight_airline_logo']}\n"
+                        if flight_card_fields.get("flight_airline_logo")
+                        else ""
+                    )
+                    + f"- Date: {flight_card_fields.get('flight_date', depart_date)}\n"
                     + f"- From: {flight_card_fields.get('flight_from', to_flight_code(origin).upper())}\n"
                     + f"- To: {flight_card_fields.get('flight_to', arrive_code.upper())}\n"
                     + f"- Depart: {flight_card_fields.get('flight_depart', '')}\n"
                     + f"- Arrive: {flight_card_fields.get('flight_arrive', '')}\n"
+                    + f"- Duration: {flight_card_fields.get('flight_duration', '')}\n"
+                    + f"- Stops: {flight_card_fields.get('flight_stops', '')}\n"
+                    + f"- Return airline: {ret_air}\n"
+                    + (
+                        f"- Return airline logo: {flight_card_fields['flight_return_airline_logo']}\n"
+                        if flight_card_fields.get("flight_return_airline_logo")
+                        else ""
+                    )
+                    + f"- Return date: {flight_card_fields.get('flight_return_date', return_date)}\n"
                     + f"- Return from: {flight_card_fields.get('flight_return_from', return_from_code.upper())}\n"
                     + f"- Return to: {flight_card_fields.get('flight_return_to', to_flight_code(origin).upper())}\n"
                     + f"- Return depart: {flight_card_fields.get('flight_return_depart', '')}\n"
                     + f"- Return arrive: {flight_card_fields.get('flight_return_arrive', '')}\n"
-                    + f"- Return airline: {ret_air}\n"
+                    + f"- Return duration: {flight_card_fields.get('flight_return_duration', '')}\n"
+                    + f"- Return stops: {flight_card_fields.get('flight_return_stops', '')}\n"
                     + f"- Price: {_fmt_hkd(recommended_flight_price)}\n"
                 )
                 sections.append(
@@ -1715,6 +2171,17 @@ class TripBrowser:
                 )
                 recommended_flight_price = flight_prices.get("lowest_hkd")
                 flight_card_fields = extract_booking_urls(flight_text or "")
+                live_rt = dict(self.last_flight_card or {})
+                for k, v in live_rt.items():
+                    if v and not flight_card_fields.get(k):
+                        flight_card_fields[k] = v
+                self.last_plan_flight_card = {
+                    k: v
+                    for k, v in {**live_rt, **flight_card_fields}.items()
+                    if isinstance(v, str) and k.startswith("flight")
+                }
+                if recommended_flight_url:
+                    self.last_plan_flight_card["flight"] = recommended_flight_url
                 flight_snippets = flight_prices.get("snippets") or []
                 if flight_snippets:
                     recommended_flight_option = flight_snippets[0]
@@ -1756,6 +2223,20 @@ class TripBrowser:
                     raw_blocks.insert(0, structured_flight_card)
                 raw_blocks.append("--- Raw flight excerpt ---\n" + flight_text[:3500])
                 n += 1
+
+        # Attractions after flights so fare scrapes stay reliable
+        try:
+            if regional:
+                for stay in regional.stays:
+                    attractions.extend(
+                        self.scrape_attractions(stay.city, limit=8)[:6]
+                    )
+            else:
+                attractions = self.scrape_attractions(
+                    hotel_city or destination, limit=18
+                )
+        except Exception:
+            attractions = list(self.last_attractions or [])
 
         train_url = ""
         train_low = None
@@ -1859,14 +2340,28 @@ class TripBrowser:
             rooms=1,
         )
         hotel_url = self._require_page().url
-        canon_h = re.search(r"Canonical search URL:\s*(\S+)", hotel_text)
-        if canon_h:
-            recommended_hotel_url = canon_h.group(1).rstrip(".,;")
-        else:
-            recommended_hotel_url = hotel_url or recommended_hotel_url
+        # Prefer hotel detail page from Playwright; fall back to live list
+        recommended_hotel_url = (
+            getattr(self, "last_hotel_detail_url", "") or ""
+        ).strip()
+        if not recommended_hotel_url:
+            recommended_hotel_url = (
+                getattr(self, "last_hotel_list_url", "") or ""
+            ).strip()
+        if not recommended_hotel_url:
+            canon_h = re.search(r"Canonical search URL:\s*(\S+)", hotel_text)
+            if canon_h:
+                recommended_hotel_url = canon_h.group(1).rstrip(".,;")
+            else:
+                recommended_hotel_url = hotel_url or recommended_hotel_url
         recommended_hotel_url = ensure_locale_curr(
             normalize_trip_url(recommended_hotel_url)
         )
+        # Seed detail link from search_hotels before scanning the page again
+        if getattr(self, "last_hotel_detail_url", ""):
+            recommended_hotel_detail_links = [self.last_hotel_detail_url]
+            if not recommended_hotel_url or "/hotels/list" in recommended_hotel_url.lower():
+                recommended_hotel_url = self.last_hotel_detail_url
         hotel_prices = summarize_prices(
             f"Hotels in {hotel_city}",
             hotel_text,
@@ -1881,6 +2376,7 @@ class TripBrowser:
         hotel_snippets = hotel_prices.get("snippets") or []
         if hotel_snippets:
             recommended_hotel_option = hotel_snippets[0]
+        seeded_detail = list(recommended_hotel_detail_links)
         recommended_hotel_detail_links = []
         recommended_hotel_names: list[str] = []
         for u, label in self._extract_hotel_detail_options(limit=8):
@@ -1903,6 +2399,8 @@ class TripBrowser:
                 recommended_hotel_names.append(label)
             if len(recommended_hotel_detail_links) >= 3:
                 break
+        if not recommended_hotel_detail_links and seeded_detail:
+            recommended_hotel_detail_links = seeded_detail
         # Prefer real hotel title over generic price snippets
         if recommended_hotel_names:
             recommended_hotel_option = recommended_hotel_names[0]
@@ -2192,9 +2690,15 @@ class TripBrowser:
         ]
         if want_flights:
             pick_lines.append("RECOMMENDED FLIGHT")
-            pick_lines.append(
-                f"- Route: {origin} -> {destination} (round-trip)"
-            )
+            if arrive_code.upper() != return_from_code.upper():
+                pick_lines.append(
+                    f"- Route: open-jaw {to_flight_code(origin).upper()}→{arrive_code.upper()} "
+                    f"/ {return_from_code.upper()}→{to_flight_code(origin).upper()}"
+                )
+            else:
+                pick_lines.append(
+                    f"- Route: {to_flight_code(origin).upper()} -> {arrive_code.upper()} (round-trip)"
+                )
             if recommended_flight_airline:
                 pick_lines.append(f"- Airline: {recommended_flight_airline}")
             if flight_card_fields.get("flight_airline_logo"):
@@ -2391,8 +2895,11 @@ Transport modes: {", ".join(modes)}
         rooms: int,
     ) -> bool:
         """Type destination into Trip.com hotels hub (Where to?) and Search."""
+        from urllib.parse import unquote_plus
+
         page = self._require_page()
-        city = (city or "").strip()
+        city = unquote_plus((city or "").strip()).replace("+", " ")
+        city = re.sub(r"\s+", " ", city).strip()
         if not city:
             return False
         try:
@@ -2424,12 +2931,12 @@ Transport modes: {", ".join(modes)}
             except Exception:
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
-            # Type so autocomplete suggestions appear
+            # Type so autocomplete suggestions appear (character delay matters)
             try:
-                city_box.type(city, delay=40)
+                city_box.type(city, delay=55)
             except Exception:
                 city_box.fill(city)
-            page.wait_for_timeout(1200)
+            page.wait_for_timeout(1600)
 
             # Prefer a suggestion that contains the city name
             picked = False
@@ -2440,11 +2947,13 @@ Transport modes: {", ".join(modes)}
                     "[class*='Suggest'] li, "
                     "[class*='autocomplete'] li, "
                     "[class*='AutoComplete'] li, "
+                    "[class*='dropdown'] li, "
+                    "[role='listbox'] [role='option'], "
                     "[role='option'], "
                     "[class*='destination'] li, "
                     "ul[class*='list'] li"
                 )
-                n = min(suggestions.count(), 12)
+                n = min(suggestions.count(), 14)
                 for i in range(n):
                     try:
                         el = suggestions.nth(i)
@@ -2454,6 +2963,7 @@ Transport modes: {", ".join(modes)}
                         if not text:
                             continue
                         low = text.lower()
+                        # Prefer city / destination rows over hotel-name hits
                         if city_l in low or city_l.split()[0] in low:
                             el.click(timeout=3000)
                             picked = True
@@ -2476,9 +2986,9 @@ Transport modes: {", ".join(modes)}
 
             if not picked:
                 page.keyboard.press("ArrowDown")
-                page.wait_for_timeout(200)
+                page.wait_for_timeout(250)
                 page.keyboard.press("Enter")
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(700)
 
             # Best-effort date + occupancy (hub often already has defaults)
             self._try_set_hotel_hub_dates(checkin, checkout)
@@ -2516,7 +3026,7 @@ Transport modes: {", ".join(modes)}
                     break
                 page.wait_for_timeout(700)
             page.wait_for_timeout(800)
-            return "/hotels/" in (page.url or "").lower()
+            return self._hotel_list_url_ok(page.url or "")
         except Exception:
             return False
 
@@ -2964,9 +3474,7 @@ Transport modes: {", ".join(modes)}
         adults: int = 2,
         stay_index: int = 2,
     ) -> dict[str, str]:
-        """Search Trip.com for a regional stay city; never leave a blank placeholder."""
-        from travel_agent.trip_urls import build_hotel_list_url
-
+        """Search Trip.com for a regional stay city via Playwright type→Search."""
         fb = _fallback_stay_hotel(stay_city)
         stay_rec: dict[str, str] = {
             "city": stay_city,
@@ -2976,9 +3484,7 @@ Transport modes: {", ".join(modes)}
             "checkout": checkout,
             "label": label,
             "name": fb["name"],
-            "url": build_hotel_list_url(
-                city=stay_city, checkin=checkin, checkout=checkout, adults=adults
-            ),
+            "url": "",
             "price_label": "",
             "total_label": "",
             "score": fb.get("score", ""),
@@ -3004,21 +3510,27 @@ Transport modes: {", ".join(modes)}
             )
             return stay_rec
 
+        # Prefer hotel detail URL from Playwright; fall back to live list
+        stay_url = (getattr(self, "last_hotel_detail_url", "") or "").strip()
         h_url = ""
         try:
             h_url = self._require_page().url
         except Exception:
             h_url = ""
-        canon_h = re.search(r"Canonical search URL:\s*(\S+)", h_text or "")
-        stay_url = ensure_locale_curr(
-            normalize_trip_url(
-                (canon_h.group(1).rstrip(".,;") if canon_h else h_url) or ""
-            )
-        )
+        if not stay_url:
+            stay_url = (getattr(self, "last_hotel_list_url", "") or "").strip()
+        if not stay_url:
+            canon_h = re.search(r"Canonical search URL:\s*(\S+)", h_text or "")
+            stay_url = (
+                canon_h.group(1).rstrip(".,;") if canon_h else h_url
+            ) or ""
+        stay_url = ensure_locale_curr(normalize_trip_url(stay_url))
         if stay_url:
             stay_rec["url"] = stay_url
 
-        h_prices = summarize_prices(f"Hotels in {stay_city}", h_text, url=h_url)
+        h_prices = summarize_prices(
+            f"Hotels in {stay_city}", h_text, url=stay_url or h_url
+        )
         nightly = h_prices.get("lowest_hkd")
         stay_total = (
             round(float(nightly) * nights, 2) if nightly is not None else None
@@ -3488,7 +4000,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_hotels",
-            "description": "Search hotels on Trip.com Hong Kong by city or area keyword.",
+            "description": (
+                "Search hotels on Trip.com Hong Kong by typing the city into the "
+                "hotels hub (Playwright: Where to? → autocomplete → Search). "
+                "Returns the live list URL Trip.com builds after the city is selected."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

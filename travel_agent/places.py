@@ -134,7 +134,11 @@ _CITY_TO_CODE: dict[str, str] = {
 
 
 def normalize_place(value: str) -> str:
-    text = (value or "").strip().lower()
+    from urllib.parse import unquote_plus
+
+    # URL-encoded names (Los+Angeles / Los%20Angeles) must become readable cities
+    text = unquote_plus((value or "").strip()).lower()
+    text = text.replace("+", " ")
     text = re.sub(r"\s+", " ", text)
     text = text.replace(".", "")
     return text
@@ -257,8 +261,12 @@ _HOTEL_CITY_IDS: dict[str, tuple[str, str]] = {
 
 
 def to_hotel_city(value: str) -> str:
-    """Hotel searches prefer human city names."""
-    key = normalize_place(value)
+    """Hotel searches prefer human city names (spaces, never '+')."""
+    from urllib.parse import unquote_plus
+
+    raw = unquote_plus((value or "").strip()).replace("+", " ")
+    raw = re.sub(r"\s+", " ", raw).strip()
+    key = normalize_place(raw)
     if key in _HOTEL_CITY_IDS:
         return _HOTEL_CITY_IDS[key][1]
     # If user passed an airport code, expand to a city name when known
@@ -280,13 +288,16 @@ def to_hotel_city(value: str) -> str:
         "nyc": "New York",
         "sfo": "San Francisco",
         "lax": "Los Angeles",
+        "san": "San Diego",
+        "mia": "Miami",
+        "mco": "Orlando",
     }
     if key in code_to_city:
         return code_to_city[key]
     # Title-case multi-word cities
     if key in _CITY_TO_CODE and not re.fullmatch(r"[a-z]{3}", key):
-        return value.strip().title() if value.strip() else key.title()
-    return value.strip() or key
+        return raw.title() if raw else key.title()
+    return raw or key
 
 
 def to_hotel_city_id(value: str) -> str | None:

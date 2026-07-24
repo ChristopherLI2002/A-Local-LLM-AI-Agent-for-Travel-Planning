@@ -86,6 +86,32 @@ class TravelAgent:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
         self.browser.last_proposed_route = None
+        self.browser.last_plan_flight_card = {}
+        self.browser.last_flight_card = {}
+
+    def _apply_plan_flight_card(self) -> None:
+        """Copy frozen open-jaw / plan flight scrape into booking_links."""
+        plan_card = getattr(self.browser, "last_plan_flight_card", None) or {}
+        for k, v in plan_card.items():
+            if not v or not str(k).startswith("flight"):
+                continue
+            cur = self.booking_links.get(k) or ""
+            if not cur or cur in {"--:--", "See Trip.com", "n/a"}:
+                self.booking_links[k] = v
+            elif k in {
+                "flight_depart",
+                "flight_arrive",
+                "flight_airline",
+                "flight_return_depart",
+                "flight_return_arrive",
+                "flight_return_airline",
+                "flight_price",
+                "flight_duration",
+                "flight_stops",
+                "flight_return_duration",
+                "flight_return_stops",
+            }:
+                self.booking_links[k] = v
 
     def chat(self, user_message: str) -> str:
         self.messages.append({"role": "user", "content": user_message})
@@ -103,6 +129,7 @@ class TravelAgent:
 
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
+                self._apply_plan_flight_card()
                 return (message.get("content") or "").strip() or "(No response from model.)"
 
             for call in tool_calls:
@@ -182,17 +209,69 @@ class TravelAgent:
                     route_ready = True
 
                 found = extract_booking_urls(result)
+                # Prefer frozen plan_trip card (open-jaw) over later search_flights scrapes
+                plan_card = getattr(self.browser, "last_plan_flight_card", None) or {}
+                live = getattr(self.browser, "last_flight_card", None) or {}
+                if name == "plan_trip" and live:
+                    prefer = live
+                elif plan_card:
+                    prefer = plan_card
+                elif name in {"search_flights", "compare_flight_prices"}:
+                    prefer = live
+                else:
+                    prefer = plan_card or live
+                for k, v in prefer.items():
+                    if not v or not str(k).startswith("flight"):
+                        continue
+                    cur = found.get(k) or ""
+                    if not cur or cur in {"--:--", "See Trip.com", "n/a"}:
+                        found[k] = v
+                    elif k in {
+                        "flight_depart",
+                        "flight_arrive",
+                        "flight_airline",
+                        "flight_return_depart",
+                        "flight_return_arrive",
+                        "flight_return_airline",
+                        "flight_price",
+                        "flight_duration",
+                        "flight_stops",
+                        "flight_return_duration",
+                        "flight_return_stops",
+                    }:
+                        found[k] = v
                 if found.get("flight"):
                     self.booking_links["flight"] = found["flight"]
+                if found.get("flight_return"):
+                    self.booking_links["flight_return"] = found["flight_return"]
                 if found.get("hotel"):
                     new_h = found["hotel"]
                     old_h = self.booking_links.get("hotel", "")
+                    live_detail = (
+                        getattr(self.browser, "last_hotel_detail_url", "") or ""
+                    ).strip()
+                    live_list = (
+                        getattr(self.browser, "last_hotel_list_url", "") or ""
+                    ).strip()
+                    # Prefer Playwright hotel detail page over list/search
+                    if live_detail and is_trusted_hotel_detail_url(live_detail):
+                        if not is_trusted_hotel_detail_url(new_h):
+                            new_h = live_detail
                     if is_trusted_hotel_detail_url(new_h):
                         if not is_trusted_hotel_detail_url(old_h) or (
                             score_booking_url(new_h, "hotel")
                             >= score_booking_url(old_h, "hotel")
                         ):
                             self.booking_links["hotel"] = new_h
+                    elif "/hotels/list" in new_h.lower() and (
+                        "cityid=" in new_h.lower() or "city=" in new_h.lower()
+                    ):
+                        if not is_trusted_hotel_detail_url(old_h):
+                            self.booking_links["hotel"] = new_h
+                    elif live_list and not self.booking_links.get("hotel"):
+                        self.booking_links["hotel"] = live_list
+                    elif live_detail and not self.booking_links.get("hotel"):
+                        self.booking_links["hotel"] = live_detail
                 if found.get("hotel_name"):
                     self.booking_links["hotel_name"] = found["hotel_name"]
                 if found.get("flight_price"):
@@ -213,6 +292,7 @@ class TravelAgent:
                     "flight_stops",
                     "flight_airline_logo",
                     "flight_date",
+                    "flight_return",
                     "flight_return_airline",
                     "flight_return_depart",
                     "flight_return_arrive",
@@ -246,6 +326,7 @@ class TravelAgent:
         response = self.client.chat(model=self.model, messages=self.messages)
         message = response["message"]
         self.messages.append(message)
+        self._apply_plan_flight_card()
         return (message.get("content") or "").strip() or (
             "I reached the tool-call limit. Please refine your request."
         )
