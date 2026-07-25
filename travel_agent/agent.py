@@ -111,6 +111,7 @@ class TravelAgent:
         self.browser.last_flight_card = {}
         self.browser.last_car_card = {}
         self.browser.last_car_detail_url = ""
+        self.browser.last_attraction_day_plan = []
 
     def _apply_plan_flight_card(self) -> None:
         """Copy frozen open-jaw / plan flight scrape into booking_links."""

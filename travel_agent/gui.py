@@ -2813,6 +2813,9 @@ class TravelAgentApp(tk.Tk):
                 nights=nights,
                 checkin=depart,
                 checkout=ret or "",
+                rent_car=bool(self._trip_context.get("rent_car")),
+                pickup_date=depart,
+                dropoff_date=ret or "",
             )
             self.agent.browser.last_proposed_route = None
             self.agent.browser.last_flight_card = {}
@@ -2820,6 +2823,7 @@ class TravelAgentApp(tk.Tk):
             self.agent.browser.last_hotel_stays = []
             self.agent.browser.last_car_card = {}
             self.agent.browser.last_car_detail_url = ""
+            self.agent.browser.last_attraction_day_plan = []
         self._live_flight_card = {}
         self._live_flight_error = ""
 
@@ -4406,6 +4410,11 @@ class TravelAgentApp(tk.Tk):
             return_depart_time=return_depart_time,
             attractions=(
                 list(getattr(self.agent.browser, "last_attractions", None) or [])
+                if self.agent
+                else None
+            ),
+            attraction_plan=(
+                list(getattr(self.agent.browser, "last_attraction_day_plan", None) or [])
                 if self.agent
                 else None
             ),

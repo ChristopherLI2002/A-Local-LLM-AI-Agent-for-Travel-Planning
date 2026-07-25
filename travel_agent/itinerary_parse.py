@@ -690,6 +690,7 @@ def synthesize_day_blocks(
     arrive_time: str = "",
     return_depart_time: str = "",
     attractions: list[str] | None = None,
+    attraction_plan: list[dict[str, str]] | None = None,
 ) -> list[Block]:
     """Build detailed day cards with named attractions and restaurants."""
     from travel_agent.destination_guides import (
@@ -707,6 +708,7 @@ def synthesize_day_blocks(
         n,
         styles=styles,
         attractions=attractions,
+        attraction_plan=attraction_plan,
         regional_route=regional,
     )
     days: list[Block] = []
@@ -737,6 +739,7 @@ def ensure_day_blocks(
     arrive_time: str = "",
     return_depart_time: str = "",
     attractions: list[str] | None = None,
+    attraction_plan: list[dict[str, str]] | None = None,
 ) -> ParsedItinerary:
     """Guarantee detailed day cards with exact places to visit and eat."""
     raw = parsed.raw or ""
@@ -758,6 +761,7 @@ def ensure_day_blocks(
             arrive_time=arrive_time,
             return_depart_time=return_depart_time,
             attractions=attractions,
+            attraction_plan=attraction_plan,
         )
     else:
         from travel_agent.attraction_images import enrich_block_images, images_for_timetable
@@ -773,6 +777,7 @@ def ensure_day_blocks(
                 max(n, len(parsed.days) or n),
                 styles=styles,
                 attractions=attractions,
+                attraction_plan=attraction_plan,
             )
             if ideas and parsed.days and arrive_time:
                 body = format_day_body(ideas[0], arrive_time=arrive_time)
@@ -798,6 +803,7 @@ def ensure_day_blocks(
             max(n, len(parsed.days) or n),
             styles=styles,
             attractions=attractions,
+            attraction_plan=attraction_plan,
         )
         if ideas and arrive_time:
             body = format_day_body(ideas[0], arrive_time=arrive_time)

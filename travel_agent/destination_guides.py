@@ -522,6 +522,30 @@ def normalize_guide_city(destination: str) -> str:
     return ""
 
 
+def day_ideas_from_llm_plan(
+    plan: list[dict[str, str]],
+    *,
+    nights: int,
+) -> list[DayIdea]:
+    """Convert LLM-arranged attraction route into DayIdea cards."""
+    n = max(1, int(nights or 1))
+    ideas: list[DayIdea] = []
+    for row in plan[:n]:
+        ideas.append(
+            DayIdea(
+                title=str(row.get("title") or "").strip() or "Sightseeing",
+                go=str(row.get("go") or "").strip() or "Explore the city",
+                also=str(row.get("also") or "").strip() or str(row.get("go") or ""),
+                lunch=str(row.get("lunch") or "").strip() or "Lunch nearby",
+                dinner=str(row.get("dinner") or "").strip() or "Dinner nearby",
+                route=str(row.get("route") or "").strip() or "Local transit",
+            )
+        )
+    while len(ideas) < n and ideas:
+        ideas.append(ideas[min(1, len(ideas) - 1)])
+    return ideas[:n] if ideas else []
+
+
 def day_ideas_from_attractions(
     attractions: list[str],
     *,
@@ -737,12 +761,19 @@ def day_ideas_for(
     *,
     styles: list[str] | None = None,
     attractions: list[str] | None = None,
+    attraction_plan: list[dict[str, str]] | None = None,
     regional_route: object | None = None,
 ) -> list[DayIdea]:
     """Return one DayIdea per trip day, cycling curated or scraped content."""
     n = max(1, int(nights or 1))
     style = ((styles or ["First-time"])[0] if styles else "First-time").strip()
     dest_label = (destination or "the city").strip() or "the city"
+
+    # LLM-arranged route from scraped Trip.com attractions (preferred when present)
+    if attraction_plan:
+        llm_ideas = day_ideas_from_llm_plan(attraction_plan, nights=n)
+        if llm_ideas:
+            return llm_ideas
 
     # Multi-city region (e.g. California → SF + LA)
     if regional_route is None:
