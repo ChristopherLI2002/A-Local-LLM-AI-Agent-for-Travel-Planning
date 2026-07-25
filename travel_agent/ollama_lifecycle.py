@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import subprocess
 import sys
@@ -57,6 +59,165 @@ def is_ollama_ready(host: str | None = None, timeout: float = 2.0) -> bool:
             return 200 <= getattr(resp, "status", 200) < 300
     except Exception:
         return False
+
+
+def fetch_ollama_model_names(host: str | None = None, timeout: float = 5.0) -> list[str]:
+    """List installed model tags via the HTTP API."""
+    base = (host or settings.ollama_host).rstrip("/")
+    url = f"{base}/api/tags"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return []
+    names: list[str] = []
+    for item in data.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("name") or item.get("model") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def model_is_installed(model: str, host: str | None = None) -> bool:
+    """True when ``model`` (or a close tag) is already pulled."""
+    want = (model or "").strip()
+    if not want:
+        return False
+    installed = fetch_ollama_model_names(host)
+    for name in installed:
+        if name == want or name.startswith(want + "-") or name.startswith(want + ":"):
+            return True
+    base = want.split(":")[0]
+    if base:
+        for name in installed:
+            if name == base or name.startswith(base + ":"):
+                return True
+    return False
+
+
+def pull_ollama_model(
+    model: str,
+    *,
+    on_progress: Callable[[str], None] | None = None,
+    timeout: float = 3600.0,
+) -> None:
+    """Download a model with ``ollama pull`` (hidden console on Windows)."""
+    want = (model or settings.ollama_model or "qwen2.5:7b").strip()
+    bin_path = ollama_bin()
+    if not bin_path:
+        raise FileNotFoundError(
+            "Ollama not found on PATH. Install from https://ollama.com and try again."
+        )
+    if on_progress:
+        on_progress(
+            f"Downloading model {want}... (first time may take several minutes)"
+        )
+
+    kwargs: dict = {
+        "args": [bin_path, "pull", want],
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+    }
+    if sys.platform == "win32":
+        kwargs["startupinfo"] = _hidden_startupinfo()
+        kwargs["creationflags"] = _CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(**kwargs)
+    deadline = time.monotonic() + timeout
+    last_note = ""
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise TimeoutError(f"Timed out pulling Ollama model {want}")
+            text = (line or "").strip()
+            if not text or not on_progress:
+                continue
+            # Ollama progress uses braille spinners — strip for Windows consoles / Tk
+            note = re.sub(r"[\u2800-\u28ff]", "", text)
+            note = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", note).strip()[:100]
+            if not note:
+                continue
+            if note != last_note and (
+                "%" in note
+                or "pulling" in note.lower()
+                or "success" in note.lower()
+                or "verifying" in note.lower()
+                or "writing" in note.lower()
+                or "manifest" in note.lower()
+            ):
+                last_note = note
+                on_progress(f"Downloading {want}: {note}")
+        code = proc.wait(timeout=30)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+
+    if code != 0:
+        raise RuntimeError(
+            f"Failed to download Ollama model '{want}' (exit {code}). "
+            f"Try manually: ollama pull {want}"
+        )
+    if on_progress:
+        on_progress(f"Model {want} is ready")
+
+
+def ensure_ollama_model(
+    model: str | None = None,
+    *,
+    host: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> str:
+    """Ensure the preferred model is installed; pull it automatically if missing."""
+    host = host or settings.ollama_host
+    want = (model or settings.ollama_model or "qwen2.5:7b").strip()
+
+    if model_is_installed(want, host):
+        installed = fetch_ollama_model_names(host)
+        for name in installed:
+            if name == want or name.startswith(want + "-") or name.startswith(want + ":"):
+                if on_progress:
+                    on_progress(f"Ollama model ready: {name}")
+                return name
+        for name in installed:
+            if name.split(":")[0] == want.split(":")[0]:
+                if on_progress:
+                    on_progress(f"Ollama model ready: {name}")
+                return name
+        if on_progress:
+            on_progress(f"Ollama model ready: {want}")
+        return want
+
+    if on_progress:
+        on_progress(f"Model '{want}' not found - downloading...")
+    pull_ollama_model(want, on_progress=on_progress)
+
+    for _ in range(20):
+        if model_is_installed(want, host):
+            break
+        time.sleep(0.5)
+    if not model_is_installed(want, host):
+        raise RuntimeError(
+            f"Model '{want}' was pulled but is still not visible at {host}. "
+            "Restart Ollama and try again."
+        )
+    if on_progress:
+        on_progress(f"Ollama model ready: {want}")
+    return want
 
 
 def _stop_ollama_win32() -> None:
@@ -118,7 +279,6 @@ def _stop_ollama_win32() -> None:
         while ok:
             name = (entry.szExeFile or "").lower()
             if any(name.startswith(p) for p in _OLLAMA_NAME_PREFIXES):
-                # Don't kill ourselves if somehow named oddly
                 if entry.th32ProcessID and entry.th32ProcessID != 0:
                     pids.append(int(entry.th32ProcessID))
             ok = Process32NextW(snap, ctypes.byref(entry))
@@ -140,7 +300,6 @@ def stop_ollama() -> None:
         try:
             _stop_ollama_win32()
         except Exception:
-            # Last resort: hidden taskkill (still no visible window)
             for name in ("ollama.exe", "ollama app.exe", "ollama_llama_server.exe"):
                 try:
                     _run_hidden(["taskkill", "/F", "/IM", name, "/T"], timeout=15)
@@ -175,7 +334,6 @@ def start_ollama_serve() -> subprocess.Popen[bytes] | None:
     }
     if sys.platform == "win32":
         kwargs["startupinfo"] = _hidden_startupinfo()
-        # CREATE_NO_WINDOW alone — DETACHED_PROCESS can make Ollama spawn visible consoles
         kwargs["creationflags"] = _CREATE_NO_WINDOW
         kwargs["close_fds"] = True
     else:
@@ -211,37 +369,40 @@ def ensure_ollama_running(
     host: str | None = None,
     timeout: float = 90.0,
     on_progress: Callable[[str], None] | None = None,
-) -> None:
-    """Make sure Ollama is reachable.
+    model: str | None = None,
+    ensure_model: bool = True,
+) -> str | None:
+    """Make sure Ollama is reachable, and optionally that the chat model is pulled.
 
     By default, if Ollama is already up we leave it alone (avoids console flashes
     from kill/restart). Pass restart=True to force a silent restart.
+
+    Returns the resolved model name when ``ensure_model`` is True, else None.
     """
     host = host or settings.ollama_host
 
     if not restart and is_ollama_ready(host):
         if on_progress:
             on_progress("Ollama already running")
-        return
+    else:
+        if restart:
+            if on_progress:
+                on_progress("Restarting Ollama…")
+            stop_ollama()
+            time.sleep(0.8)
+        elif on_progress:
+            on_progress("Starting Ollama…")
 
-    if restart:
-        if on_progress:
-            on_progress("Restarting Ollama…")
-        stop_ollama()
-        time.sleep(0.8)
-    elif on_progress:
-        on_progress("Starting Ollama…")
+        if not is_ollama_ready(host):
+            if on_progress:
+                on_progress("Starting Ollama…")
+            start_ollama_serve()
 
-    if is_ollama_ready(host):
-        if on_progress:
-            on_progress("Ollama is ready")
-        return
+            if not wait_ollama_ready(host, timeout=timeout, on_progress=on_progress):
+                raise RuntimeError(
+                    f"Ollama did not become ready at {host} within {int(timeout)}s."
+                )
 
-    if on_progress:
-        on_progress("Starting Ollama…")
-    start_ollama_serve()
-
-    if not wait_ollama_ready(host, timeout=timeout, on_progress=on_progress):
-        raise RuntimeError(
-            f"Ollama did not become ready at {host} within {int(timeout)}s."
-        )
+    if not ensure_model:
+        return None
+    return ensure_ollama_model(model, host=host, on_progress=on_progress)

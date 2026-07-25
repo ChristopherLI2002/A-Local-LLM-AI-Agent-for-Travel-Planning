@@ -678,6 +678,9 @@ class TripBrowser:
         self.last_flight_card: dict[str, str] = {}
         # Frozen after plan_trip so later search_flights calls cannot wipe open-jaw times
         self.last_plan_flight_card: dict[str, str] = {}
+        # Candidate lists for LLM ranking (flight rows / hotel options)
+        self.last_flight_candidates: list[dict[str, str]] = []
+        self.last_hotel_candidates: list[dict[str, str]] = []
         # Car rental deal from Playwright carhire search
         self.last_car_card: dict[str, str] = {}
         self.last_car_detail_url: str = ""
@@ -1065,7 +1068,10 @@ class TripBrowser:
         adults: int = 1,
         include_return_leg: bool = True,
     ) -> str:
-        """Search flights on Trip.com HK and return visible result text."""
+        """Search flights on Trip.com HK and return visible result text.
+
+        Flow: load fare list → form candidate rows → LLM picks one → fill card.
+        """
         page = self._require_page()
         origin_raw = origin.strip()
         dest_raw = destination.strip()
@@ -1075,6 +1081,13 @@ class TripBrowser:
         trip_type_norm = trip_type.strip().lower()
         is_round = trip_type_norm in {"round", "roundtrip", "rt", "2"}
         adults_n = max(1, min(int(adults or 1), 9))
+        self._update_selection_context(
+            origin=origin_raw or origin,
+            destination=dest_raw or destination,
+            adults=adults_n,
+            checkin=depart_date,
+            checkout=return_date or "",
+        )
 
         params: dict[str, Any] = {
             "dcity": origin,
@@ -1162,11 +1175,35 @@ class TripBrowser:
         # Prefer full body when it has prices (main selector can miss late-loaded fares)
         content = body if prices and len(body) > 200 else snippet
         final_url = page.url if "trip.com" in page.url else canonical
+
+        # Explicit list → LLM pick → card (also stores last_flight_candidates)
+        candidate_rows = parse_trip_com_flight_rows(
+            body or content, origin=origin.upper(), destination=destination.upper()
+        )
+        self.last_flight_candidates = [dict(r) for r in candidate_rows[:12]]
         card = self._scrape_top_flight_card(
             origin=origin.upper(),
             destination=destination.upper(),
             lowest=prices[0] if prices else None,
         )
+        # If scrape missed times but list had rows, force the LLM pick onto the card
+        if candidate_rows and not card.get("depart_time"):
+            picked = self._pick_flight_row(
+                candidate_rows, lowest=prices[0] if prices else None
+            )
+            if picked:
+                card.update({k: v for k, v in picked.items() if v})
+        candidates_block = ""
+        if self.last_flight_candidates:
+            lines = ["Flight candidates (LLM selects one):"]
+            for i, row in enumerate(self.last_flight_candidates[:8]):
+                lines.append(
+                    f"  {i}. {row.get('airline', '?')} "
+                    f"{row.get('depart_time', '?')}→{row.get('arrive_time', '?')} "
+                    f"{row.get('price_label', '')} "
+                    f"[{row.get('stops', 'Direct')}]"
+                )
+            candidates_block = "\n".join(lines) + "\n"
         if is_round and include_return_leg and card.get("depart_time"):
             ret_card = self._scrape_return_flight_card(
                 outbound=card,
@@ -1284,6 +1321,7 @@ class TripBrowser:
             + f"\nTrip type: {'roundtrip' if is_round else 'oneway'}\n"
             + f"Adults: {adults_n}\n"
             + f"{price_note}\n"
+            + (candidates_block if candidates_block else "")
             + (f"{card_block}\n" if card_block else "")
             + f"\n{content}"
         )
@@ -1298,8 +1336,8 @@ class TripBrowser:
     ) -> str:
         """Search hotels by typing the city on Trip.com hub (Playwright autocomplete).
 
-        Flow: open /hotels/ → type city in \"Where to?\" → pick suggestion → Search
-        → open the top hotel detail page. Booking link = hotel detail (not the list).
+        Flow: open /hotels/ → type city → Search → form hotel list → LLM picks
+        → open selected hotel DETAIL page → scrape name/score/price/image for the card.
         """
         page = self._require_page()
         # Human city name for typing — never URL-encoded "Los+Angeles"
@@ -1439,7 +1477,27 @@ class TripBrowser:
             if len(detail_links) >= 8:
                 break
 
-        # LLM ranks scraped hotels (budget + travel style), not just the first list row
+        # Form candidate list → LLM pick → open SELECTED detail → scrape card
+        from travel_agent.llm_select import enrich_hotel_candidates_from_page
+        from travel_agent.trip_urls import (
+            canonicalize_hotel_detail_url,
+            is_trusted_hotel_detail_url,
+        )
+
+        enriched: list[dict[str, str]] = []
+        if raw_hotel_options:
+            enriched = enrich_hotel_candidates_from_page(
+                raw_hotel_options,
+                body,
+                city=city_name,
+                default_prices=prices,
+            )
+            self.last_hotel_candidates = [dict(r) for r in enriched[:10]]
+        else:
+            self.last_hotel_candidates = []
+
+        picked_url = ""
+        picked_name = ""
         if len(raw_hotel_options) > 1:
             picked_url, picked_name = self._pick_hotel_from_options(
                 raw_hotel_options,
@@ -1447,28 +1505,23 @@ class TripBrowser:
                 city=city_name,
                 prices=prices,
             )
-            if picked_url:
-                detail_links = [picked_url] + [
-                    u for u, _ in raw_hotel_options if u != picked_url
-                ]
-            if picked_name and picked_name not in hotel_names:
-                hotel_names.insert(0, picked_name)
-            elif picked_name:
-                hotel_names = [picked_name] + [n for n in hotel_names if n != picked_name]
+        elif raw_hotel_options:
+            picked_url, picked_name = raw_hotel_options[0]
 
-        # If list anchors had no hotelId, mine page HTML / click top card
+        if picked_url:
+            detail_links = [picked_url] + [
+                u for u, _ in raw_hotel_options if u != picked_url
+            ]
+        if picked_name:
+            hotel_names = [picked_name] + [n for n in hotel_names if n != picked_name]
+
         if not detail_links:
             built = self._resolve_top_hotel_detail_url(
                 checkin=checkin, checkout=checkout, adults=adults_n, rooms=rooms_n
             )
             if built:
                 detail_links.append(built)
-
-        # Canonicalize the top detail link with stay dates
-        from travel_agent.trip_urls import (
-            canonicalize_hotel_detail_url,
-            is_trusted_hotel_detail_url,
-        )
+                picked_url = built
 
         rec_detail = ""
         if detail_links:
@@ -1482,12 +1535,14 @@ class TripBrowser:
                 or detail_links[0]
             )
             detail_links[0] = rec_detail
+            picked_url = rec_detail
         if not is_trusted_hotel_detail_url(rec_detail):
             built = self._resolve_top_hotel_detail_url(
                 checkin=checkin, checkout=checkout, adults=adults_n, rooms=rooms_n
             )
             if built:
                 rec_detail = built
+                picked_url = built
                 if detail_links:
                     detail_links[0] = built
                 else:
@@ -1497,37 +1552,74 @@ class TripBrowser:
         )
         self.last_hotel_name = ""
 
-        # Open the detail page to get the real hotel name (+ image)
-        rec_name = hotel_names[0] if hotel_names else ""
-        hotel_card = self._scrape_top_hotel_card(
-            city=city_name,
-            fallback_name=rec_name,
-            lowest=prices[0] if prices else None,
-        )
-        if hotel_card.get("name") and not rec_name:
-            rec_name = hotel_card["name"]
+        hotel_card: dict[str, str] = {
+            "name": picked_name or (hotel_names[0] if hotel_names else ""),
+            "stars": "",
+            "score": "",
+            "score_label": "",
+            "reviews": "",
+            "location": city_name,
+            "price_label": f"HK${prices[0]:,.0f}" if prices else "",
+            "image_url": "",
+        }
+        for row in enriched:
+            if picked_url and row.get("url") == picked_url:
+                for k in ("stars", "score", "reviews", "price_label", "location", "name"):
+                    if row.get(k) and not hotel_card.get(k):
+                        hotel_card[k] = row[k]
+                break
 
+        # Always open the selected hotel detail page for authoritative fields
         if self.last_hotel_detail_url:
             meta = self._scrape_hotel_detail_meta(self.last_hotel_detail_url)
-            if meta.get("name") and _hotel_name_plausible_for_city(meta["name"], city_name):
-                rec_name = meta["name"]
-                self.last_hotel_name = rec_name
-                hotel_card["name"] = rec_name
-            elif rec_name and _hotel_name_plausible_for_city(rec_name, city_name):
-                if not rec_name.lower().startswith(("hotels in ", "recommended hotel")):
-                    self.last_hotel_name = rec_name
-            if meta.get("image_url") and not hotel_card.get("image_url"):
-                hotel_card["image_url"] = meta["image_url"]
-            if meta.get("score") and not hotel_card.get("score"):
-                hotel_card["score"] = meta["score"]
-                hotel_card["score_label"] = meta.get("score_label", "")
-            if meta.get("stars") and not hotel_card.get("stars"):
-                hotel_card["stars"] = meta["stars"]
-        elif rec_name and _hotel_name_plausible_for_city(rec_name, city_name):
-            if not rec_name.lower().startswith(("hotels in ", "recommended hotel")):
-                self.last_hotel_name = rec_name
+            for k, v in meta.items():
+                if v:
+                    hotel_card[k] = v
+            if meta.get("name") and _hotel_name_plausible_for_city(
+                meta["name"], city_name
+            ):
+                self.last_hotel_name = meta["name"]
+                hotel_card["name"] = meta["name"]
+            elif hotel_card.get("name") and _hotel_name_plausible_for_city(
+                hotel_card["name"], city_name
+            ):
+                if not hotel_card["name"].lower().startswith(
+                    ("hotels in ", "recommended hotel")
+                ):
+                    self.last_hotel_name = hotel_card["name"]
+        elif hotel_card.get("name") and _hotel_name_plausible_for_city(
+            hotel_card["name"], city_name
+        ):
+            if not hotel_card["name"].lower().startswith(
+                ("hotels in ", "recommended hotel")
+            ):
+                self.last_hotel_name = hotel_card["name"]
 
-        # Booking link = hotel detail page (not the search list)
+        if not hotel_card.get("name") or hotel_card["name"].lower().startswith(
+            ("hotels in ", "recommended hotel")
+        ):
+            list_card = self._scrape_top_hotel_card(
+                city=city_name,
+                fallback_name=hotel_card.get("name") or "",
+                lowest=prices[0] if prices else None,
+            )
+            for k, v in list_card.items():
+                if v and not hotel_card.get(k):
+                    hotel_card[k] = v
+
+        rec_name = self.last_hotel_name or hotel_card.get("name") or ""
+        candidates_block = ""
+        if self.last_hotel_candidates:
+            lines = ["Hotel candidates (LLM selects one, then opens detail):"]
+            for i, row in enumerate(self.last_hotel_candidates[:8]):
+                lines.append(
+                    f"  {i}. {row.get('name', '?')} | {row.get('score', '')} | "
+                    f"{row.get('price_label', '')}"
+                )
+            if self.last_hotel_detail_url:
+                lines.append(f"  → Selected detail: {self.last_hotel_detail_url}")
+            candidates_block = "\n".join(lines) + "\n"
+
         booking_url = self.last_hotel_detail_url or list_url
         details = "\n".join(f"Hotel option link: {u}" for u in detail_links)
         card_block = ""
@@ -1536,7 +1628,6 @@ class TripBrowser:
                 img = self.scrape_hotel_image_url(self.last_hotel_detail_url)
                 if img:
                     hotel_card["image_url"] = img
-            # Prefer the scraped listing title in the structured card
             display_name = self.last_hotel_name or hotel_card.get("name") or rec_name
             card_block = (
                 "Structured hotel card:\n"
@@ -1556,10 +1647,10 @@ class TripBrowser:
 
         content = body if prices and len(body) > 200 else snippet
         how = (
-            "Playwright hub search: typed city → autocomplete → Search → hotel detail"
+            "Playwright: list → LLM pick → hotel DETAIL scrape"
             if self.last_hotel_detail_url
             else (
-                "Playwright hub search: typed city → autocomplete → Search (list only)"
+                "Playwright hub search: typed city → Search (list only)"
                 if self._hotel_list_url_ok(list_url)
                 else "Playwright hub search FAILED to resolve list (check city name)"
             )
@@ -1573,6 +1664,7 @@ class TripBrowser:
             f"Canonical search URL: {booking_url}\n"
             f"Hotel list URL: {list_url}\n"
             f"{price_note}\n"
+            + (candidates_block if candidates_block else "")
             + (f"Recommended hotel name: {rec_name}\n" if rec_name else "")
             + (
                 f"Recommended hotel detail link: {self.last_hotel_detail_url}\n"
@@ -1654,10 +1746,12 @@ class TripBrowser:
             pass
 
         try:
-            body = page.inner_text("body")[:4000]
+            body = page.inner_text("body")[:6000]
         except Exception:
             body = ""
-        score_m = re.search(r"\b([89](?:\.\d)?|10(?:\.0)?)\b", body)
+        score_m = re.search(r"\b([6-9](?:\.\d)?|10(?:\.0)?)\s*/?\s*10?\b", body)
+        if not score_m:
+            score_m = re.search(r"\b([89](?:\.\d)?|10(?:\.0)?)\b", body)
         if score_m:
             out["score"] = score_m.group(1)
             try:
@@ -1670,6 +1764,21 @@ class TripBrowser:
         stars_m = re.search(r"(?i)([1-5])\s*[- ]?star", body)
         if stars_m:
             out["stars"] = stars_m.group(1)
+        rev_m = re.search(r"(?i)(\d[\d,]*)\s*review", body)
+        if rev_m:
+            out["reviews"] = f"{rev_m.group(1)} reviews"
+        price_m = re.search(
+            r"(?i)(?:HK\s*\$|HKD)\s*([0-9,]+(?:\.\d+)?)\s*(?:/|/night|per night|nightly)?",
+            body,
+        )
+        if price_m:
+            out["price_label"] = f"HK${price_m.group(1)}"
+        loc_m = re.search(
+            r"(?i)(?:Near|Located in|Area)[:\s]+([A-Za-z0-9 ,.\-]{3,60})",
+            body,
+        )
+        if loc_m:
+            out["location"] = loc_m.group(1).strip()[:80]
 
         return out
 
@@ -3471,11 +3580,40 @@ class TripBrowser:
                     ]
         if not recommended_hotel_detail_links and seeded_detail:
             recommended_hotel_detail_links = seeded_detail
+        # Open the LLM-selected hotel DETAIL page (same as search_hotels)
+        if recommended_hotel_detail_links:
+            from travel_agent.trip_urls import (
+                canonicalize_hotel_detail_url,
+                is_trusted_hotel_detail_url,
+            )
+
+            detail0 = (
+                canonicalize_hotel_detail_url(
+                    recommended_hotel_detail_links[0],
+                    checkin=recommended_hotel_checkin,
+                    checkout=return_date,
+                    city=hotel_city,
+                )
+                or recommended_hotel_detail_links[0]
+            )
+            recommended_hotel_detail_links[0] = detail0
+            if is_trusted_hotel_detail_url(detail0):
+                meta = self._scrape_hotel_detail_meta(detail0)
+                if meta.get("name") and _hotel_name_plausible_for_city(
+                    meta["name"], hotel_city
+                ):
+                    recommended_hotel_names = [meta["name"]] + [
+                        n for n in recommended_hotel_names if n != meta["name"]
+                    ]
+                    self.last_hotel_name = meta["name"]
+                self.last_hotel_detail_url = (
+                    getattr(self, "last_hotel_detail_url", "") or detail0
+                )
         # Prefer real hotel title over generic price snippets
         if recommended_hotel_names:
             recommended_hotel_option = recommended_hotel_names[0]
 
-        # Live list-card fields (photo + rating) for the first stay
+        # Live list-card fields as fallback; prefer detail meta already applied
         stay0_card = self._scrape_top_hotel_card(
             city=hotel_city,
             fallback_name=(
@@ -4362,6 +4500,7 @@ Transport modes: {", ".join(modes)}
         rows = parse_trip_com_flight_rows(
             blob, origin=origin, destination=destination
         )
+        self.last_flight_candidates = [dict(r) for r in rows[:12]]
         picked = self._pick_flight_row(rows, lowest=lowest)
         if picked:
             card.update({k: v for k, v in picked.items() if v})

@@ -80,6 +80,8 @@ C = {
     "trip_blue_hover": "#254ED6",
     "badge_teal": "#0B7A74",
     "badge_outline": "#5BB8B1",
+    "btn_disabled": "#D5D9DD",
+    "btn_disabled_text": "#8A9399",
 }
 
 FONT_SCALE_STEPS = 13  # discrete positions 0..12 (matches A——A slider)
@@ -408,7 +410,7 @@ class PillButton(tk.Canvas):
 
     def _colors(self) -> tuple[str, str, str]:
         if not self._enabled:
-            return C["chip"], C["line"], C["muted"]
+            return C["btn_disabled"], C["line"], C["btn_disabled_text"]
         if self._primary:
             fill = C["accent_deep"] if self._hover else C["accent"]
             return fill, fill, "#FFFFFF"
@@ -1660,6 +1662,7 @@ class TravelAgentApp(tk.Tk):
         self.headless = headless
         self.agent: TravelAgent | None = None
         self._busy = False
+        self._ready = False
         self._wizard_step = 1
         self._last_plan = ""
         self._style_vars: dict[str, tk.BooleanVar] = {}
@@ -1742,7 +1745,8 @@ class TravelAgentApp(tk.Tk):
         self._show_wizard_step(1)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._set_status("Starting Ollama…", C["accent_deep"])
+        self._set_status("Preparing… starting Ollama and browser", C["muted"])
+        self._sync_action_buttons(preparing_label=True)
         self.after(120, self._boot_agent)
         self.after(200, self._enable_page_scroll)
 
@@ -1952,6 +1956,9 @@ class TravelAgentApp(tk.Tk):
             row, "Generate itinerary", command=self._on_generate, width=200
         )
         self.generate_btn.pack(side="left")
+        # Disabled (gray) until Ollama + Playwright finish booting
+        self.generate_btn.configure(state="disabled")
+        self.generate_btn.configure(text="Preparing…")
 
     def _sync_return(self, *_args: object) -> None:
         try:
@@ -1989,6 +1996,7 @@ class TravelAgentApp(tk.Tk):
             actions, "Regenerate", command=self._on_generate, primary=False, width=130
         )
         self.regen_btn.pack(side="left")
+        self.regen_btn.configure(state="disabled")
 
         split = tk.Frame(self.results, bg=C["paper"])
         split.pack(fill="x", anchor="n")
@@ -2730,10 +2738,13 @@ class TravelAgentApp(tk.Tk):
         return [name for name, var in self._style_vars.items() if var.get()]
 
     def _on_generate(self) -> None:
-        if self._busy:
+        if self._busy or not self._ready:
             return
         if not self.agent:
-            messagebox.showwarning("Not ready", "Browser is still starting.")
+            messagebox.showwarning(
+                "Not ready",
+                "Still preparing Ollama and the Trip.com browser. Please wait.",
+            )
             return
         destination = self.dest_var.get().strip()
         if not destination:
@@ -4064,6 +4075,10 @@ class TravelAgentApp(tk.Tk):
                 or name in {"Recommended hotel", "Hotel"}
                 or low.startswith("recommended hotel")
                 or low.startswith("hotels in ")
+                or low.startswith("error:")
+                or "status code" in low
+                or "not found" in low
+                or "ollama" in low
                 or name.startswith("#")
                 or "day-by-day" in low
                 or "sample hotel" in low
@@ -4236,6 +4251,21 @@ class TravelAgentApp(tk.Tk):
         return offer
 
     def _apply_plan(self, text: str) -> None:
+        raw = (text or "").strip()
+        # Never paint Ollama/tool failures into hotel/flight card titles
+        if raw.lower().startswith("error:") or "model '" in raw.lower() and "not found" in raw.lower():
+            self._set_status(raw[:220], C["danger"])
+            self._append_chat("System", raw[:500], "agent")
+            # Still show any live scrape cards collected before the failure
+            if self.agent:
+                live = dict(
+                    getattr(self.agent.browser, "last_plan_flight_card", None)
+                    or getattr(self.agent.browser, "last_flight_card", None)
+                    or {}
+                )
+                if live.get("flight_depart"):
+                    self.flight_row.set_offer(self._flight_offer_from_live_card(live))
+            return
         self._last_plan = text
         # Prefer the agent's proposed rough route for airports / multi-stay cards
         try:
@@ -4268,6 +4298,8 @@ class TravelAgentApp(tk.Tk):
             live = dict(
                 getattr(self.agent.browser, "last_plan_flight_card", None) or {}
             )
+        if not live.get("flight_depart") and self.agent:
+            live = dict(getattr(self.agent.browser, "last_flight_card", None) or {})
         if live.get("flight_depart"):
             parsed.flight_offer = self._flight_offer_from_live_card(live)
             if self.agent and live.get("flight_arrive"):
@@ -4518,12 +4550,26 @@ class TravelAgentApp(tk.Tk):
                 from travel_agent.ollama_lifecycle import ensure_ollama_running
 
                 def progress(msg: str) -> None:
-                    self.after(0, lambda m=msg: self._set_status(m, C["accent_deep"]))
+                    self.after(
+                        0,
+                        lambda m=msg: (
+                            self._set_status(m, C["muted"]),
+                            self._sync_action_buttons(preparing_label=True),
+                        ),
+                    )
 
-                progress("Starting Ollama…")
-                # Only start if needed — forced restart flashes Ollama helper windows
-                ensure_ollama_running(restart=False, on_progress=progress)
+                progress("Preparing… starting Ollama")
+                # Start Ollama if needed, then auto-pull the chat model when missing
+                resolved = ensure_ollama_running(
+                    restart=False,
+                    on_progress=progress,
+                    model=self.model,
+                    ensure_model=True,
+                )
+                if resolved:
+                    self.model = resolved
 
+                progress("Preparing… starting Trip.com browser")
                 settings.headless = self.headless
                 agent = TravelAgent(
                     model=self.model,
@@ -4532,25 +4578,34 @@ class TravelAgentApp(tk.Tk):
                 )
                 agent.start()
                 self.agent = agent
+                try:
+                    self.model = agent.model
+                except Exception:
+                    pass
                 mode = "headless" if self.headless else "browser visible"
-                self.after(
-                    0,
-                    lambda: self._set_status(
+
+                def _ready_ui() -> None:
+                    self._ready = True
+                    self._sync_action_buttons()
+                    self._set_status(
                         f"Ready · {self.model} · Trip.com HK · {mode}", C["ok"]
-                    ),
-                )
+                    )
+
+                self.after(0, _ready_ui)
             except Exception as exc:
-                self.after(
-                    0, lambda e=exc: self._set_status(f"Startup failed: {e}", C["danger"])
-                )
-                self.after(
-                    0,
-                    lambda e=exc: messagebox.showerror(
+                def _fail_ui(e: Exception = exc) -> None:
+                    self._ready = False
+                    self._sync_action_buttons(preparing_label=True)
+                    self._set_status(f"Startup failed: {e}", C["danger"])
+                    messagebox.showerror(
                         "Startup error",
                         f"{e}\n\n"
-                        "Need Ollama on PATH and: playwright install chromium",
-                    ),
-                )
+                        "Need Ollama on PATH. Voyage starts Ollama and downloads "
+                        f"{self.model} automatically when missing.\n"
+                        "Also run: playwright install chromium",
+                    )
+
+                self.after(0, _fail_ui)
                 return
 
             while True:
@@ -4630,19 +4685,30 @@ class TravelAgentApp(tk.Tk):
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.header.set_status(text, color or C["muted"])
 
+    def _sync_action_buttons(self, *, preparing_label: bool = False) -> None:
+        """Enable Generate only when boot finished and not busy; gray while preparing."""
+        can_click = bool(self._ready and self.agent and not self._busy)
+        state = "normal" if can_click else "disabled"
+        if getattr(self, "generate_btn", None):
+            self.generate_btn.configure(state=state)
+            if preparing_label or not self._ready:
+                self.generate_btn.configure(text="Preparing…")
+            else:
+                self.generate_btn.configure(text="Generate itinerary")
+        if getattr(self, "regen_btn", None):
+            self.regen_btn.configure(state=state)
+
     def _set_busy(self, busy: bool, label: str = "") -> None:
         self._busy = busy
-        state = "disabled" if busy else "normal"
-        self.generate_btn.configure(state=state)
-        self.regen_btn.configure(state=state)
+        self._sync_action_buttons()
         if busy:
             self._set_status(label or "Working…", C["accent_deep"])
-        elif self.agent:
+        elif self._ready and self.agent:
             self._set_status(f"Ready · {self.model} · Trip.com HK", C["ok"])
 
     def _on_close(self) -> None:
         try:
-            self._set_status("Closing… stopping Ollama", C["muted"])
+            self._set_status("Closing…", C["muted"])
         except Exception:
             pass
         try:
@@ -4651,12 +4717,7 @@ class TravelAgentApp(tk.Tk):
                 self._browser_thread.join(timeout=5)
         except Exception:
             pass
-        try:
-            from travel_agent.ollama_lifecycle import stop_ollama
-
-            stop_ollama()
-        except Exception:
-            pass
+        # Leave Ollama running so the next launch is faster
         self.destroy()
 
 

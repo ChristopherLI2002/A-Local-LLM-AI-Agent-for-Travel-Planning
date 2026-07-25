@@ -9,7 +9,7 @@ from typing import Any, Callable
 import ollama
 
 from travel_agent.browser_tools import TOOL_DEFINITIONS, TripBrowser, dispatch_tool
-from travel_agent.config import settings
+from travel_agent.config import resolve_ollama_model, settings
 from travel_agent.trip_urls import extract_booking_urls, is_trusted_hotel_detail_url, score_booking_url
 
 SYSTEM_PROMPT = """You are Voyage — a Trip.Planner-style AI travel concierge for Trip.com Hong Kong (hk.trip.com, HKD).
@@ -70,7 +70,11 @@ class TravelAgent:
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, str], None] | None = None,
     ) -> None:
-        self.model = model or settings.ollama_model
+        preferred = model or settings.ollama_model
+        try:
+            self.model = resolve_ollama_model(preferred, host=settings.ollama_host)
+        except RuntimeError:
+            self.model = preferred
         self.client = ollama.Client(host=settings.ollama_host)
         self.browser = TripBrowser()
         self.browser.llm_model = self.model
@@ -91,6 +95,11 @@ class TravelAgent:
         self.force_rent_car: bool = False
 
     def start(self) -> None:
+        try:
+            self.model = resolve_ollama_model(self.model, host=settings.ollama_host)
+            self.browser.llm_model = self.model
+        except RuntimeError:
+            pass
         self.browser.start()
 
     def close(self) -> None:
@@ -112,6 +121,11 @@ class TravelAgent:
         self.browser.last_car_card = {}
         self.browser.last_car_detail_url = ""
         self.browser.last_attraction_day_plan = []
+
+    def _ensure_model(self) -> None:
+        """Fail fast with an actionable message when Ollama has no usable model."""
+        self.model = resolve_ollama_model(self.model, host=settings.ollama_host)
+        self.browser.llm_model = self.model
 
     def _apply_plan_flight_card(self) -> None:
         """Copy frozen open-jaw / plan flight scrape into booking_links."""
@@ -180,6 +194,7 @@ class TravelAgent:
                 self.booking_links[dest] = card[src]
 
     def chat(self, user_message: str) -> str:
+        self._ensure_model()
         self.messages.append({"role": "user", "content": user_message})
         self.booking_links = {
             "flight": "",
@@ -197,11 +212,20 @@ class TravelAgent:
         )
 
         for _ in range(settings.max_tool_rounds):
-            response = self.client.chat(
-                model=self.model,
-                messages=self.messages,
-                tools=TOOL_DEFINITIONS,
-            )
+            try:
+                response = self.client.chat(
+                    model=self.model,
+                    messages=self.messages,
+                    tools=TOOL_DEFINITIONS,
+                )
+            except Exception as exc:
+                msg = str(exc)
+                if "not found" in msg.lower() or "404" in msg:
+                    raise RuntimeError(
+                        f"Ollama model '{self.model}' is not available. "
+                        f"Run: ollama pull {self.model}"
+                    ) from exc
+                raise
             message = response["message"]
             self.messages.append(message)
 

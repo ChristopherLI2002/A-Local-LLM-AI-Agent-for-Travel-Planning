@@ -94,13 +94,17 @@ def _run_cli(args: argparse.Namespace) -> int:
     )
 
     try:
-        from travel_agent.ollama_lifecycle import ensure_ollama_running, stop_ollama
+        from travel_agent.ollama_lifecycle import ensure_ollama_running
 
         console.print("[dim]Starting Ollama…[/dim]")
-        ensure_ollama_running(
+        resolved = ensure_ollama_running(
             restart=False,
             on_progress=lambda m: console.print(f"[dim]{m}[/dim]"),
+            model=args.model,
+            ensure_model=True,
         )
+        if resolved:
+            args.model = resolved
     except Exception as exc:
         console.print(f"[red]Failed to start Ollama:[/red] {exc}")
         return 1
@@ -124,10 +128,6 @@ def _run_cli(args: argparse.Namespace) -> int:
         console.print(
             "Install Chromium with: [bold]playwright install chromium[/bold]"
         )
-        try:
-            stop_ollama()
-        except Exception:
-            pass
         return 1
 
     try:
@@ -168,12 +168,7 @@ def _run_cli(args: argparse.Namespace) -> int:
             agent.close()
         except Exception:
             pass
-        try:
-            from travel_agent.ollama_lifecycle import stop_ollama
-
-            stop_ollama()
-        except Exception:
-            pass
+        # Leave Ollama running for faster relaunches
 
     return 0
 
