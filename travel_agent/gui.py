@@ -2823,6 +2823,7 @@ class TravelAgentApp(tk.Tk):
             self.agent.browser.last_hotel_stays = []
             self.agent.browser.last_car_card = {}
             self.agent.browser.last_car_detail_url = ""
+            self.agent.browser.last_attraction_day_plan = []
         self._live_flight_card = {}
         self._live_flight_error = ""
 
@@ -4409,6 +4410,11 @@ class TravelAgentApp(tk.Tk):
             return_depart_time=return_depart_time,
             attractions=(
                 list(getattr(self.agent.browser, "last_attractions", None) or [])
+                if self.agent
+                else None
+            ),
+            attraction_plan=(
+                list(getattr(self.agent.browser, "last_attraction_day_plan", None) or [])
                 if self.agent
                 else None
             ),

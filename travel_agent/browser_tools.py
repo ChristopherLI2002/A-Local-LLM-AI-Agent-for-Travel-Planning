@@ -28,6 +28,7 @@ from travel_agent.pricing import (
 )
 from travel_agent.llm_select import (
     SelectionContext,
+    arrange_attraction_route,
     enrich_car_candidates_from_page,
     enrich_hotel_candidates_from_page,
     select_car_candidate,
@@ -249,6 +250,7 @@ def _build_suggested_day_flow(
     interests: str = "",
     destination: str = "",
     attractions: list[str] | None = None,
+    attraction_plan: list[dict[str, str]] | None = None,
     regional_route: object | None = None,
     arrive_time: str = "",
     return_depart_time: str = "",
@@ -267,6 +269,7 @@ def _build_suggested_day_flow(
         n,
         styles=styles or None,
         attractions=attractions,
+        attraction_plan=attraction_plan,
         regional_route=regional_route,
     )
     lines: list[str] = []
@@ -662,6 +665,8 @@ class TripBrowser:
         self._browser: Browser | None = None
         self.page: Page | None = None
         self.last_attractions: list[str] = []
+        # LLM-arranged day-by-day sightseeing route (title/go/also/lunch/dinner/route)
+        self.last_attraction_day_plan: list[dict[str, str]] = []
         self.last_hotel_stays: list[dict[str, str]] = []
         # Live /hotels/list URL from the last Playwright type→autocomplete→Search
         self.last_hotel_list_url: str = ""
@@ -745,6 +750,31 @@ class TripBrowser:
             host=self.llm_host,
         )
         return picked or candidates[0]
+
+    def _arrange_attractions_route(
+        self,
+        attractions: list[str],
+        nights: int,
+        *,
+        city: str = "",
+    ) -> list[dict[str, str]] | None:
+        """LLM-select attractions and build a day-by-day route after scraping."""
+        if not attractions:
+            self.last_attraction_day_plan = []
+            return None
+        plan = arrange_attraction_route(
+            attractions,
+            nights,
+            self.selection_context,
+            city=city,
+            model=self.llm_model,
+            host=self.llm_host,
+        )
+        if plan:
+            self.last_attraction_day_plan = plan
+            return plan
+        self.last_attraction_day_plan = []
+        return None
 
     def _collect_car_candidates(
         self,
@@ -988,6 +1018,9 @@ class TripBrowser:
         """Tool wrapper: list Trip.com things-to-do attractions for a city."""
         names = self.scrape_attractions(city, limit=max(6, int(limit or 18)))
         city_name = to_hotel_city(city) or city
+        n = int(self.selection_context.nights or 0)
+        if names and n > 0:
+            self._arrange_attractions_route(names, n, city=city_name)
         if not names:
             return (
                 f"No attractions parsed for {city_name} on Trip.com things-to-do. "
@@ -1000,6 +1033,14 @@ class TripBrowser:
         ]
         for i, name in enumerate(names, 1):
             lines.append(f"{i}. {name}")
+        if self.last_attraction_day_plan:
+            lines.append("")
+            lines.append("LLM-arranged day route:")
+            for i, day in enumerate(self.last_attraction_day_plan, 1):
+                go = day.get("go", "")
+                also = day.get("also", "")
+                pair = f"{go} + {also}" if also and also != go else go
+                lines.append(f"  Day {i}: {pair}")
         lines.append("")
         lines.append(
             "Use these exact attraction names in the Day-by-day itinerary "
@@ -3245,6 +3286,13 @@ class TripBrowser:
         except Exception:
             attractions = list(self.last_attractions or [])
 
+        if attractions:
+            self._arrange_attractions_route(
+                attractions,
+                nights,
+                city=hotel_city or destination,
+            )
+
         train_url = ""
         train_low = None
         if want_trains:
@@ -3734,6 +3782,7 @@ class TripBrowser:
             interests=interests or "",
             destination=hotel_city or destination,
             attractions=attractions or None,
+            attraction_plan=getattr(self, "last_attraction_day_plan", None) or None,
             regional_route=regional,
             arrive_time=flight_card_fields.get("flight_arrive", "") or "",
             return_depart_time=flight_card_fields.get("flight_return_depart", "") or "",
@@ -3742,6 +3791,16 @@ class TripBrowser:
             f"""{n}) SUGGESTED DAY FLOW
 {day_lines}"""
         )
+        if getattr(self, "last_attraction_day_plan", None):
+            sections.append(
+                "LLM-arranged attraction route (from Trip.com search):\n"
+                + "\n".join(
+                    f"- Day {i}: {d.get('go', '')}"
+                    + (f" + {d['also']}" if d.get("also") and d.get("also") != d.get("go") else "")
+                    + (f" ({d['route']})" if d.get("route") else "")
+                    for i, d in enumerate(self.last_attraction_day_plan, 1)
+                )
+            )
         if attractions:
             sections.append(
                 "Attraction sources (Trip.com things-to-do):\n"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from travel_agent.llm_select import (
     SelectionContext,
     _cheapest_flight_index,
@@ -95,6 +97,57 @@ def test_select_car_fallback_without_ollama() -> None:
         assert picked["name"] == "Toyota Camry"
     finally:
         ls._llm_pick_index = original
+
+
+def test_parse_attraction_route_json() -> None:
+    from travel_agent.llm_select import _parse_attraction_route_json
+
+    raw = json.dumps(
+        {
+            "days": [
+                {
+                    "day": 1,
+                    "title": "Arrival · Shibuya",
+                    "attractions": ["Meiji Jingu", "Shibuya Crossing"],
+                    "go": "Meiji Jingu",
+                    "also": "Shibuya Crossing",
+                    "lunch": "Harajuku Gyoza Lou",
+                    "dinner": "Omoide Yokocho",
+                    "route": "JR Yamanote Line",
+                },
+                {
+                    "day": 2,
+                    "go": "Senso-ji Temple",
+                    "also": "Tokyo Skytree",
+                    "route": "Ginza Line to Asakusa",
+                },
+            ]
+        }
+    )
+    pool = ["Meiji Jingu", "Shibuya Crossing", "Senso-ji Temple", "Tokyo Skytree"]
+    plan = _parse_attraction_route_json(raw, nights=2, attractions=pool, city="Tokyo")
+    assert plan is not None
+    assert len(plan) == 2
+    assert plan[0]["go"] == "Meiji Jingu"
+    assert plan[1]["also"] == "Tokyo Skytree"
+
+
+def test_day_ideas_from_llm_plan() -> None:
+    from travel_agent.destination_guides import day_ideas_from_llm_plan
+
+    plan = [
+        {
+            "title": "Day 1",
+            "go": "Senso-ji",
+            "also": "Skytree",
+            "lunch": "Asakusa lunch",
+            "dinner": "Ginza dinner",
+            "route": "Metro",
+        }
+    ]
+    ideas = day_ideas_from_llm_plan(plan, nights=1)
+    assert len(ideas) == 1
+    assert ideas[0].go == "Senso-ji"
 
 
 def test_parse_trip_com_car_rows() -> None:
