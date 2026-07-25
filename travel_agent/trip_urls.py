@@ -32,6 +32,15 @@ _HOTEL_NAME_RE = re.compile(
     r"(?:Recommended hotel name|Hotel name)\s*:\s*(.+)$",
     re.I | re.M,
 )
+_CAR_CANON_RE = re.compile(r"Canonical car detail URL:\s*(\S+)", re.I)
+_CAR_DETAIL_RE = re.compile(
+    r"(?:Recommended car detail link|Car detail link|Cars):\s*(\S+)",
+    re.I,
+)
+_CAR_NAME_RE = re.compile(
+    r"(?:Recommended car name|Car name)\s*:\s*(.+)$",
+    re.I | re.M,
+)
 _FAKE_HOTEL_IDS = frozenset(
     {
         "123456",
@@ -377,8 +386,8 @@ def build_hotel_list_url(
 
 
 def extract_booking_urls(text: str) -> dict[str, str]:
-    """Pull flight/hotel booking URLs from plan_trip or search tool output."""
-    out = {"flight": "", "hotel": "", "hotel_name": ""}
+    """Pull flight/hotel/car booking URLs from plan_trip or search tool output."""
+    out = {"flight": "", "hotel": "", "hotel_name": "", "car": "", "car_name": ""}
     if not text:
         return out
 
@@ -393,6 +402,26 @@ def extract_booking_urls(text: str) -> dict[str, str]:
             out["hotel"], "hotel"
         ):
             out["hotel"] = url
+
+    for m in _CAR_CANON_RE.finditer(text):
+        url = ensure_locale_curr(m.group(1).rstrip(".,;"))
+        if "/carrentals/detail" in url.lower():
+            out["car"] = url
+        elif not out["car"] and "car" in url.lower():
+            out["car"] = url
+
+    for m in _CAR_DETAIL_RE.finditer(text):
+        url = ensure_locale_curr(m.group(1).rstrip(".,;"))
+        if "/carrentals/detail" in url.lower():
+            out["car"] = url
+        elif not out.get("car") and "trip.com" in url.lower() and "car" in url.lower():
+            out["car"] = url
+
+    car_name_m = _CAR_NAME_RE.search(text)
+    if car_name_m:
+        name = car_name_m.group(1).strip().strip("·-|")
+        if name and "http" not in name.lower() and len(name) < 90:
+            out["car_name"] = name
 
     for m in _FLIGHT_BOOK_RE.finditer(text):
         url = ensure_locale_curr(m.group(1).rstrip(".,;"))
@@ -463,7 +492,7 @@ def extract_booking_urls(text: str) -> dict[str, str]:
                     out[dest] = val
 
     hotel_card = re.search(
-        r"(?is)Structured hotel card:\s*(.*?)(?:\n\n|City/keyword|Canonical|Hotel search|Structured flight|$)",
+        r"(?is)Structured hotel card:\s*(.*?)(?:\n\n|City/keyword|Canonical|Hotel search|Structured flight|Structured car|$)",
         text,
     )
     if hotel_card:
@@ -484,6 +513,38 @@ def extract_booking_urls(text: str) -> dict[str, str]:
                     "sample hotel" in val.lower() or "rates range" in val.lower()
                 ):
                     continue
+                if val:
+                    out[dest] = val
+
+    car_card = re.search(
+        r"(?is)Structured car card:\s*(.*?)(?:\n\n|Canonical|Car search|Car list|Structured hotel|Structured flight|$)",
+        text,
+    )
+    if car_card:
+        block = car_card.group(1)
+        for key, dest in (
+            (r"(?im)^-\s*Car:\s*(.+)$", "car_name"),
+            (r"(?im)^-\s*Similar:\s*(.+)$", "car_similar"),
+            (r"(?im)^-\s*Vendor:\s*(.+)$", "car_vendor"),
+            (r"(?im)^-\s*Score:\s*(.+)$", "car_score"),
+            (r"(?im)^-\s*Reviews:\s*(.+)$", "car_reviews"),
+            (r"(?im)^-\s*Seats:\s*(.+)$", "car_seats"),
+            (r"(?im)^-\s*Fuel:\s*(.+)$", "car_fuel"),
+            (r"(?im)^-\s*Pickup note:\s*(.+)$", "car_pickup_note"),
+            (r"(?im)^-\s*Cancellation:\s*(.+)$", "car_cancellation"),
+            (r"(?im)^-\s*Mileage:\s*(.+)$", "car_mileage"),
+            (r"(?im)^-\s*Payment:\s*(.+)$", "car_payment"),
+            (r"(?im)^-\s*Insurance:\s*(.+)$", "car_insurance"),
+            (r"(?im)^-\s*Daily:\s*(.+)$", "car_price"),
+            (r"(?im)^-\s*Total:\s*(.+)$", "car_total"),
+            (r"(?im)^-\s*Image:\s*(\S+)", "car_image"),
+            (r"(?im)^-\s*Location:\s*(.+)$", "car_location"),
+            (r"(?im)^-\s*Pickup:\s*(\d{4}-\d{2}-\d{2})", "car_pickup"),
+            (r"(?im)^-\s*Dropoff:\s*(\d{4}-\d{2}-\d{2})", "car_dropoff"),
+        ):
+            m = re.search(key, block)
+            if m:
+                val = m.group(1).strip()
                 if val:
                     out[dest] = val
 

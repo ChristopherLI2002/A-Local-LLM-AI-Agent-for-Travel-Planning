@@ -504,6 +504,9 @@ class TripBrowser:
         self.last_flight_card: dict[str, str] = {}
         # Frozen after plan_trip so later search_flights calls cannot wipe open-jaw times
         self.last_plan_flight_card: dict[str, str] = {}
+        # Car rental deal from Playwright carhire search
+        self.last_car_card: dict[str, str] = {}
+        self.last_car_detail_url: str = ""
 
     def start(self) -> None:
         self._pw = sync_playwright().start()
@@ -1505,55 +1508,167 @@ class TripBrowser:
         pickup_date: str | None = None,
         dropoff_date: str | None = None,
     ) -> str:
-        """Search car rentals on Trip.com Hong Kong car hire."""
+        """Search car rentals via Playwright on Trip.com car hire hub.
+
+        Flow: /carhire/ → type pickup → autocomplete → Search → scrape top deal
+        → keep /carrentals/detail URL for booking.
+        """
+        from urllib.parse import unquote_plus
+
         page = self._require_page()
+        loc = to_hotel_city(location) or unquote_plus((location or "").strip())
+        loc = loc.replace("+", " ")
+        loc = re.sub(r"\s+", " ", loc).strip() or "Los Angeles"
         pickup_date = pickup_date or _default_depart(21)
         dropoff_date = dropoff_date or _default_return(28)
-        params = {
-            "locale": settings.trip_locale,
-            "curr": settings.trip_currency,
-            "channelid": "14409",
-        }
-        # Hub + location keyword; Trip.com may rewrite to a city results URL.
-        url = f"{settings.trip_base_url}/carhire/?{urlencode(params)}"
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
-        self._dismiss_popups()
 
-        filled = self._try_fill_car_form(location, pickup_date, dropoff_date)
-        if not filled:
-            # Fallback: reopen hub with location in query when form fill fails.
-            params["keyword"] = location
-            params["pickupdate"] = pickup_date
-            params["dropoffdate"] = dropoff_date
-            page.goto(
-                f"{settings.trip_base_url}/carhire/?{urlencode(params)}",
-                wait_until="domcontentloaded",
-            )
-            page.wait_for_timeout(2500)
+        hub = (
+            f"{settings.trip_base_url}/carhire/"
+            f"?channelid=14409&locale={settings.trip_locale}&curr={settings.trip_currency}"
+        )
+
+        filled = False
+        for attempt in range(3):
+            self._safe_goto(hub)
+            page.wait_for_timeout(1600 + attempt * 400)
             self._dismiss_popups()
+            filled = self._try_fill_car_form(loc, pickup_date, dropoff_date)
+            if filled and self._car_results_ready(page.url or ""):
+                break
+            filled = False
 
         self._wait_for_results(
-            keywords=["HK$", "car", "rental", "pickup", "pick-up", "day", "supplier"]
+            keywords=["HK$", "HKD", "/day", "View deal", "car", "rental", "or similar"],
+            attempts=16,
         )
-        page.mouse.wheel(0, 1200)
+        for _ in range(10):
+            try:
+                probe = page.inner_text("body")
+            except Exception:
+                probe = ""
+            if "HK$" in probe and ("/day" in probe.lower() or "view deal" in probe.lower()):
+                break
+            page.wait_for_timeout(900)
+        page.mouse.wheel(0, 1600)
         page.wait_for_timeout(1500)
 
-        snippet = self._extract_list_content(
-            selectors=[
-                "[class*='car']",
-                "[class*='Car']",
-                "[class*='hire']",
-                "[class*='list']",
-                "main",
-                "body",
-            ]
+        try:
+            body = page.inner_text("body")
+        except Exception:
+            body = ""
+        list_url = page.url if "trip.com" in (page.url or "") else hub
+        prices = [p for p in parse_prices(body) if p >= 80]
+        price_note = (
+            f"Parsed prices (HKD-like): {prices[:10]}"
+            if prices
+            else "Parsed prices: NONE — page may still be loading or blocked."
+        )
+
+        card = self._scrape_top_car_card(
+            location=loc,
+            pickup_date=pickup_date,
+            dropoff_date=dropoff_date,
+            lowest=prices[0] if prices else None,
+        )
+        detail = (card.get("url") or "").strip()
+        if not self._car_detail_url_ok(detail):
+            detail = self._resolve_top_car_detail_url() or detail
+            if detail:
+                card["url"] = detail
+
+        if self._car_detail_url_ok(card.get("url", "")):
+            self.last_car_detail_url = ensure_locale_curr(
+                normalize_trip_url(card["url"])
+            )
+            card["url"] = self.last_car_detail_url
+        else:
+            self.last_car_detail_url = ""
+
+        self.last_car_card = dict(card)
+
+        card_block = ""
+        if card.get("name") or card.get("price_label") or card.get("url"):
+            card_block = (
+                "Structured car card:\n"
+                f"- Car: {card.get('name', '')}\n"
+                f"- Similar: {card.get('similar', '')}\n"
+                f"- Vendor: {card.get('vendor', '')}\n"
+                f"- Score: {card.get('score', '')}\n"
+                f"- Reviews: {card.get('reviews', '')}\n"
+                f"- Seats: {card.get('seats', '')}\n"
+                f"- Fuel: {card.get('fuel', '')}\n"
+                f"- Pickup note: {card.get('pickup_note', '')}\n"
+                f"- Cancellation: {card.get('cancellation', '')}\n"
+                f"- Mileage: {card.get('mileage', '')}\n"
+                f"- Payment: {card.get('payment', '')}\n"
+                f"- Insurance: {card.get('insurance', '')}\n"
+                f"- Daily: {card.get('price_label', '')}\n"
+                f"- Total: {card.get('total_label', '')}\n"
+                + (
+                    f"- Image: {card['image_url']}\n"
+                    if card.get("image_url")
+                    else ""
+                )
+                + f"- Location: {loc}\n"
+                + f"- Pickup: {pickup_date}\n"
+                + f"- Dropoff: {dropoff_date}\n"
+            )
+
+        how = (
+            "Playwright carhire: typed pickup → autocomplete → Search → detail"
+            if self.last_car_detail_url
+            else (
+                "Playwright carhire: typed pickup → Search (list only)"
+                if filled
+                else "Playwright carhire FAILED (check pickup location)"
+            )
+        )
+        booking = self.last_car_detail_url or ensure_locale_curr(
+            normalize_trip_url(list_url)
         )
         return _clean_text(
-            f"Car rental search URL: {page.url}\n"
-            f"Pick-up location: {location}\n"
+            f"Car search method: {how}\n"
+            f"Pick-up location typed: {loc}\n"
             f"Pick-up: {pickup_date} | Drop-off: {dropoff_date}\n"
-            f"Form filled: {filled}\n\n{snippet}"
+            f"Live result URL: {ensure_locale_curr(normalize_trip_url(list_url))}\n"
+            f"Canonical car detail URL: {booking}\n"
+            f"Car list URL: {ensure_locale_curr(normalize_trip_url(list_url))}\n"
+            f"{price_note}\n"
+            + (
+                f"Recommended car name: {card.get('name', '')}\n"
+                if card.get("name")
+                else ""
+            )
+            + (
+                f"Recommended car detail link: {self.last_car_detail_url}\n"
+                if self.last_car_detail_url
+                else ""
+            )
+            + (f"{card_block}\n" if card_block else "")
+            + f"\n{body[:4500]}",
+            limit=9000,
+        )
+
+    @staticmethod
+    def _car_detail_url_ok(url: str) -> bool:
+        low = (url or "").lower()
+        return "trip.com" in low and "/carrentals/detail" in low
+
+    @staticmethod
+    def _car_results_ready(url: str) -> bool:
+        low = (url or "").lower()
+        if not low or "trip.com" not in low:
+            return False
+        return any(
+            x in low
+            for x in (
+                "/carrentals/",
+                "/carhire/",
+                "list",
+                "pcity=",
+                "paddress=",
+                "vehicle",
+            )
         )
 
     def _try_fill_car_form(
@@ -1562,42 +1677,381 @@ class TripBrowser:
         pickup_date: str,
         dropoff_date: str,
     ) -> bool:
-        """Best-effort fill of the Trip.com car hire search form."""
+        """Type pickup into Trip.com car hire hub and Search."""
+        from urllib.parse import unquote_plus
+
         page = self._require_page()
+        location = unquote_plus((location or "").strip()).replace("+", " ")
+        location = re.sub(r"\s+", " ", location).strip()
+        if not location:
+            return False
         try:
             location_box = page.locator(
-                "input[placeholder*='Pick'], "
-                "input[placeholder*='pick'], "
-                "input[placeholder*='Location'], "
-                "input[placeholder*='City'], "
-                "input[aria-label*='Pick'], "
-                "input[aria-label*='location']"
+                "input[placeholder*='Pick' i], "
+                "input[placeholder*='pick' i], "
+                "input[placeholder*='Location' i], "
+                "input[placeholder*='City' i], "
+                "input[placeholder*='Where' i], "
+                "input[aria-label*='Pick' i], "
+                "input[aria-label*='location' i], "
+                "input[aria-label*='Where' i]"
             ).first
-            if location_box.count() == 0:
+            if not location_box.count():
+                location_box = page.locator(
+                    "form input[type='text'], [class*='search'] input[type='text']"
+                ).first
+            if not location_box.count():
                 return False
-            location_box.click(timeout=3000)
-            location_box.fill(location)
-            page.wait_for_timeout(800)
-            suggestion = page.get_by_text(location, exact=False).first
-            try:
-                suggestion.click(timeout=2500)
-            except Exception:
-                page.keyboard.press("Enter")
-            page.wait_for_timeout(600)
 
-            # Dates are often prefilled; try a search/submit button.
-            for label in ("Search", "Find cars", "Show cars", "Search cars"):
-                btn = page.get_by_role("button", name=re.compile(label, re.I))
+            location_box.click(timeout=8000)
+            page.wait_for_timeout(250)
+            try:
+                location_box.fill("")
+            except Exception:
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+            try:
+                location_box.type(location, delay=45)
+            except Exception:
+                location_box.fill(location)
+            page.wait_for_timeout(1400)
+
+            picked = False
+            loc_l = location.lower()
+            try:
+                suggestions = page.locator(
+                    "[class*='suggest'] li, "
+                    "[class*='Suggest'] li, "
+                    "[class*='autocomplete'] li, "
+                    "[role='option'], "
+                    "[class*='dropdown'] li, "
+                    "ul[class*='list'] li"
+                )
+                n = min(suggestions.count(), 12)
+                for i in range(n):
+                    try:
+                        el = suggestions.nth(i)
+                        if not el.is_visible(timeout=350):
+                            continue
+                        text = (el.inner_text(timeout=400) or "").strip()
+                        if not text:
+                            continue
+                        low = text.lower()
+                        if loc_l in low or loc_l.split()[0] in low:
+                            el.click(timeout=3000)
+                            picked = True
+                            break
+                    except Exception:
+                        continue
+                if not picked and n > 0:
+                    for i in range(n):
+                        try:
+                            el = suggestions.nth(i)
+                            if el.is_visible(timeout=300):
+                                el.click(timeout=3000)
+                                picked = True
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                picked = False
+
+            if not picked:
+                page.keyboard.press("ArrowDown")
+                page.wait_for_timeout(200)
+                page.keyboard.press("Enter")
+            page.wait_for_timeout(500)
+            _ = (pickup_date, dropoff_date)  # hub often keeps defaults / calendar UI
+
+            search_btn = page.get_by_role(
+                "button", name=re.compile(r"search|find cars|show cars", re.I)
+            )
+            if search_btn.count():
+                search_btn.first.click(timeout=8000)
+            else:
+                btn = page.locator(
+                    "button:has-text('Search'), button[type='submit']"
+                ).first
                 if btn.count():
-                    btn.first.click(timeout=3000)
-                    page.wait_for_timeout(2500)
-                    return True
-            # Fallback: press Enter in the location field
-            location_box.press("Enter")
-            page.wait_for_timeout(2500)
+                    btn.click(timeout=8000)
+                else:
+                    location_box.press("Enter")
+
+            try:
+                page.wait_for_url(
+                    re.compile(r"car(hire|rentals)|pcity=|list", re.I), timeout=20000
+                )
+            except Exception:
+                page.wait_for_timeout(4500)
+            for _ in range(8):
+                try:
+                    probe = page.inner_text("body")
+                except Exception:
+                    probe = ""
+                if any(p >= 80 for p in parse_prices(probe)):
+                    break
+                if re.search(r"view deal|/day", probe, re.I):
+                    break
+                page.wait_for_timeout(700)
             return True
         except Exception:
             return False
+
+    def _resolve_top_car_detail_url(self) -> str:
+        """Find or open the top car deal detail URL."""
+        page = self._require_page()
+        # Prefer existing detail anchors on the list
+        try:
+            anchors = page.locator("a[href*='/carrentals/detail']")
+            count = min(anchors.count(), 20)
+        except Exception:
+            count = 0
+        for i in range(count):
+            try:
+                href = (anchors.nth(i).get_attribute("href") or "").strip()
+            except Exception:
+                continue
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = f"{settings.trip_base_url.rstrip('/')}{href}"
+            href = ensure_locale_curr(normalize_trip_url(href))
+            if self._car_detail_url_ok(href):
+                return href
+
+        # Click View deal and capture navigation
+        try:
+            btn = page.get_by_role("button", name=re.compile(r"view deal", re.I))
+            if not btn.count():
+                btn = page.locator(
+                    "a:has-text('View deal'), button:has-text('View deal'), "
+                    "[class*='deal']:has-text('View')"
+                )
+            if btn.count():
+                with page.expect_navigation(
+                    timeout=15000, wait_until="domcontentloaded"
+                ):
+                    btn.first.click(timeout=5000)
+                page.wait_for_timeout(1200)
+                cur = page.url or ""
+                if self._car_detail_url_ok(cur):
+                    return ensure_locale_curr(normalize_trip_url(cur))
+        except Exception:
+            pass
+        return ""
+
+    def _scrape_top_car_card(
+        self,
+        *,
+        location: str = "",
+        pickup_date: str = "",
+        dropoff_date: str = "",
+        lowest: float | None = None,
+    ) -> dict[str, str]:
+        """Best-effort parse of the first car rental deal on the current page."""
+        page = self._require_page()
+        try:
+            body = page.inner_text("body")
+        except Exception:
+            body = ""
+        blob = body[:14000]
+        card: dict[str, str] = {
+            "name": "",
+            "similar": "",
+            "vendor": "",
+            "score": "",
+            "reviews": "",
+            "seats": "",
+            "fuel": "",
+            "pickup_note": "",
+            "cancellation": "",
+            "mileage": "",
+            "payment": "",
+            "insurance": "",
+            "price_label": "",
+            "price_unit": "/day",
+            "total_label": "",
+            "image_url": "",
+            "url": "",
+            "location": location,
+            "pickup_date": pickup_date,
+            "dropoff_date": dropoff_date,
+        }
+
+        # Detail link on page
+        for u in self._extract_detail_links(kinds=("carrentals", "car"), limit=8):
+            if self._car_detail_url_ok(u):
+                card["url"] = ensure_locale_curr(normalize_trip_url(u))
+                break
+        if not card["url"]:
+            try:
+                a = page.locator("a[href*='/carrentals/detail']").first
+                if a.count():
+                    href = (a.get_attribute("href") or "").strip()
+                    if href.startswith("/"):
+                        href = f"{settings.trip_base_url.rstrip('/')}{href}"
+                    if self._car_detail_url_ok(href):
+                        card["url"] = ensure_locale_curr(normalize_trip_url(href))
+            except Exception:
+                pass
+
+        # Car name + similar
+        name_m = re.search(
+            r"(?im)^([A-Z][A-Za-z0-9 \-]+?)\s+(or similar\s+[A-Za-z ]+)",
+            blob,
+        )
+        if name_m:
+            card["name"] = name_m.group(1).strip()
+            card["similar"] = name_m.group(2).strip()
+        if not card["name"]:
+            name_m = re.search(
+                r"(?i)(Porsche|Toyota|Nissan|Ford|Chevrolet|Jeep|Kia|Audi|"
+                r"BMW|Mercedes|Honda|Hyundai|Tesla|Chrysler|Volkswagen|"
+                r"Mazda|Subaru|Lexus|Volvo)\s+[A-Za-z0-9\-]+",
+                blob,
+            )
+            if name_m:
+                card["name"] = name_m.group(0).strip()
+        sim_m = re.search(r"(?i)or similar\s+[A-Za-z ]+", blob)
+        if sim_m and not card["similar"]:
+            card["similar"] = sim_m.group(0).strip()
+
+        score_m = re.search(r"\b([6-9](?:\.\d)?|10(?:\.0)?)\s*/\s*10\b", blob)
+        if score_m:
+            card["score"] = f"{score_m.group(1)}/10"
+        rev_m = re.search(r"(?i)(\d[\d,]*)\s*review", blob)
+        if rev_m:
+            card["reviews"] = f"{rev_m.group(1)} review(s)"
+
+        seats_m = re.search(r"(?i)\b([2-9]|1[0-5])\s*(?:seats?|passengers?)?\b", blob)
+        # Prefer icon-adjacent digit near Electric/Petrol — fall back carefully
+        if re.search(r"(?i)\bElectric\b", blob):
+            card["fuel"] = "Electric"
+        elif re.search(r"(?i)\bHybrid\b", blob):
+            card["fuel"] = "Hybrid"
+        elif re.search(r"(?i)\bDiesel\b", blob):
+            card["fuel"] = "Diesel"
+        elif re.search(r"(?i)\bPetrol\b|\bGasoline\b", blob):
+            card["fuel"] = "Petrol"
+        # Seats: look for a standalone digit near capacity cues
+        seats2 = re.search(r"(?i)(?:seats?|passengers?|capacity)[^\d]{0,12}(\d{1,2})", blob)
+        if seats2:
+            card["seats"] = seats2.group(1)
+        elif seats_m and int(seats_m.group(1)) <= 15:
+            # Weak signal — only use if no better
+            pass
+
+        # Try to read seats from compact "5 Electric" style lines
+        seat_fuel = re.search(
+            r"(?im)\b([2-9]|1[0-2])\s+(Electric|Hybrid|Petrol|Diesel|Gasoline)\b",
+            blob,
+        )
+        if seat_fuel:
+            card["seats"] = seat_fuel.group(1)
+            fuel = seat_fuel.group(2)
+            card["fuel"] = "Petrol" if fuel.lower() == "gasoline" else fuel
+
+        if re.search(r"(?i)free shuttle", blob):
+            card["pickup_note"] = "Free shuttle to counter"
+        elif re.search(r"(?i)in[- ]terminal|meet and greet|counter", blob):
+            m = re.search(
+                r"(?i)(Free shuttle[^.!\n]+|In-terminal[^.!\n]+|Meet and greet[^.!\n]+)",
+                blob,
+            )
+            if m:
+                card["pickup_note"] = m.group(1).strip()[:80]
+
+        cancel_m = re.search(r"(?i)(Free cancellation[^.!\n]*)", blob)
+        if cancel_m:
+            card["cancellation"] = cancel_m.group(1).strip()[:100]
+        mile_m = re.search(
+            r"(?i)((?:\d[\d,]*)\s*(?:mi|km|miles)\s+per\s+(?:rental|day)|Unlimited mileage)",
+            blob,
+        )
+        if mile_m:
+            card["mileage"] = mile_m.group(1).strip()[:80]
+        if re.search(r"(?i)prepay online", blob):
+            card["payment"] = "Prepay online"
+        elif re.search(r"(?i)pay at pick[- ]?up", blob):
+            card["payment"] = "Pay at pick-up"
+        ins_m = re.search(
+            r"(?i)(Includes? (?:Third Party Liability|CDW|collision|insurance)[^.!\n]*)",
+            blob,
+        )
+        if ins_m:
+            card["insurance"] = ins_m.group(1).strip()[:100]
+
+        # Vendor — often uppercase brand near score
+        for vendor in (
+            "FAT UNCLE CAR RENTAL",
+            "Hertz",
+            "Avis",
+            "Budget",
+            "Sixt",
+            "Enterprise",
+            "Alamo",
+            "National",
+            "Dollar",
+            "Thrifty",
+            "Europcar",
+            "TOYOTA Rent a Car",
+            "Times",
+        ):
+            if vendor.lower() in blob.lower():
+                card["vendor"] = vendor.title() if vendor.isupper() and len(vendor) > 8 else vendor
+                break
+
+        daily_m = re.search(
+            r"(?i)HK\s*\$?\s*([0-9,]+(?:\.\d+)?)\s*/\s*day",
+            blob,
+        )
+        if daily_m:
+            card["price_label"] = f"HK${daily_m.group(1)}"
+        elif lowest is not None:
+            card["price_label"] = f"HK${lowest:,.0f}"
+        total_m = re.search(
+            r"(?i)Total\s*HK\s*\$?\s*([0-9,]+(?:\.\d+)?)",
+            blob,
+        )
+        if total_m:
+            card["total_label"] = f"Total HK${total_m.group(1)}"
+
+        # Cover image
+        try:
+            imgs = page.evaluate(
+                """() => Array.from(document.querySelectorAll('img')).map(e => ({
+                  src: e.currentSrc || e.src || '',
+                  alt: e.alt || '',
+                  w: e.naturalWidth || e.width || 0,
+                  h: e.naturalHeight || e.height || 0
+                })).filter(x => x.src && x.src.startsWith('http'))"""
+            )
+        except Exception:
+            imgs = []
+        best = ""
+        best_area = 0
+        for im in imgs or []:
+            src = str(im.get("src") or "")
+            low = src.lower()
+            alt = str(im.get("alt") or "").lower()
+            if any(x in low for x in ("logo", "icon", "avatar", "qrcode", "badge", "sprite")):
+                continue
+            if "car" in alt or "vehicle" in alt or "tripcdn" in low or "ak-d.tripcdn" in low:
+                area = int(im.get("w") or 0) * int(im.get("h") or 0)
+                if area > best_area:
+                    best_area = area
+                    best = src
+            elif best_area == 0 and ("tripcdn" in low or "ak-d.tripcdn" in low):
+                area = int(im.get("w") or 0) * int(im.get("h") or 0)
+                if area >= 20_000:
+                    best_area = area
+                    best = src
+        if best:
+            card["image_url"] = best
+
+        if not card["name"]:
+            card["name"] = f"Car rental in {location}" if location else "Recommended car"
+        return card
 
     def browse_url(self, url: str) -> str:
         """Navigate to any Trip.com (or related) URL and summarize visible content."""
@@ -2728,30 +3182,59 @@ class TripBrowser:
         car_low = None
         car_total = None
         if need_car:
+            car_pickup_city = (
+                regional.stays[0].city
+                if regional and regional.stays
+                else hotel_city
+            )
             car_text = self.search_cars(
-                location=hotel_city,
+                location=car_pickup_city,
                 pickup_date=depart_date,
                 dropoff_date=return_date,
             )
-            car_url = self._require_page().url
+            car_url = (
+                getattr(self, "last_car_detail_url", "") or ""
+            ).strip() or self._require_page().url
+            car_card = dict(getattr(self, "last_car_card", None) or {})
             car_prices = summarize_prices(
-                f"Car rental in {hotel_city}",
+                f"Car rental in {car_pickup_city}",
                 car_text,
                 url=car_url,
             )
             car_low = car_prices.get("lowest_hkd")
+            if not car_low and car_card.get("price_label"):
+                parsed_daily = parse_prices(car_card["price_label"])
+                if parsed_daily:
+                    car_low = parsed_daily[0]
             car_total = (
                 round(car_low * nights, 2) if car_low is not None else None
             )
+            if car_card.get("total_label"):
+                tot_p = parse_prices(car_card["total_label"])
+                if tot_p:
+                    car_total = tot_p[0]
+            name_line = (
+                f"- Recommended car: {car_card.get('name')}\n"
+                if car_card.get("name")
+                else ""
+            )
+            detail_line = (
+                f"- Car detail link: {car_url}\n"
+                if self._car_detail_url_ok(car_url)
+                else f"- Car search URL: {car_url}\n"
+            )
             sections.append(
                 f"""{n}) CAR RENTAL
-- Car rental search URL: {car_url}
-- Open results: [View car rentals on Trip.com]({car_url})
+{name_line}{detail_line}- Open deal: [View car rental on Trip.com]({car_url})
 - Lowest daily seen: {_fmt_hkd(car_low)}
-- Est. rental total (lowest x nights): {_fmt_hkd(car_total)}
+- Est. rental total: {_fmt_hkd(car_total)}
 - Sample prices: {car_prices.get("prices_hkd", [])[:8]}"""
             )
             booking_lines.append(f"  - Cars: {car_url}")
+            if car_card.get("name"):
+                booking_lines.append(f"  - Recommended car name: {car_card['name']}")
+            if self._car_detail_url_ok(car_url):
+                booking_lines.append(f"  - Recommended car detail link: {car_url}")
             raw_blocks.append("--- Raw car rental excerpt ---\n" + car_text[:2200])
             n += 1
 
@@ -4234,8 +4717,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "search_cars",
             "description": (
-                "Search car rentals on Trip.com Hong Kong. Use when the traveler needs a "
-                "rental car, road trip, or self-drive option at the destination."
+                "Search car rentals on Trip.com Hong Kong car hire hub "
+                "(Playwright: type pickup → autocomplete → Search). "
+                "Returns the top deal and a /carrentals/detail booking URL. "
+                "Use when rent_car is true or the traveler needs a rental / road trip."
             ),
             "parameters": {
                 "type": "object",

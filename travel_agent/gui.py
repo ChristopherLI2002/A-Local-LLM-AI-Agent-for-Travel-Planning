@@ -27,6 +27,7 @@ from travel_agent.airline_names import (
     split_airline_names,
 )
 from travel_agent.itinerary_parse import (
+    CarRentalOffer,
     FlightOffer,
     HotelOffer,
     ParsedItinerary,
@@ -1395,6 +1396,262 @@ class HotelRowCard(tk.Frame):
         self._url = url
 
 
+class CarRentalRowCard(tk.Frame):
+    """Trip.com-style car rental deal card (photo, specs, terms, View deal)."""
+
+    def __init__(self, master: tk.Misc, *, heading: str = "Car rental", **kwargs) -> None:
+        super().__init__(master, bg=C["paper"], **kwargs)
+        self.heading_lbl = tk.Label(
+            self,
+            text=heading,
+            bg=C["paper"],
+            fg=C["ink"],
+            font=FONT_UI_BOLD,
+            anchor="w",
+        )
+        self.heading_lbl.pack(fill="x", pady=(0, 6))
+
+        shell = tk.Frame(self, bg=C["line"], padx=1, pady=1)
+        shell.pack(fill="x")
+        self.card = tk.Frame(shell, bg="#FFFFFF", padx=10, pady=10)
+        self.card.pack(fill="x")
+
+        top = tk.Frame(self.card, bg="#FFFFFF")
+        top.pack(fill="x")
+
+        # Left: photo + vendor + score
+        left = tk.Frame(top, bg="#FFFFFF")
+        left.pack(side="left", padx=(0, 10))
+        self.photo = tk.Canvas(
+            left, width=120, height=72, bg="#EEF2F6", highlightthickness=0
+        )
+        self.photo.pack()
+        self._car_photo: tk.PhotoImage | None = None
+        self._draw_photo_placeholder()
+        self.vendor_lbl = tk.Label(
+            left,
+            text="",
+            bg="#FFFFFF",
+            fg=C["muted"],
+            font=FONTS["tiny"],
+            anchor="w",
+            wraplength=120,
+            justify="left",
+        )
+        self.vendor_lbl.pack(fill="x", pady=(4, 2))
+        score_row = tk.Frame(left, bg="#FFFFFF")
+        score_row.pack(fill="x")
+        self.score_badge = tk.Label(
+            score_row,
+            text="—",
+            bg=C["trip_blue"],
+            fg="#FFFFFF",
+            font=FONTS["tiny"],
+            padx=5,
+            pady=1,
+        )
+        self.score_badge.pack(side="left")
+        self.reviews_lbl = tk.Label(
+            score_row, text="", bg="#FFFFFF", fg=C["muted"], font=FONTS["tiny"]
+        )
+        self.reviews_lbl.pack(side="left", padx=(6, 0))
+
+        # Center: name + specs + terms
+        mid = tk.Frame(top, bg="#FFFFFF")
+        mid.pack(side="left", fill="both", expand=True)
+        title_row = tk.Frame(mid, bg="#FFFFFF")
+        title_row.pack(fill="x")
+        self.name_lbl = tk.Label(
+            title_row,
+            text="Car",
+            bg="#FFFFFF",
+            fg=C["ink"],
+            font=FONT_UI_BOLD,
+            anchor="w",
+        )
+        self.name_lbl.pack(side="left")
+        self.similar_lbl = tk.Label(
+            title_row,
+            text="",
+            bg="#FFFFFF",
+            fg=C["muted"],
+            font=FONT_SMALL,
+            anchor="w",
+        )
+        self.similar_lbl.pack(side="left", padx=(6, 0))
+
+        specs = tk.Frame(mid, bg="#FFFFFF")
+        specs.pack(fill="x", pady=(4, 2))
+        self.seats_lbl = tk.Label(
+            specs, text="", bg="#FFFFFF", fg=C["ink"], font=FONT_SMALL
+        )
+        self.seats_lbl.pack(side="left", padx=(0, 10))
+        self.fuel_lbl = tk.Label(
+            specs, text="", bg="#FFFFFF", fg=C["ink"], font=FONT_SMALL
+        )
+        self.fuel_lbl.pack(side="left")
+
+        self.pickup_lbl = tk.Label(
+            mid,
+            text="",
+            bg="#FFFFFF",
+            fg=C["muted"],
+            font=FONT_SMALL,
+            anchor="w",
+        )
+        self.pickup_lbl.pack(fill="x", pady=(2, 4))
+
+        tk.Frame(mid, bg=C["line"], height=1).pack(fill="x", pady=(2, 4))
+
+        self.cancel_lbl = tk.Label(
+            mid, text="", bg="#FFFFFF", fg="#0A7A6A", font=FONT_SMALL, anchor="w"
+        )
+        self.cancel_lbl.pack(fill="x")
+        self.mileage_lbl = tk.Label(
+            mid, text="", bg="#FFFFFF", fg=C["ink"], font=FONT_SMALL, anchor="w"
+        )
+        self.mileage_lbl.pack(fill="x")
+        self.payment_lbl = tk.Label(
+            mid, text="", bg="#FFFFFF", fg=C["ink"], font=FONT_SMALL, anchor="w"
+        )
+        self.payment_lbl.pack(fill="x")
+        self.insurance_lbl = tk.Label(
+            mid, text="", bg="#FFFFFF", fg=C["ink"], font=FONT_SMALL, anchor="w"
+        )
+        self.insurance_lbl.pack(fill="x")
+
+        # Right: price + CTA
+        right = tk.Frame(top, bg="#FFFFFF")
+        right.pack(side="right", padx=(8, 0))
+        self.price_lbl = tk.Label(
+            right,
+            text="—",
+            bg="#FFFFFF",
+            fg=C["ink"],
+            font=FONTS["price"],
+            anchor="e",
+        )
+        self.price_lbl.pack(anchor="e")
+        self.unit_lbl = tk.Label(
+            right, text="/day", bg="#FFFFFF", fg=C["muted"], font=FONT_SMALL, anchor="e"
+        )
+        self.unit_lbl.pack(anchor="e")
+        self.total_lbl = tk.Label(
+            right, text="", bg="#FFFFFF", fg=C["muted"], font=FONTS["tiny"], anchor="e"
+        )
+        self.total_lbl.pack(anchor="e", pady=(2, 8))
+        self.cta = tk.Label(
+            right,
+            text="View deal >",
+            bg=C["trip_blue"],
+            fg="#FFFFFF",
+            font=FONT_UI_BOLD,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        )
+        self.cta.pack(anchor="e")
+        self.cta.bind("<Button-1>", self._open)
+        self.cta.bind("<Enter>", lambda _e: self.cta.configure(bg=C["trip_blue_hover"]))
+        self.cta.bind("<Leave>", lambda _e: self.cta.configure(bg=C["trip_blue"]))
+        self._url = ""
+
+    def _draw_photo_placeholder(self) -> None:
+        self._car_photo = None
+        self.photo.delete("all")
+        self.photo.create_rectangle(0, 0, 120, 72, fill="#EEF2F6", outline="")
+        self.photo.create_text(60, 36, text="Car", fill="#8A95A1", font=FONT_SMALL)
+
+    def _paint_photo(self, url: str) -> None:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                    "Referer": "https://hk.trip.com/",
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                },
+            )
+            data = urllib.request.urlopen(req, timeout=12).read()
+            img = Image.open(BytesIO(data)).convert("RGB")
+            tw, th = 120, 72
+            scale = max(tw / max(img.width, 1), th / max(img.height, 1))
+            new_w = max(1, round(img.width * scale))
+            new_h = max(1, round(img.height * scale))
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            left = max(0, (new_w - tw) // 2)
+            top = max(0, (new_h - th) // 2)
+            fitted = resized.crop((left, top, left + tw, top + th))
+            photo = ImageTk.PhotoImage(fitted)
+            self._car_photo = photo
+            self.photo.delete("all")
+            self.photo.create_image(0, 0, image=photo, anchor="nw")
+        except Exception:
+            self._draw_photo_placeholder()
+
+    def _open(self, _e: object | None = None) -> None:
+        url = (self._url or "").strip()
+        if url and "trip.com" in url.lower():
+            webbrowser.open(url)
+        elif url:
+            webbrowser.open(url)
+        else:
+            messagebox.showinfo(
+                "No link", "Generate a trip with Rent a car to get a deal link."
+            )
+
+    def set_loading(self, message: str) -> None:
+        self._draw_photo_placeholder()
+        self.name_lbl.configure(text=message)
+        self.similar_lbl.configure(text="")
+        self.vendor_lbl.configure(text="")
+        self.score_badge.configure(text="—")
+        self.reviews_lbl.configure(text="")
+        self.seats_lbl.configure(text="")
+        self.fuel_lbl.configure(text="")
+        self.pickup_lbl.configure(text="Searching Trip.com car hire…")
+        self.cancel_lbl.configure(text="")
+        self.mileage_lbl.configure(text="")
+        self.payment_lbl.configure(text="")
+        self.insurance_lbl.configure(text="")
+        self.price_lbl.configure(text="…")
+        self.total_lbl.configure(text="")
+        self._url = ""
+
+    def set_offer(self, offer: CarRentalOffer) -> None:
+        loc = offer.location or ""
+        heading = "Car rental"
+        if loc:
+            heading = f"Car rental · {loc}"
+        self.heading_lbl.configure(text=heading)
+        self.name_lbl.configure(text=offer.name or "Recommended car")
+        self.similar_lbl.configure(text=offer.similar or "")
+        self.vendor_lbl.configure(text=offer.vendor or "")
+        self.score_badge.configure(text=offer.score or "—")
+        self.reviews_lbl.configure(text=offer.reviews or "")
+        seats = f"{offer.seats} seats" if offer.seats else ""
+        self.seats_lbl.configure(text=seats)
+        self.fuel_lbl.configure(text=offer.fuel or "")
+        self.pickup_lbl.configure(text=offer.pickup_note or "")
+        self.cancel_lbl.configure(text=offer.cancellation or "")
+        self.mileage_lbl.configure(text=offer.mileage or "")
+        self.payment_lbl.configure(text=offer.payment or "")
+        self.insurance_lbl.configure(text=offer.insurance or "")
+        self.price_lbl.configure(text=offer.price_label or "See Trip.com")
+        self.unit_lbl.configure(text=offer.price_unit or "/day")
+        self.total_lbl.configure(text=offer.total_label or "")
+        url = (offer.url or "").strip()
+        self._url = url
+        if (offer.image_url or "").startswith("http"):
+            self._paint_photo(offer.image_url)
+        else:
+            self._draw_photo_placeholder()
+
+
 class TravelAgentApp(tk.Tk):
     def __init__(self, model: str, headless: bool = True) -> None:
         super().__init__()
@@ -1686,6 +1943,9 @@ class TravelAgentApp(tk.Tk):
             self._style_vars[style] = var
             Chip(chips, style, var).grid(row=i // 3, column=i % 3, padx=(0, 10), pady=6, sticky="w")
 
+        self.rent_car_var = tk.BooleanVar(value=False)
+        Chip(form, "Rent a car", self.rent_car_var).pack(anchor="w", pady=(0, 16))
+
         row = tk.Frame(form, bg=C["paper"])
         row.pack(fill="x")
         self.generate_btn = PillButton(
@@ -1751,6 +2011,9 @@ class TravelAgentApp(tk.Tk):
         self.hotel_row = HotelRowCard(self.hotels_box)
         self.hotel_row.pack(fill="x", pady=(0, 8))
         self.hotel_rows: list[HotelRowCard] = [self.hotel_row]
+        self.car_row = CarRentalRowCard(left)
+        # Hidden until a rental is needed / scraped
+        # self.car_row.pack(...) when offer exists
 
         tk.Label(
             right,
@@ -1899,6 +2162,49 @@ class TravelAgentApp(tk.Tk):
             if i == 0:
                 self.hotel_row = card
 
+    def _render_car_card(self, parsed: ParsedItinerary) -> None:
+        """Show or hide the car rental card based on scraped deal."""
+        offer = parsed.car_offer
+        want = bool(self._trip_context.get("rent_car")) or bool(offer and offer.url)
+        if not want and self.agent:
+            # Interest-based search may still have produced a card
+            want = bool(getattr(self.agent.browser, "last_car_card", None) or {})
+        if offer and (offer.name or offer.url or offer.price_label):
+            if not self.car_row.winfo_ismapped():
+                self.car_row.pack(fill="x", pady=(4, 8))
+            self.car_row.set_offer(offer)
+        elif want:
+            if not self.car_row.winfo_ismapped():
+                self.car_row.pack(fill="x", pady=(4, 8))
+            self.car_row.set_loading("No car deal scraped yet")
+        else:
+            if self.car_row.winfo_ismapped():
+                self.car_row.pack_forget()
+
+    def _car_offer_from_live_card(self, card: dict[str, str]) -> CarRentalOffer:
+        return CarRentalOffer(
+            name=card.get("name", "") or card.get("car_name", ""),
+            similar=card.get("similar", "") or card.get("car_similar", ""),
+            image_url=card.get("image_url", "") or card.get("car_image", ""),
+            vendor=card.get("vendor", "") or card.get("car_vendor", ""),
+            score=card.get("score", "") or card.get("car_score", ""),
+            reviews=card.get("reviews", "") or card.get("car_reviews", ""),
+            seats=card.get("seats", "") or card.get("car_seats", ""),
+            fuel=card.get("fuel", "") or card.get("car_fuel", ""),
+            pickup_note=card.get("pickup_note", "") or card.get("car_pickup_note", ""),
+            cancellation=card.get("cancellation", "") or card.get("car_cancellation", ""),
+            mileage=card.get("mileage", "") or card.get("car_mileage", ""),
+            payment=card.get("payment", "") or card.get("car_payment", ""),
+            insurance=card.get("insurance", "") or card.get("car_insurance", ""),
+            price_label=card.get("price_label", "") or card.get("car_price", ""),
+            price_unit="/day",
+            total_label=card.get("total_label", "") or card.get("car_total", ""),
+            url=card.get("url", "") or card.get("car", ""),
+            location=card.get("location", "") or card.get("car_location", ""),
+            pickup_date=card.get("pickup_date", "") or card.get("car_pickup", ""),
+            dropoff_date=card.get("dropoff_date", "") or card.get("car_dropoff", ""),
+        )
+
     def _clear_days(self) -> None:
         for child in self.days_inner.winfo_children():
             child.destroy()
@@ -1942,6 +2248,7 @@ class TravelAgentApp(tk.Tk):
             self.flight_row.set_offer(stub)
 
         self._render_hotel_cards(parsed)
+        self._render_car_card(parsed)
 
         self._clear_days()
         nights = 0
@@ -2449,13 +2756,14 @@ class TravelAgentApp(tk.Tk):
             include_flights=True,
             include_trains=True,
             include_transfers=True,
-            rent_car=False,
+            rent_car=bool(getattr(self, "rent_car_var", None) and self.rent_car_var.get()),
         )
         self._trip_context = {
             "origin": self.origin_var.get().strip() or "Hong Kong",
             "destination": destination,
             "depart_date": depart,
             "return_date": ret or "",
+            "rent_car": "1" if getattr(self, "rent_car_var", None) and self.rent_car_var.get() else "",
         }
         # Vague regions (e.g. California) → multi-city open-jaw itinerary
         try:
@@ -2474,17 +2782,25 @@ class TravelAgentApp(tk.Tk):
         except Exception:
             pass
         if self.agent:
-            self.agent.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
+            self.agent.booking_links = {"flight": "", "hotel": "", "hotel_name": "", "car": "", "car_name": ""}
             self.agent.browser.last_proposed_route = None
             self.agent.browser.last_flight_card = {}
             self.agent.browser.last_plan_flight_card = {}
             self.agent.browser.last_hotel_stays = []
+            self.agent.browser.last_car_card = {}
+            self.agent.browser.last_car_detail_url = ""
         self._live_flight_card = {}
         self._live_flight_error = ""
 
         self._show_results()
         self.flight_row.set_loading("Comparing flights on Trip.com…")
         self.hotel_row.set_loading("Comparing hotels on Trip.com…")
+        if self._trip_context.get("rent_car"):
+            if not self.car_row.winfo_ismapped():
+                self.car_row.pack(fill="x", pady=(4, 8))
+            self.car_row.set_loading("Comparing car rentals on Trip.com…")
+        elif self.car_row.winfo_ismapped():
+            self.car_row.pack_forget()
         self._clear_days()
         loading = tk.Frame(self.days_inner, bg="#FFFFFF", padx=14, pady=16)
         loading.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
@@ -3235,7 +3551,50 @@ class TravelAgentApp(tk.Tk):
             self._enrich_hotel_offer(parsed, hotel_name=hotel_name)
         if parsed.hotel_offers:
             parsed.hotel_offer = parsed.hotel_offers[0]
+        self._enrich_car_offer(parsed)
         return parsed
+
+    def _enrich_car_offer(self, parsed: ParsedItinerary) -> None:
+        """Prefer Playwright carhire scrape for the left-column car card."""
+        live: dict[str, str] = {}
+        if self.agent:
+            live = dict(getattr(self.agent.browser, "last_car_card", None) or {})
+            if self.agent.booking_links.get("car") and not live.get("url"):
+                live["url"] = self.agent.booking_links["car"]
+            # Overlay booking_links fields when present
+            for src, dest in (
+                ("car_name", "name"),
+                ("car_similar", "similar"),
+                ("car_vendor", "vendor"),
+                ("car_score", "score"),
+                ("car_reviews", "reviews"),
+                ("car_seats", "seats"),
+                ("car_fuel", "fuel"),
+                ("car_pickup_note", "pickup_note"),
+                ("car_cancellation", "cancellation"),
+                ("car_mileage", "mileage"),
+                ("car_payment", "payment"),
+                ("car_insurance", "insurance"),
+                ("car_price", "price_label"),
+                ("car_total", "total_label"),
+                ("car_image", "image_url"),
+                ("car_location", "location"),
+                ("car_pickup", "pickup_date"),
+                ("car_dropoff", "dropoff_date"),
+                ("car", "url"),
+            ):
+                val = self.agent.booking_links.get(src) or ""
+                if val and not live.get(dest):
+                    live[dest] = val
+        if not live and not self._trip_context.get("rent_car"):
+            return
+        if live:
+            parsed.car_offer = self._car_offer_from_live_card(live)
+        elif self._trip_context.get("rent_car") and not parsed.car_offer:
+            parsed.car_offer = CarRentalOffer(
+                name="Searching car rentals…",
+                location=to_hotel_city(self._trip_context.get("destination", "") or ""),
+            )
 
     def _enrich_flight_offer(self, parsed: ParsedItinerary) -> None:
         """Prefer tool-scraped structured flight fields over LLM prose."""
@@ -4131,14 +4490,14 @@ class TravelAgentApp(tk.Tk):
         """Update status while Trip.com tools run (browser thread → Tk)."""
         labels = {
             "propose_trip_route": "Proposing rough route…",
-            "plan_trip": "Planning trip (flights + hotels on Trip.com)…",
+            "plan_trip": "Planning trip (flights + hotels + cars on Trip.com)…",
             "search_flights": "Searching flights on Trip.com…",
             "search_hotels": "Searching hotels on Trip.com…",
             "compare_flight_prices": "Comparing flight prices…",
             "compare_hotel_prices": "Comparing hotel prices…",
             "search_trains": "Searching trains…",
             "search_transfers": "Searching transfers…",
-            "search_cars": "Searching cars…",
+            "search_cars": "Searching car rentals on Trip.com…",
             "search_attractions": "Looking up attractions…",
         }
         dest = ""
@@ -4147,6 +4506,7 @@ class TravelAgentApp(tk.Tk):
                 args.get("destination")
                 or args.get("hotel_city")
                 or args.get("city")
+                or args.get("location")
                 or ""
             )
         msg = labels.get(name, f"Running {name}…")
@@ -4163,6 +4523,16 @@ class TravelAgentApp(tk.Tk):
                 0,
                 lambda: self.hotel_row.set_loading("Searching Trip.com hotels…"),
             )
+        if name == "search_cars" or (
+            name == "plan_trip" and self._trip_context.get("rent_car")
+        ):
+
+            def _car_loading() -> None:
+                if not self.car_row.winfo_ismapped():
+                    self.car_row.pack(fill="x", pady=(4, 8))
+                self.car_row.set_loading("Searching Trip.com car hire…")
+
+            self.after(0, _car_loading)
 
     def _on_tool_end(self, name: str, preview: str) -> None:
         snippet = (preview or "").replace("\n", " ").strip()[:80]

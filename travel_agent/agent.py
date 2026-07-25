@@ -281,6 +281,62 @@ class TravelAgent:
                     ("hotels in ", "recommended hotel")
                 ):
                     self.booking_links["hotel_name"] = live_name
+                if found.get("car"):
+                    self.booking_links["car"] = found["car"]
+                live_car = (
+                    getattr(self.browser, "last_car_detail_url", "") or ""
+                ).strip()
+                if live_car and "/carrentals/detail" in live_car.lower():
+                    self.booking_links["car"] = live_car
+                if found.get("car_name"):
+                    self.booking_links["car_name"] = found["car_name"]
+                live_car_card = getattr(self.browser, "last_car_card", None) or {}
+                if live_car_card.get("name"):
+                    self.booking_links["car_name"] = live_car_card["name"]
+                for key in (
+                    "car_similar",
+                    "car_vendor",
+                    "car_score",
+                    "car_reviews",
+                    "car_seats",
+                    "car_fuel",
+                    "car_pickup_note",
+                    "car_cancellation",
+                    "car_mileage",
+                    "car_payment",
+                    "car_insurance",
+                    "car_price",
+                    "car_total",
+                    "car_image",
+                    "car_location",
+                    "car_pickup",
+                    "car_dropoff",
+                ):
+                    if found.get(key):
+                        self.booking_links[key] = found[key]
+                # Prefer live scraped card fields
+                for src, dest in (
+                    ("similar", "car_similar"),
+                    ("vendor", "car_vendor"),
+                    ("score", "car_score"),
+                    ("reviews", "car_reviews"),
+                    ("seats", "car_seats"),
+                    ("fuel", "car_fuel"),
+                    ("pickup_note", "car_pickup_note"),
+                    ("cancellation", "car_cancellation"),
+                    ("mileage", "car_mileage"),
+                    ("payment", "car_payment"),
+                    ("insurance", "car_insurance"),
+                    ("price_label", "car_price"),
+                    ("total_label", "car_total"),
+                    ("image_url", "car_image"),
+                    ("location", "car_location"),
+                    ("pickup_date", "car_pickup"),
+                    ("dropoff_date", "car_dropoff"),
+                    ("url", "car"),
+                ):
+                    if live_car_card.get(src):
+                        self.booking_links[dest] = live_car_card[src]
                 if found.get("flight_price"):
                     self.booking_links["flight_price"] = found["flight_price"]
                 if found.get("flight_option"):

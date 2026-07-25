@@ -105,6 +105,33 @@ class HotelOffer:
 
 
 @dataclass
+class CarRentalOffer:
+    """Structured fields for a Trip.com-style car rental deal card."""
+
+    name: str = ""
+    similar: str = ""
+    image_url: str = ""
+    vendor: str = ""
+    score: str = ""
+    reviews: str = ""
+    seats: str = ""
+    fuel: str = ""
+    pickup_note: str = ""
+    cancellation: str = ""
+    mileage: str = ""
+    payment: str = ""
+    insurance: str = ""
+    price_label: str = ""
+    price_unit: str = "/day"
+    total_label: str = ""
+    url: str = ""
+    location: str = ""
+    pickup_date: str = ""
+    dropoff_date: str = ""
+    raw: str = ""
+
+
+@dataclass
 class ParsedItinerary:
     flight: Block | None = None
     hotel: Block | None = None
@@ -114,6 +141,7 @@ class ParsedItinerary:
     flight_offer: FlightOffer | None = None
     hotel_offer: HotelOffer | None = None
     hotel_offers: list[HotelOffer] = field(default_factory=list)
+    car_offer: CarRentalOffer | None = None
 
 
 def _urls_in(text: str) -> list[str]:
