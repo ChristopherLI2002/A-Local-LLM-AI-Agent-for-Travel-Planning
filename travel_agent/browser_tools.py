@@ -26,6 +26,12 @@ from travel_agent.pricing import (
     pick_cheapest_from_comparison,
     summarize_prices,
 )
+from travel_agent.llm_select import (
+    SelectionContext,
+    enrich_hotel_candidates_from_page,
+    select_flight_row,
+    select_hotel_candidate,
+)
 from travel_agent.trip_urls import (
     build_flight_search_url,
     ensure_locale_curr,
@@ -475,9 +481,10 @@ def parse_trip_com_flight_rows(
     return rows
 
 
-def _pick_flight_row(
+def _pick_flight_row_cheapest(
     rows: list[dict[str, str]], *, lowest: float | None = None
 ) -> dict[str, str] | None:
+    """Cheapest-row fallback when LLM selection is unavailable."""
     if not rows:
         return None
     priced: list[tuple[dict[str, str], float]] = []
@@ -512,6 +519,61 @@ class TripBrowser:
         # Car rental deal from Playwright carhire search
         self.last_car_card: dict[str, str] = {}
         self.last_car_detail_url: str = ""
+        # LLM ranking context (budget, style, interests) for flight/hotel picks
+        self.selection_context: SelectionContext = SelectionContext()
+        self.llm_model: str = settings.ollama_model
+        self.llm_host: str = settings.ollama_host
+
+    def _update_selection_context(self, **kwargs: Any) -> None:
+        """Merge trip prefs used when the LLM ranks scraped flights/hotels."""
+        ctx = self.selection_context
+        for key, val in kwargs.items():
+            if val is None or val == "":
+                continue
+            if hasattr(ctx, key):
+                setattr(ctx, key, val)
+
+    def _pick_flight_row(
+        self, rows: list[dict[str, str]], *, lowest: float | None = None
+    ) -> dict[str, str] | None:
+        """Pick a flight row — LLM ranks candidates; cheapest is the fallback."""
+        if not rows:
+            return None
+        picked = select_flight_row(
+            rows,
+            self.selection_context,
+            model=self.llm_model,
+            host=self.llm_host,
+            lowest=lowest,
+        )
+        return picked or _pick_flight_row_cheapest(rows, lowest=lowest)
+
+    def _pick_hotel_from_options(
+        self,
+        options: list[tuple[str, str]],
+        *,
+        page_text: str = "",
+        city: str = "",
+        prices: list[float] | None = None,
+    ) -> tuple[str, str]:
+        """LLM-pick a hotel from list-page (url, name) pairs."""
+        if not options:
+            return "", ""
+        candidates = enrich_hotel_candidates_from_page(
+            options,
+            page_text,
+            city=city,
+            default_prices=prices,
+        )
+        chosen = select_hotel_candidate(
+            candidates,
+            self.selection_context,
+            model=self.llm_model,
+            host=self.llm_host,
+        )
+        if chosen:
+            return chosen.get("url", options[0][0]), chosen.get("name", options[0][1])
+        return options[0]
 
     def start(self) -> None:
         self._pw = sync_playwright().start()
@@ -992,6 +1054,13 @@ class TripBrowser:
         adults_n = max(1, min(int(adults or 2), 8))
         rooms_n = max(1, min(int(rooms or 1), 8))
 
+        self._update_selection_context(
+            destination=city_name,
+            checkin=checkin,
+            checkout=checkout,
+            adults=adults_n,
+        )
+
         hub = (
             f"{settings.trip_base_url}/hotels/"
             f"?locale={settings.trip_locale}&curr={settings.trip_currency}"
@@ -1093,6 +1162,7 @@ class TripBrowser:
 
         detail_links: list[str] = []
         hotel_names: list[str] = []
+        raw_hotel_options: list[tuple[str, str]] = []
         for u, label in self._extract_hotel_detail_options(limit=10):
             nu = ensure_locale_curr(normalize_trip_url(u))
             low = nu.lower()
@@ -1101,11 +1171,29 @@ class TripBrowser:
             if "hotelid=" in low or re.search(r"hotel-detail-\d+", low) or re.search(
                 r"/hotels/[^/?]+-\d+", low
             ):
+                raw_hotel_options.append((nu, label))
                 detail_links.append(nu)
                 if label and label not in hotel_names:
                     hotel_names.append(label)
-            if len(detail_links) >= 3:
+            if len(detail_links) >= 8:
                 break
+
+        # LLM ranks scraped hotels (budget + travel style), not just the first list row
+        if len(raw_hotel_options) > 1:
+            picked_url, picked_name = self._pick_hotel_from_options(
+                raw_hotel_options,
+                page_text=body,
+                city=city_name,
+                prices=prices,
+            )
+            if picked_url:
+                detail_links = [picked_url] + [
+                    u for u, _ in raw_hotel_options if u != picked_url
+                ]
+            if picked_name and picked_name not in hotel_names:
+                hotel_names.insert(0, picked_name)
+            elif picked_name:
+                hotel_names = [picked_name] + [n for n in hotel_names if n != picked_name]
 
         # If list anchors had no hotelId, mine page HTML / click top card
         if not detail_links:
@@ -2423,6 +2511,18 @@ class TripBrowser:
         if not want_flights and not want_trains:
             want_flights = True
 
+        self._update_selection_context(
+            origin=origin or "Hong Kong",
+            destination=destination or hotel_city,
+            nights=nights,
+            budget_hkd=budget_hkd,
+            interests=interests or "",
+            travel_styles=interests or "",
+            checkin=depart_date,
+            checkout=return_date,
+            adults=adults,
+        )
+
         from travel_agent.regions import (
             format_route_proposal,
             propose_trip_route,
@@ -2977,6 +3077,7 @@ class TripBrowser:
         seeded_detail = list(recommended_hotel_detail_links)
         recommended_hotel_detail_links = []
         recommended_hotel_names: list[str] = []
+        hotel_option_pairs: list[tuple[str, str]] = []
         for u, label in self._extract_hotel_detail_options(limit=8):
             nu = ensure_locale_curr(normalize_trip_url(u))
             low = nu.lower()
@@ -2988,6 +3089,7 @@ class TripBrowser:
                 or re.search(r"/hotels/[^/?]+-\d+", low)
             ):
                 continue
+            hotel_option_pairs.append((nu, label))
             recommended_hotel_detail_links.append(nu)
             if (
                 label
@@ -2995,8 +3097,21 @@ class TripBrowser:
                 and _hotel_name_plausible_for_city(label, hotel_city)
             ):
                 recommended_hotel_names.append(label)
-            if len(recommended_hotel_detail_links) >= 3:
-                break
+        if len(hotel_option_pairs) > 1:
+            picked_url, picked_name = self._pick_hotel_from_options(
+                hotel_option_pairs,
+                page_text=hotel_text,
+                city=hotel_city,
+                prices=hotel_prices.get("prices_hkd") or [],
+            )
+            if picked_url:
+                recommended_hotel_detail_links = [picked_url] + [
+                    u for u, _ in hotel_option_pairs if u != picked_url
+                ]
+                if picked_name:
+                    recommended_hotel_names = [picked_name] + [
+                        n for n in recommended_hotel_names if n != picked_name
+                    ]
         if not recommended_hotel_detail_links and seeded_detail:
             recommended_hotel_detail_links = seeded_detail
         # Prefer real hotel title over generic price snippets
@@ -3843,7 +3958,7 @@ Transport modes: {", ".join(modes)}
                 and (r.get("depart_airport") or "").upper() != out_from
             )
         ] or rows
-        picked = _pick_flight_row(filtered)
+        picked = self._pick_flight_row(filtered)
         if not picked:
             return {}
         if picked.get("airline") and not picked.get("airline_logo"):
@@ -3879,7 +3994,7 @@ Transport modes: {", ".join(modes)}
         rows = parse_trip_com_flight_rows(
             blob, origin=origin, destination=destination
         )
-        picked = _pick_flight_row(rows, lowest=lowest)
+        picked = self._pick_flight_row(rows, lowest=lowest)
         if picked:
             card.update({k: v for k, v in picked.items() if v})
             if lowest is not None and not card.get("price_label"):
@@ -4177,9 +4292,10 @@ Transport modes: {", ".join(modes)}
         if stay_total is not None:
             stay_rec["total_label"] = f"Est. stay total: HK${stay_total:,.0f}"
 
-        # Keep scanning until we have a plausible hotel title + detail URL
+        # LLM-pick a hotel for this stay city (not just the first anchor)
         name = ""
         detail = ""
+        stay_options: list[tuple[str, str]] = []
         for u, label_txt in self._extract_hotel_detail_options(limit=12):
             nu = ensure_locale_curr(normalize_trip_url(u))
             if "/hotels/" not in nu.lower():
@@ -4190,14 +4306,20 @@ Transport modes: {", ".join(modes)}
                 or re.search(r"/hotels/[^/?]+-\d+", nu)
             ):
                 continue
-            if not detail:
-                detail = nu
-            if label_txt and _hotel_name_plausible_for_city(label_txt, stay_city):
-                name = label_txt
-                detail = nu
-                break
+            stay_options.append((nu, label_txt))
+        if stay_options:
+            picked_url, picked_name = self._pick_hotel_from_options(
+                stay_options,
+                page_text=h_text or "",
+                city=stay_city,
+                prices=h_prices.get("prices_hkd") or [],
+            )
+            detail = picked_url or stay_options[0][0]
+            name = picked_name or stay_options[0][1]
         if detail:
             stay_rec["url"] = detail
+        if name and _hotel_name_plausible_for_city(name, stay_city):
+            stay_rec["name"] = name
 
         card = self._scrape_top_hotel_card(
             city=stay_city,

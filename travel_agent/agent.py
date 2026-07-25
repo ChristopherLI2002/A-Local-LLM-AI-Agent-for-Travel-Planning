@@ -73,6 +73,8 @@ class TravelAgent:
         self.model = model or settings.ollama_model
         self.client = ollama.Client(host=settings.ollama_host)
         self.browser = TripBrowser()
+        self.browser.llm_model = self.model
+        self.browser.llm_host = settings.ollama_host
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
