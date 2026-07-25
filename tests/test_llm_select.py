@@ -66,3 +66,52 @@ def test_enrich_hotel_candidates_from_page() -> None:
     assert len(rows) == 2
     assert rows[0]["score"] == "9.2"
     assert "HK$" in rows[0]["price_label"]
+
+
+def test_cheapest_car_index() -> None:
+    rows = [
+        {"price_label": "HK$450/day"},
+        {"price_label": "HK$320/day"},
+        {"price_label": "HK$510/day"},
+    ]
+    from travel_agent.llm_select import _cheapest_car_index
+
+    assert _cheapest_car_index(rows) == 1
+
+
+def test_select_car_fallback_without_ollama() -> None:
+    import travel_agent.llm_select as ls
+    from travel_agent.llm_select import SelectionContext, select_car_candidate
+
+    original = ls._llm_pick_index
+    try:
+        ls._llm_pick_index = lambda **_k: None
+        rows = [
+            {"name": "Toyota Camry", "price_label": "HK$450"},
+            {"name": "Ford Mustang", "price_label": "HK$680"},
+        ]
+        picked = select_car_candidate(rows, SelectionContext(rent_car=True))
+        assert picked is not None
+        assert picked["name"] == "Toyota Camry"
+    finally:
+        ls._llm_pick_index = original
+
+
+def test_parse_trip_com_car_rows() -> None:
+    from travel_agent.browser_tools import parse_trip_com_car_rows
+
+    body = (
+        "Toyota RAV4 or similar SUV\n"
+        "8.6/10 · 120 review(s)\n"
+        "5 Electric\n"
+        "Free cancellation\n"
+        "HK$420/day\n"
+        "View deal\n"
+        "Ford Mustang or similar coupe\n"
+        "7.9/10\n"
+        "HK$890/day"
+    )
+    rows = parse_trip_com_car_rows(body)
+    assert len(rows) >= 2
+    assert any("Toyota" in r.get("name", "") for r in rows)
+    assert any("HK$" in r.get("price_label", "") for r in rows)

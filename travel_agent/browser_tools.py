@@ -28,7 +28,9 @@ from travel_agent.pricing import (
 )
 from travel_agent.llm_select import (
     SelectionContext,
+    enrich_car_candidates_from_page,
     enrich_hotel_candidates_from_page,
+    select_car_candidate,
     select_flight_row,
     select_hotel_candidate,
 )
@@ -481,6 +483,161 @@ def parse_trip_com_flight_rows(
     return rows
 
 
+_CAR_VENDORS = (
+    "FAT UNCLE CAR RENTAL",
+    "Hertz",
+    "Avis",
+    "Budget",
+    "Sixt",
+    "Enterprise",
+    "Alamo",
+    "National",
+    "Dollar",
+    "Thrifty",
+    "Europcar",
+    "TOYOTA Rent a Car",
+    "Times",
+)
+
+
+def _parse_car_chunk(chunk: str) -> dict[str, str]:
+    """Parse one car listing block from Trip.com car hire results."""
+    blob = chunk or ""
+    card: dict[str, str] = {
+        "name": "",
+        "similar": "",
+        "vendor": "",
+        "score": "",
+        "reviews": "",
+        "seats": "",
+        "fuel": "",
+        "pickup_note": "",
+        "cancellation": "",
+        "mileage": "",
+        "payment": "",
+        "insurance": "",
+        "price_label": "",
+        "total_label": "",
+        "url": "",
+    }
+
+    name_m = re.search(
+        r"(?im)^([A-Z][A-Za-z0-9 \-]+?)\s+(or similar\s+[A-Za-z ]+)",
+        blob,
+    )
+    if name_m:
+        card["name"] = name_m.group(1).strip()
+        card["similar"] = name_m.group(2).strip()
+    if not card["name"]:
+        name_m = re.search(
+            r"(?i)(Porsche|Toyota|Nissan|Ford|Chevrolet|Jeep|Kia|Audi|"
+            r"BMW|Mercedes|Honda|Hyundai|Tesla|Chrysler|Volkswagen|"
+            r"Mazda|Subaru|Lexus|Volvo)\s+[A-Za-z0-9\-]+",
+            blob,
+        )
+        if name_m:
+            card["name"] = name_m.group(0).strip()
+    sim_m = re.search(r"(?i)or similar\s+[A-Za-z ]+", blob)
+    if sim_m and not card["similar"]:
+        card["similar"] = sim_m.group(0).strip()
+
+    score_m = re.search(r"\b([6-9](?:\.\d)?|10(?:\.0)?)\s*/\s*10\b", blob)
+    if score_m:
+        card["score"] = f"{score_m.group(1)}/10"
+    rev_m = re.search(r"(?i)(\d[\d,]*)\s*review", blob)
+    if rev_m:
+        card["reviews"] = f"{rev_m.group(1)} review(s)"
+
+    if re.search(r"(?i)\bElectric\b", blob):
+        card["fuel"] = "Electric"
+    elif re.search(r"(?i)\bHybrid\b", blob):
+        card["fuel"] = "Hybrid"
+    elif re.search(r"(?i)\bDiesel\b", blob):
+        card["fuel"] = "Diesel"
+    elif re.search(r"(?i)\bPetrol\b|\bGasoline\b", blob):
+        card["fuel"] = "Petrol"
+    seat_fuel = re.search(
+        r"(?im)\b([2-9]|1[0-2])\s+(Electric|Hybrid|Petrol|Diesel|Gasoline)\b",
+        blob,
+    )
+    if seat_fuel:
+        card["seats"] = seat_fuel.group(1)
+        fuel = seat_fuel.group(2)
+        card["fuel"] = "Petrol" if fuel.lower() == "gasoline" else fuel
+
+    if re.search(r"(?i)free shuttle", blob):
+        card["pickup_note"] = "Free shuttle to counter"
+    cancel_m = re.search(r"(?i)(Free cancellation[^.!\n]*)", blob)
+    if cancel_m:
+        card["cancellation"] = cancel_m.group(1).strip()[:100]
+    mile_m = re.search(
+        r"(?i)((?:\d[\d,]*)\s*(?:mi|km|miles)\s+per\s+(?:rental|day)|Unlimited mileage)",
+        blob,
+    )
+    if mile_m:
+        card["mileage"] = mile_m.group(1).strip()[:80]
+    if re.search(r"(?i)prepay online", blob):
+        card["payment"] = "Prepay online"
+    elif re.search(r"(?i)pay at pick[- ]?up", blob):
+        card["payment"] = "Pay at pick-up"
+    ins_m = re.search(
+        r"(?i)(Includes? (?:Third Party Liability|CDW|collision|insurance)[^.!\n]*)",
+        blob,
+    )
+    if ins_m:
+        card["insurance"] = ins_m.group(1).strip()[:100]
+
+    for vendor in _CAR_VENDORS:
+        if vendor.lower() in blob.lower():
+            card["vendor"] = (
+                vendor.title() if vendor.isupper() and len(vendor) > 8 else vendor
+            )
+            break
+
+    daily_m = re.search(r"(?i)HK\s*\$?\s*([0-9,]+(?:\.\d+)?)\s*/\s*day", blob)
+    if daily_m:
+        card["price_label"] = f"HK${daily_m.group(1)}"
+    total_m = re.search(r"(?i)Total\s*HK\s*\$?\s*([0-9,]+(?:\.\d+)?)", blob)
+    if total_m:
+        card["total_label"] = f"Total HK${total_m.group(1)}"
+    return card
+
+
+def parse_trip_com_car_rows(body: str, *, limit: int = 8) -> list[dict[str, str]]:
+    """Parse multiple car rental deals from Trip.com car hire list text."""
+    blob = (body or "")[:20000]
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    chunks = re.split(r"(?i)\bview deal\b", blob)
+    if len(chunks) < 2:
+        chunks = [blob]
+
+    for chunk in chunks:
+        card = _parse_car_chunk(chunk)
+        key = (card.get("name", ""), card.get("price_label", ""))
+        if key in seen or not (card.get("name") or card.get("price_label")):
+            continue
+        seen.add(key)
+        rows.append(card)
+        if len(rows) >= limit:
+            return rows
+
+    for m in re.finditer(
+        r"(?is).{0,420}HK\s*\$?\s*[\d,]+(?:\.\d+)?\s*/\s*day",
+        blob,
+    ):
+        card = _parse_car_chunk(m.group(0))
+        key = (card.get("name", ""), card.get("price_label", ""))
+        if key in seen or not (card.get("name") or card.get("price_label")):
+            continue
+        seen.add(key)
+        rows.append(card)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def _pick_flight_row_cheapest(
     rows: list[dict[str, str]], *, lowest: float | None = None
 ) -> dict[str, str] | None:
@@ -574,6 +731,69 @@ class TripBrowser:
         if chosen:
             return chosen.get("url", options[0][0]), chosen.get("name", options[0][1])
         return options[0]
+
+    def _pick_car_candidate(
+        self, candidates: list[dict[str, str]]
+    ) -> dict[str, str] | None:
+        """LLM-pick a car rental from scraped list candidates."""
+        if not candidates:
+            return None
+        picked = select_car_candidate(
+            candidates,
+            self.selection_context,
+            model=self.llm_model,
+            host=self.llm_host,
+        )
+        return picked or candidates[0]
+
+    def _collect_car_candidates(
+        self,
+        body: str,
+        *,
+        location: str = "",
+        pickup_date: str = "",
+        dropoff_date: str = "",
+        prices: list[float] | None = None,
+    ) -> list[dict[str, str]]:
+        """Gather multiple car deals from the current results page for LLM ranking."""
+        options = self._extract_car_detail_options(limit=8)
+        text_rows = parse_trip_com_car_rows(body, limit=8)
+        candidates: list[dict[str, str]] = []
+
+        if options:
+            candidates = enrich_car_candidates_from_page(
+                options,
+                body,
+                location=location,
+                pickup_date=pickup_date,
+                dropoff_date=dropoff_date,
+                default_prices=prices,
+            )
+        elif text_rows:
+            candidates = [dict(row) for row in text_rows]
+
+        if options and text_rows:
+            for i, row in enumerate(candidates):
+                if i < len(text_rows):
+                    for key, val in text_rows[i].items():
+                        if val and not row.get(key):
+                            row[key] = val
+        elif text_rows and not candidates:
+            candidates = [dict(row) for row in text_rows]
+
+        for row in candidates:
+            row.setdefault("location", location)
+            row.setdefault("pickup_date", pickup_date)
+            row.setdefault("dropoff_date", dropoff_date)
+
+        if not candidates and body.strip():
+            one = _parse_car_chunk(body[:14000])
+            if one.get("name") or one.get("price_label"):
+                one.setdefault("location", location)
+                one.setdefault("pickup_date", pickup_date)
+                one.setdefault("dropoff_date", dropoff_date)
+                candidates = [one]
+        return candidates
 
     def start(self) -> None:
         self._pw = sync_playwright().start()
@@ -1615,6 +1835,13 @@ class TripBrowser:
         pickup_date = pickup_date or _default_depart(21)
         dropoff_date = dropoff_date or _default_return(28)
 
+        self._update_selection_context(
+            pickup_location=loc,
+            pickup_date=pickup_date,
+            dropoff_date=dropoff_date,
+            rent_car=True,
+        )
+
         hub = (
             f"{settings.trip_base_url}/carhire/"
             f"?channelid=14409&locale={settings.trip_locale}&curr={settings.trip_currency}"
@@ -1662,6 +1889,8 @@ class TripBrowser:
             pickup_date=pickup_date,
             dropoff_date=dropoff_date,
             lowest=prices[0] if prices else None,
+            page_body=body,
+            daily_prices=prices,
         )
         detail = (card.get("url") or "").strip()
         if not self._car_detail_url_ok(detail):
@@ -1888,6 +2117,52 @@ class TripBrowser:
         except Exception:
             return False
 
+    def _extract_car_detail_options(self, limit: int = 8) -> list[tuple[str, str]]:
+        """Return (detail_url, car_label) pairs from the car hire list page."""
+        page = self._require_page()
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        try:
+            anchors = page.locator("a[href*='/carrentals/detail']")
+            count = min(anchors.count(), 40)
+        except Exception:
+            return found
+
+        for i in range(count):
+            try:
+                a = anchors.nth(i)
+                href = (a.get_attribute("href") or "").strip()
+            except Exception:
+                continue
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = f"{settings.trip_base_url.rstrip('/')}{href}"
+            href = ensure_locale_curr(normalize_trip_url(href))
+            if not self._car_detail_url_ok(href) or href in seen:
+                continue
+            label = ""
+            try:
+                raw_label = (a.inner_text(timeout=500) or "").strip()
+                raw_label = re.sub(r"\s+", " ", raw_label)
+                if (
+                    raw_label
+                    and 3 < len(raw_label) < 90
+                    and "http" not in raw_label.lower()
+                    and not re.fullmatch(
+                        r"(?i)(view deal|book|select|see details?|check availability|>)+",
+                        raw_label,
+                    )
+                ):
+                    label = raw_label
+            except Exception:
+                label = ""
+            seen.add(href)
+            found.append((href, label))
+            if len(found) >= limit:
+                break
+        return found
+
     def _resolve_top_car_detail_url(self) -> str:
         """Find or open the top car deal detail URL."""
         page = self._require_page()
@@ -1938,14 +2213,43 @@ class TripBrowser:
         pickup_date: str = "",
         dropoff_date: str = "",
         lowest: float | None = None,
+        page_body: str = "",
+        daily_prices: list[float] | None = None,
     ) -> dict[str, str]:
-        """Best-effort parse of the first car rental deal on the current page."""
+        """Parse car rental deals and LLM-pick the best from scraped candidates."""
         page = self._require_page()
         try:
-            body = page.inner_text("body")
+            body = page_body or page.inner_text("body")
         except Exception:
-            body = ""
+            body = page_body or ""
         blob = body[:14000]
+
+        candidates = self._collect_car_candidates(
+            body,
+            location=location,
+            pickup_date=pickup_date,
+            dropoff_date=dropoff_date,
+            prices=daily_prices or ([lowest] if lowest is not None else None),
+        )
+        if len(candidates) > 1:
+            picked = self._pick_car_candidate(candidates)
+            if picked:
+                card = dict(picked)
+                card.setdefault("price_unit", "/day")
+                card.setdefault("image_url", "")
+                card.setdefault("location", location)
+                card.setdefault("pickup_date", pickup_date)
+                card.setdefault("dropoff_date", dropoff_date)
+                if lowest is not None and not card.get("price_label"):
+                    card["price_label"] = f"HK${lowest:,.0f}"
+                if not card.get("image_url"):
+                    card["image_url"] = self._scrape_car_image_from_page(page)
+                if not card.get("name"):
+                    card["name"] = (
+                        f"Car rental in {location}" if location else "Recommended car"
+                    )
+                return card
+
         card: dict[str, str] = {
             "name": "",
             "similar": "",
@@ -2108,6 +2412,13 @@ class TripBrowser:
             card["total_label"] = f"Total HK${total_m.group(1)}"
 
         # Cover image
+        card["image_url"] = self._scrape_car_image_from_page(page)
+        if not card["name"]:
+            card["name"] = f"Car rental in {location}" if location else "Recommended car"
+        return card
+
+    def _scrape_car_image_from_page(self, page: Page) -> str:
+        """Best-effort cover photo from the current car hire list page."""
         try:
             imgs = page.evaluate(
                 """() => Array.from(document.querySelectorAll('img')).map(e => ({
@@ -2137,12 +2448,7 @@ class TripBrowser:
                 if area >= 20_000:
                     best_area = area
                     best = src
-        if best:
-            card["image_url"] = best
-
-        if not card["name"]:
-            card["name"] = f"Car rental in {location}" if location else "Recommended car"
-        return card
+        return best
 
     def browse_url(self, url: str) -> str:
         """Navigate to any Trip.com (or related) URL and summarize visible content."""
@@ -2521,6 +2827,9 @@ class TripBrowser:
             checkin=depart_date,
             checkout=return_date,
             adults=adults,
+            rent_car=need_car,
+            pickup_date=depart_date,
+            dropoff_date=return_date,
         )
 
         from travel_agent.regions import (

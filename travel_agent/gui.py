@@ -2813,6 +2813,9 @@ class TravelAgentApp(tk.Tk):
                 nights=nights,
                 checkin=depart,
                 checkout=ret or "",
+                rent_car=bool(self._trip_context.get("rent_car")),
+                pickup_date=depart,
+                dropoff_date=ret or "",
             )
             self.agent.browser.last_proposed_route = None
             self.agent.browser.last_flight_card = {}
