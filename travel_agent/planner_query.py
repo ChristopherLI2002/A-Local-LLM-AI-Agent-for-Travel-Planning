@@ -48,10 +48,11 @@ def build_plan_query(
         modes = ["flights", "trains", "airport transfers"]
 
     car_line = (
-        "Set rent_car=true."
+        "REQUIRED: call plan_trip with rent_car=true (also search_cars if needed)."
         if rent_car
         else "Only include a rental car if clearly needed."
     )
+    rent_arg = ", rent_car=true" if rent_car else ""
     return_part = return_date or "(open return)"
 
     return (
@@ -63,10 +64,12 @@ def build_plan_query(
         f"origin={origin!r}, interests={style_line!r}. "
         "This decides fly-into airport, fly-out airport, and the city stay order — "
         "do not search Trip.com yet.\n"
-        "2) THEN call plan_trip with the same dates, hotel_city=first stay city, "
-        "interests={style_line!r}, and arrive_airport / return_airport from the "
-        "rough route.\n"
-        "3) Use live hk.trip.com Canonical / Flight / Hotel URLs from the tool — "
+        "2) THEN call plan_trip with the same dates, hotel_city=first stay city "
+        f"(plain words with spaces, never '+'), interests={style_line!r}, "
+        "arrive_airport / return_airport from the rough route"
+        f"{rent_arg}. Prefer Recommended hotel DETAIL links "
+        "(/hotels/detail/?hotelId=...), not list/search pages.\n"
+        "3) Use live hk.trip.com Canonical / Flight / Hotel / Car URLs from the tool — "
         "never invent www.trip.com links.\n\n"
         "Format the FINAL answer as plain text with EXACTLY these sections "
         "(headings must match):\n\n"

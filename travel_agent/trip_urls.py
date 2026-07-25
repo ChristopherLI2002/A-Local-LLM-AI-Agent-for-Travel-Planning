@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 
 from travel_agent.config import settings
 from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
@@ -192,7 +192,14 @@ def canonicalize_hotel_detail_url(
     parsed = urlparse(norm)
     path = parsed.path if "/hotels/detail" in parsed.path else "/hotels/detail/"
     return urlunparse(
-        ("https", urlparse(settings.trip_base_url).netloc or "hk.trip.com", path, "", urlencode(qs), "")
+        (
+            "https",
+            urlparse(settings.trip_base_url).netloc or "hk.trip.com",
+            path,
+            "",
+            urlencode(qs, quote_via=quote),
+            "",
+        )
     )
 
 
@@ -309,7 +316,14 @@ def ensure_locale_curr(url: str) -> str:
     flat.setdefault("locale", settings.trip_locale)
     flat.setdefault("curr", settings.trip_currency)
     return urlunparse(
-        (parsed.scheme, parsed.netloc, parsed.path, "", urlencode(flat), "")
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            "",
+            urlencode(flat, quote_via=quote),
+            "",
+        )
     )
 
 
@@ -381,7 +395,8 @@ def build_hotel_list_url(
     else:
         # Last resort — Trip.com may still mis-resolve keyword-only searches
         params["keyword"] = city_name
-    url = f"{settings.trip_base_url}/hotels/list?{urlencode(params)}"
+    # Use %20 for spaces (not '+') so city names never look URL-encoded in UIs
+    url = f"{settings.trip_base_url}/hotels/list?{urlencode(params, quote_via=quote)}"
     return ensure_locale_curr(url)
 
 

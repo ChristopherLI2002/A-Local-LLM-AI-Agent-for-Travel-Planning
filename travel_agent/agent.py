@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 import ollama
@@ -37,7 +38,8 @@ Output rules (plain text, no HTML):
    baggage if known, HKD price, exact hk.trip.com URL
 3) "Recommended hotel" — name, stars, score/reviews, location, features, room/beds,
    nightly + total HKD, exact hotel DETAIL URL (/hotels/detail/?hotelId=...)
-   For multi-city routes, one hotel block per stay city
+   For multi-city routes, one hotel block per stay city. Never use a hotels/list
+   search URL as the booking link when a detail URL exists.
 4) "Day-by-day itinerary" with EXACT lines "Day 1:", "Day 2:", ... (one block per
    trip day). Timetable with clock times and named places/restaurants only.
 5) "Budget snapshot"
@@ -45,7 +47,9 @@ Output rules (plain text, no HTML):
 Hard rules:
 - NEVER call plan_trip / search_flights / search_hotels before propose_trip_route
   in the same user request.
+- When the user asks for a rental car / rent_car=true, pass rent_car=true to plan_trip.
 - Prefer Recommended hotel detail link / Hotel option link from tools.
+- Type city names with spaces (San Francisco), never with '+' (San+Francisco).
 - NEVER invent www.trip.com generic /search URLs or fake prices.
 - Only use https://hk.trip.com/... links that appear in tool results.
 - Match hotels to the rough-route stay windows (not always the full trip in one city).
@@ -74,7 +78,15 @@ class TravelAgent:
         ]
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
-        self.booking_links: dict[str, str] = {"flight": "", "hotel": "", "hotel_name": ""}
+        self.booking_links: dict[str, str] = {
+            "flight": "",
+            "hotel": "",
+            "hotel_name": "",
+            "car": "",
+            "car_name": "",
+        }
+        # GUI / prompt override — do not rely on the model to pass rent_car
+        self.force_rent_car: bool = False
 
     def start(self) -> None:
         self.browser.start()
@@ -84,10 +96,19 @@ class TravelAgent:
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        self.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
+        self.booking_links = {
+            "flight": "",
+            "hotel": "",
+            "hotel_name": "",
+            "car": "",
+            "car_name": "",
+        }
+        self.force_rent_car = False
         self.browser.last_proposed_route = None
         self.browser.last_plan_flight_card = {}
         self.browser.last_flight_card = {}
+        self.browser.last_car_card = {}
+        self.browser.last_car_detail_url = ""
 
     def _apply_plan_flight_card(self) -> None:
         """Copy frozen open-jaw / plan flight scrape into booking_links."""
@@ -113,10 +134,64 @@ class TravelAgent:
             }:
                 self.booking_links[k] = v
 
+    def _prefer_live_hotel_detail(self) -> None:
+        """Always prefer Playwright /hotels/detail/?hotelId=… over list/search."""
+        live_detail = (getattr(self.browser, "last_hotel_detail_url", "") or "").strip()
+        if live_detail and is_trusted_hotel_detail_url(live_detail):
+            self.booking_links["hotel"] = live_detail
+        live_name = (getattr(self.browser, "last_hotel_name", "") or "").strip()
+        if live_name and not live_name.lower().startswith(
+            ("hotels in ", "recommended hotel")
+        ):
+            self.booking_links["hotel_name"] = live_name
+
+    def _prefer_live_car_card(self) -> None:
+        """Copy scraped carhire deal into booking_links when present."""
+        live_car = (getattr(self.browser, "last_car_detail_url", "") or "").strip()
+        if live_car and "/carrentals/detail" in live_car.lower():
+            self.booking_links["car"] = live_car
+        card = getattr(self.browser, "last_car_card", None) or {}
+        if card.get("name"):
+            self.booking_links["car_name"] = card["name"]
+        for src, dest in (
+            ("similar", "car_similar"),
+            ("vendor", "car_vendor"),
+            ("score", "car_score"),
+            ("reviews", "car_reviews"),
+            ("seats", "car_seats"),
+            ("fuel", "car_fuel"),
+            ("pickup_note", "car_pickup_note"),
+            ("cancellation", "car_cancellation"),
+            ("mileage", "car_mileage"),
+            ("payment", "car_payment"),
+            ("insurance", "car_insurance"),
+            ("price_label", "car_price"),
+            ("total_label", "car_total"),
+            ("image_url", "car_image"),
+            ("location", "car_location"),
+            ("pickup_date", "car_pickup"),
+            ("dropoff_date", "car_dropoff"),
+            ("url", "car"),
+        ):
+            if card.get(src):
+                self.booking_links[dest] = card[src]
+
     def chat(self, user_message: str) -> str:
         self.messages.append({"role": "user", "content": user_message})
-        self.booking_links = {"flight": "", "hotel": "", "hotel_name": ""}
+        self.booking_links = {
+            "flight": "",
+            "hotel": "",
+            "hotel_name": "",
+            "car": "",
+            "car_name": "",
+        }
         route_ready = self.browser.last_proposed_route is not None
+        want_car = bool(self.force_rent_car) or bool(
+            re.search(
+                r"(?i)rent_car\s*=\s*true|modes:\s*[^\n]*rental car",
+                user_message or "",
+            )
+        )
 
         for _ in range(settings.max_tool_rounds):
             response = self.client.chat(
@@ -130,6 +205,8 @@ class TravelAgent:
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
                 self._apply_plan_flight_card()
+                self._prefer_live_hotel_detail()
+                self._prefer_live_car_card()
                 return (message.get("content") or "").strip() or "(No response from model.)"
 
             for call in tool_calls:
@@ -143,6 +220,16 @@ class TravelAgent:
                         args = {}
                 else:
                     args = dict(raw_args or {})
+
+                # Never let the model skip the car hire scrape when the UI asked for it
+                if name == "plan_trip" and want_car:
+                    args["rent_car"] = True
+                # City/keyword args must be typed with spaces (not Los+Angeles)
+                for key in ("hotel_city", "city", "location", "destination"):
+                    if args.get(key):
+                        from travel_agent.places import typed_place_name
+
+                        args[key] = typed_place_name(str(args[key]))
 
                 # Enforce rough-route-before-scrape when the model skips propose
                 scrape_tools = {
@@ -255,44 +342,28 @@ class TravelAgent:
                     ).strip()
                     # Prefer Playwright hotel detail page over list/search
                     if live_detail and is_trusted_hotel_detail_url(live_detail):
-                        if not is_trusted_hotel_detail_url(new_h):
-                            new_h = live_detail
+                        new_h = live_detail
                     if is_trusted_hotel_detail_url(new_h):
                         if not is_trusted_hotel_detail_url(old_h) or (
                             score_booking_url(new_h, "hotel")
                             >= score_booking_url(old_h, "hotel")
                         ):
                             self.booking_links["hotel"] = new_h
-                    elif "/hotels/list" in new_h.lower() and (
-                        "cityid=" in new_h.lower() or "city=" in new_h.lower()
-                    ):
-                        if not is_trusted_hotel_detail_url(old_h):
+                    elif not is_trusted_hotel_detail_url(old_h):
+                        if "/hotels/list" in new_h.lower() and (
+                            "cityid=" in new_h.lower() or "city=" in new_h.lower()
+                        ):
                             self.booking_links["hotel"] = new_h
-                    elif live_list and not self.booking_links.get("hotel"):
-                        self.booking_links["hotel"] = live_list
-                    elif live_detail and not self.booking_links.get("hotel"):
-                        self.booking_links["hotel"] = live_detail
+                        elif live_list:
+                            self.booking_links["hotel"] = live_list
                 if found.get("hotel_name"):
                     self.booking_links["hotel_name"] = found["hotel_name"]
-                live_name = (
-                    getattr(self.browser, "last_hotel_name", "") or ""
-                ).strip()
-                if live_name and not live_name.lower().startswith(
-                    ("hotels in ", "recommended hotel")
-                ):
-                    self.booking_links["hotel_name"] = live_name
+                # Always win with the live detail page when Playwright found one
+                self._prefer_live_hotel_detail()
                 if found.get("car"):
                     self.booking_links["car"] = found["car"]
-                live_car = (
-                    getattr(self.browser, "last_car_detail_url", "") or ""
-                ).strip()
-                if live_car and "/carrentals/detail" in live_car.lower():
-                    self.booking_links["car"] = live_car
                 if found.get("car_name"):
                     self.booking_links["car_name"] = found["car_name"]
-                live_car_card = getattr(self.browser, "last_car_card", None) or {}
-                if live_car_card.get("name"):
-                    self.booking_links["car_name"] = live_car_card["name"]
                 for key in (
                     "car_similar",
                     "car_vendor",
@@ -314,29 +385,7 @@ class TravelAgent:
                 ):
                     if found.get(key):
                         self.booking_links[key] = found[key]
-                # Prefer live scraped card fields
-                for src, dest in (
-                    ("similar", "car_similar"),
-                    ("vendor", "car_vendor"),
-                    ("score", "car_score"),
-                    ("reviews", "car_reviews"),
-                    ("seats", "car_seats"),
-                    ("fuel", "car_fuel"),
-                    ("pickup_note", "car_pickup_note"),
-                    ("cancellation", "car_cancellation"),
-                    ("mileage", "car_mileage"),
-                    ("payment", "car_payment"),
-                    ("insurance", "car_insurance"),
-                    ("price_label", "car_price"),
-                    ("total_label", "car_total"),
-                    ("image_url", "car_image"),
-                    ("location", "car_location"),
-                    ("pickup_date", "car_pickup"),
-                    ("dropoff_date", "car_dropoff"),
-                    ("url", "car"),
-                ):
-                    if live_car_card.get(src):
-                        self.booking_links[dest] = live_car_card[src]
+                self._prefer_live_car_card()
                 if found.get("flight_price"):
                     self.booking_links["flight_price"] = found["flight_price"]
                 if found.get("flight_option"):

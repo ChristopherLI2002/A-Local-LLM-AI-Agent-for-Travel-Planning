@@ -12,7 +12,12 @@ from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
 from travel_agent.config import settings
 from travel_agent.airline_names import expand_airline_code, airline_logo_url, is_plausible_airline_name
-from travel_agent.places import to_flight_code, to_hotel_city, to_hotel_city_id
+from travel_agent.places import (
+    to_flight_code,
+    to_hotel_city,
+    to_hotel_city_id,
+    typed_place_name,
+)
 from travel_agent.pricing import (
     format_comparison_table,
     nearby_dates,
@@ -580,7 +585,7 @@ class TripBrowser:
     def scrape_attractions(self, city: str, *, limit: int = 18) -> list[str]:
         """Search Trip.com things-to-do and return named attractions for a city."""
         page = self._require_page()
-        city_name = to_hotel_city(city) or (city or "").strip()
+        city_name = typed_place_name(to_hotel_city(city) or city)
         if not city_name:
             return []
 
@@ -656,7 +661,7 @@ class TripBrowser:
                             box = page.locator(sel).first
                             if box.count():
                                 box.click(timeout=2000)
-                                box.fill(city_name, timeout=2000)
+                                box.fill(typed_place_name(city_name), timeout=2000)
                                 box.press("Enter")
                                 page.wait_for_timeout(2500)
                                 break
@@ -973,13 +978,10 @@ class TripBrowser:
         Flow: open /hotels/ → type city in \"Where to?\" → pick suggestion → Search
         → open the top hotel detail page. Booking link = hotel detail (not the list).
         """
-        from urllib.parse import unquote_plus
-
         page = self._require_page()
         # Human city name for typing — never URL-encoded "Los+Angeles"
-        city_name = to_hotel_city(city) or unquote_plus((city or "").strip())
-        city_name = city_name.replace("+", " ")
-        city_name = re.sub(r"\s+", " ", city_name).strip()
+        city_name = to_hotel_city(city) or typed_place_name(city)
+        city_name = typed_place_name(city_name)
         checkin = checkin or _default_depart(14)
         try:
             checkout = checkout or (
@@ -1410,7 +1412,7 @@ class TripBrowser:
         """Keep Trip.com's resolved city= from autocomplete; force our stay dates."""
         if not url or "trip.com" not in url.lower():
             return url
-        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+        from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 
         parsed = urlparse(normalize_trip_url(url))
         qs = {k: v[0] for k, v in parse_qs(parsed.query).items() if v}
@@ -1424,7 +1426,14 @@ class TripBrowser:
         qs.setdefault("curr", settings.trip_currency)
         return ensure_locale_curr(
             urlunparse(
-                (parsed.scheme, parsed.netloc, parsed.path, "", urlencode(qs), "")
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    "",
+                    urlencode(qs, quote_via=quote),
+                    "",
+                )
             )
         )
 
@@ -1513,12 +1522,8 @@ class TripBrowser:
         Flow: /carhire/ → type pickup → autocomplete → Search → scrape top deal
         → keep /carrentals/detail URL for booking.
         """
-        from urllib.parse import unquote_plus
-
         page = self._require_page()
-        loc = to_hotel_city(location) or unquote_plus((location or "").strip())
-        loc = loc.replace("+", " ")
-        loc = re.sub(r"\s+", " ", loc).strip() or "Los Angeles"
+        loc = typed_place_name(to_hotel_city(location) or location) or "Los Angeles"
         pickup_date = pickup_date or _default_depart(21)
         dropoff_date = dropoff_date or _default_return(28)
 
@@ -1678,11 +1683,8 @@ class TripBrowser:
         dropoff_date: str,
     ) -> bool:
         """Type pickup into Trip.com car hire hub and Search."""
-        from urllib.parse import unquote_plus
-
         page = self._require_page()
-        location = unquote_plus((location or "").strip()).replace("+", " ")
-        location = re.sub(r"\s+", " ", location).strip()
+        location = typed_place_name(location)
         if not location:
             return False
         try:
@@ -1710,6 +1712,7 @@ class TripBrowser:
             except Exception:
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
+            # Type spaces as spaces — never '+' between words
             try:
                 location_box.type(location, delay=45)
             except Exception:
@@ -2411,7 +2414,7 @@ class TripBrowser:
         """Build a trip plan comparing transport modes + hotels on Trip.com."""
         depart_date = depart_date or _default_depart(21)
         return_date = return_date or _default_return_from(depart_date, 7)
-        hotel_city = to_hotel_city(hotel_city or destination)
+        hotel_city = typed_place_name(to_hotel_city(hotel_city or destination))
         nights = max(1, nights_between(depart_date, return_date))
         need_car = _wants_rental_car(rent_car, interests)
         want_flights = _as_bool(include_flights, default=True)
@@ -3532,11 +3535,8 @@ Transport modes: {", ".join(modes)}
         rooms: int,
     ) -> bool:
         """Type destination into Trip.com hotels hub (Where to?) and Search."""
-        from urllib.parse import unquote_plus
-
         page = self._require_page()
-        city = unquote_plus((city or "").strip()).replace("+", " ")
-        city = re.sub(r"\s+", " ", city).strip()
+        city = typed_place_name(city)
         if not city:
             return False
         try:
@@ -3568,7 +3568,7 @@ Transport modes: {", ".join(modes)}
             except Exception:
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
-            # Type so autocomplete suggestions appear (character delay matters)
+            # Type so autocomplete suggestions appear (spaces, never '+')
             try:
                 city_box.type(city, delay=55)
             except Exception:

@@ -260,12 +260,20 @@ _HOTEL_CITY_IDS: dict[str, tuple[str, str]] = {
 }
 
 
-def to_hotel_city(value: str) -> str:
-    """Hotel searches prefer human city names (spaces, never '+')."""
+def typed_place_name(value: str) -> str:
+    """Human place string for Playwright typing — spaces only, never '+' / %20."""
     from urllib.parse import unquote_plus
 
-    raw = unquote_plus((value or "").strip()).replace("+", " ")
-    raw = re.sub(r"\s+", " ", raw).strip()
+    text = unquote_plus((value or "").strip())
+    text = text.replace("+", " ")
+    text = re.sub(r"%20", " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def to_hotel_city(value: str) -> str:
+    """Hotel searches prefer human city names (spaces, never '+')."""
+    raw = typed_place_name(value)
     key = normalize_place(raw)
     if key in _HOTEL_CITY_IDS:
         return _HOTEL_CITY_IDS[key][1]

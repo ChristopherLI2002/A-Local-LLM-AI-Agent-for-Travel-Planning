@@ -2165,11 +2165,24 @@ class TravelAgentApp(tk.Tk):
     def _render_car_card(self, parsed: ParsedItinerary) -> None:
         """Show or hide the car rental card based on scraped deal."""
         offer = parsed.car_offer
-        want = bool(self._trip_context.get("rent_car")) or bool(offer and offer.url)
+        want = bool(self._trip_context.get("rent_car")) or bool(
+            offer and (offer.url or offer.price_label)
+        )
         if not want and self.agent:
-            # Interest-based search may still have produced a card
-            want = bool(getattr(self.agent.browser, "last_car_card", None) or {})
-        if offer and (offer.name or offer.url or offer.price_label):
+            card = getattr(self.agent.browser, "last_car_card", None) or {}
+            want = self._car_card_useful(card)
+        useful = bool(
+            offer
+            and self._car_card_useful(
+                {
+                    "name": offer.name,
+                    "url": offer.url,
+                    "price_label": offer.price_label,
+                    "vendor": offer.vendor,
+                }
+            )
+        )
+        if useful and offer:
             if not self.car_row.winfo_ismapped():
                 self.car_row.pack(fill="x", pady=(4, 8))
             self.car_row.set_offer(offer)
@@ -2782,7 +2795,14 @@ class TravelAgentApp(tk.Tk):
         except Exception:
             pass
         if self.agent:
-            self.agent.booking_links = {"flight": "", "hotel": "", "hotel_name": "", "car": "", "car_name": ""}
+            self.agent.booking_links = {
+                "flight": "",
+                "hotel": "",
+                "hotel_name": "",
+                "car": "",
+                "car_name": "",
+            }
+            self.agent.force_rent_car = bool(self._trip_context.get("rent_car"))
             self.agent.browser.last_proposed_route = None
             self.agent.browser.last_flight_card = {}
             self.agent.browser.last_plan_flight_card = {}
@@ -2816,6 +2836,7 @@ class TravelAgentApp(tk.Tk):
 
         def job() -> str:
             assert self.agent is not None
+            self.agent.force_rent_car = bool(self._trip_context.get("rent_car"))
             answer = self.agent.chat(query)
             # Guarantee open-jaw times exist before the UI paints the card
             try:
@@ -3018,21 +3039,56 @@ class TravelAgentApp(tk.Tk):
 
         # Hotel photo/details first — flight goto must not discard hotel image work
         try:
-            multi_stays = list(
-                getattr(self.agent.browser, "last_hotel_stays", None) or []
+            live_detail = (
+                getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+            ).strip()
+            if live_detail and is_trusted_hotel_detail_url(live_detail):
+                self.agent.booking_links["hotel"] = live_detail
+            need_detail = not is_trusted_hotel_detail_url(
+                self.agent.booking_links.get("hotel", "")
             )
-            if multi_stays:
-                pass
-            elif not is_trusted_hotel_detail_url(self.agent.booking_links.get("hotel", "")):
-                if hotel_city and hotel_checkin:
-                    live = fetch_hotel_detail_link(
-                        self.agent.browser,
-                        city=hotel_city,
-                        checkin=hotel_checkin,
-                        checkout=hotel_checkout or checkout,
-                    )
-                    self._merge_live_hotel(live)
+            if need_detail and hotel_city and hotel_checkin:
+                live = fetch_hotel_detail_link(
+                    self.agent.browser,
+                    city=hotel_city,
+                    checkin=hotel_checkin,
+                    checkout=hotel_checkout or checkout,
+                )
+                self._merge_live_hotel(live)
+            # Prefer Playwright detail again after fetch
+            live_detail = (
+                getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+            ).strip()
+            if live_detail and is_trusted_hotel_detail_url(live_detail):
+                self.agent.booking_links["hotel"] = live_detail
             self._ensure_hotel_image()
+        except Exception:
+            pass
+
+        # Guarantee car hire scrape when Rent a car was selected
+        try:
+            if ctx.get("rent_car"):
+                card = dict(getattr(self.agent.browser, "last_car_card", None) or {})
+                if self.agent.booking_links.get("car") and not card.get("url"):
+                    card["url"] = self.agent.booking_links["car"]
+                if not self._car_card_useful(card):
+                    pickup = hotel_city or to_hotel_city(
+                        ctx.get("destination", "") or ""
+                    )
+                    if pickup:
+                        self.after(
+                            0,
+                            lambda: self._set_status(
+                                "Fetching car rental deal from Trip.com…",
+                                C["accent_deep"],
+                            ),
+                        )
+                        self.agent.browser.search_cars(
+                            location=pickup,
+                            pickup_date=ctx.get("depart_date") or "",
+                            dropoff_date=ctx.get("return_date") or checkout,
+                        )
+                        self.agent._prefer_live_car_card()
         except Exception:
             pass
 
@@ -3120,8 +3176,14 @@ class TravelAgentApp(tk.Tk):
         """Copy scraped hotel detail fields into agent.booking_links."""
         if not self.agent:
             return
-        if live.get("url"):
-            self.agent.booking_links["hotel"] = live["url"]
+        url = (live.get("url") or "").strip()
+        if url and is_trusted_hotel_detail_url(url):
+            self.agent.booking_links["hotel"] = url
+        elif url and not is_trusted_hotel_detail_url(
+            self.agent.booking_links.get("hotel", "")
+        ):
+            # Keep list only as last resort when no detail exists yet
+            self.agent.booking_links["hotel"] = url
         if live.get("name"):
             self.agent.booking_links["hotel_name"] = live["name"]
         for key in (
@@ -3442,27 +3504,23 @@ class TravelAgentApp(tk.Tk):
             checkin = (rec.get("checkin") or "").strip()
             checkout = (rec.get("checkout") or "").strip()
             raw_url = (rec.get("url") or saved_url or "").strip()
-            if is_trusted_hotel_detail_url(raw_url):
-                rec["url"] = (
-                    canonicalize_hotel_detail_url(
-                        raw_url,
-                        checkin=checkin,
-                        checkout=checkout,
-                        city=city,
+            booking_hotel = ""
+            if self.agent:
+                booking_hotel = (self.agent.booking_links.get("hotel") or "").strip()
+            # Detail page wins over list/search every time
+            for cand in (live_detail, booking_hotel, raw_url):
+                if cand and is_trusted_hotel_detail_url(cand):
+                    rec["url"] = (
+                        canonicalize_hotel_detail_url(
+                            cand,
+                            checkin=checkin,
+                            checkout=checkout,
+                            city=city,
+                        )
+                        or cand
                     )
-                    or raw_url
-                )
-            elif live_detail and is_trusted_hotel_detail_url(live_detail):
-                rec["url"] = (
-                    canonicalize_hotel_detail_url(
-                        live_detail,
-                        checkin=checkin,
-                        checkout=checkout,
-                        city=city,
-                    )
-                    or live_detail
-                )
-            elif raw_url and is_hotel_list_url(raw_url) and (
+                    return rec
+            if raw_url and is_hotel_list_url(raw_url) and (
                 "cityid=" in raw_url.lower() or "city=" in raw_url.lower()
             ):
                 rec["url"] = raw_url
@@ -3554,6 +3612,20 @@ class TravelAgentApp(tk.Tk):
         self._enrich_car_offer(parsed)
         return parsed
 
+    def _car_card_useful(self, card: dict[str, str]) -> bool:
+        """True when scrape/booking_links have a real deal (not a loading stub)."""
+        name = (card.get("name") or card.get("car_name") or "").strip()
+        low = name.lower()
+        if low.startswith("searching") or low in {"car", "recommended car"}:
+            name_ok = False
+        else:
+            name_ok = bool(name)
+        url = (card.get("url") or card.get("car") or "").strip()
+        detail_ok = "/carrentals/detail" in url.lower()
+        price = (card.get("price_label") or card.get("car_price") or "").strip()
+        price_ok = bool(price) and price not in {"See Trip.com", "…", "—"}
+        return bool(detail_ok or price_ok or (name_ok and (url or card.get("vendor"))))
+
     def _enrich_car_offer(self, parsed: ParsedItinerary) -> None:
         """Prefer Playwright carhire scrape for the left-column car card."""
         live: dict[str, str] = {}
@@ -3586,15 +3658,11 @@ class TravelAgentApp(tk.Tk):
                 val = self.agent.booking_links.get(src) or ""
                 if val and not live.get(dest):
                     live[dest] = val
-        if not live and not self._trip_context.get("rent_car"):
-            return
-        if live:
+        if self._car_card_useful(live):
             parsed.car_offer = self._car_offer_from_live_card(live)
-        elif self._trip_context.get("rent_car") and not parsed.car_offer:
-            parsed.car_offer = CarRentalOffer(
-                name="Searching car rentals…",
-                location=to_hotel_city(self._trip_context.get("destination", "") or ""),
-            )
+        elif self._trip_context.get("rent_car"):
+            # Keep loading state in the UI — do not paint a fake "Searching…" deal
+            parsed.car_offer = None
 
     def _enrich_flight_offer(self, parsed: ParsedItinerary) -> None:
         """Prefer tool-scraped structured flight fields over LLM prose."""
