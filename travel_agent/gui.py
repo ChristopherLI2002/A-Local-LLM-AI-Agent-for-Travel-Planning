@@ -2803,6 +2803,17 @@ class TravelAgentApp(tk.Tk):
                 "car_name": "",
             }
             self.agent.force_rent_car = bool(self._trip_context.get("rent_car"))
+            style_line = ", ".join(styles)
+            self.agent.browser._update_selection_context(
+                origin=self.origin_var.get().strip() or "Hong Kong",
+                destination=destination,
+                budget_hkd=budget,
+                travel_styles=style_line,
+                interests=style_line,
+                nights=nights,
+                checkin=depart,
+                checkout=ret or "",
+            )
             self.agent.browser.last_proposed_route = None
             self.agent.browser.last_flight_card = {}
             self.agent.browser.last_plan_flight_card = {}
