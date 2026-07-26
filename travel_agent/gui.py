@@ -8,6 +8,7 @@ import queue
 import re
 import threading
 import tkinter as tk
+import urllib.parse
 import urllib.request
 import webbrowser
 from collections.abc import Callable
@@ -1580,20 +1581,39 @@ class CarRentalRowCard(tk.Frame):
 
     def _paint_photo(self, url: str) -> None:
         try:
+            raw = (url or "").strip()
+            if not raw.startswith("http"):
+                self._draw_photo_placeholder()
+                return
+            # Ctrip CDN car photos (dimg*.c-ctrip.com) need a Trip.com referer
+            host = urllib.parse.urlparse(raw).netloc.lower()
+            referer = "https://hk.trip.com/"
+            if "c-ctrip.com" in host or "tripcdn" in host:
+                referer = "https://hk.trip.com/carhire/"
             req = urllib.request.Request(
-                url,
+                raw,
                 headers={
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/122.0.0.0 Safari/537.36"
                     ),
-                    "Referer": "https://hk.trip.com/",
+                    "Referer": referer,
                     "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                 },
             )
             data = urllib.request.urlopen(req, timeout=12).read()
+            if len(data) < 800:
+                self._draw_photo_placeholder()
+                return
             img = Image.open(BytesIO(data)).convert("RGB")
+            # Reject near-black silhouette / empty CDN stubs
+            sample = img.resize((32, 20))
+            pixels = list(sample.getdata())
+            avg = sum(sum(px) for px in pixels) / max(len(pixels) * 3, 1)
+            if avg < 18:
+                self._draw_photo_placeholder()
+                return
             tw, th = 120, 72
             scale = max(tw / max(img.width, 1), th / max(img.height, 1))
             new_w = max(1, round(img.width * scale))
@@ -1644,12 +1664,31 @@ class CarRentalRowCard(tk.Frame):
         if loc:
             heading = f"Car rental · {loc}"
         self.heading_lbl.configure(text=heading)
-        self.name_lbl.configure(text=offer.name or "Recommended car")
-        self.similar_lbl.configure(text=offer.similar or "")
+        name = (offer.name or "").strip() or "Recommended car"
+        similar = (offer.similar or "").strip()
+        # Trip.com title style: "Dodge Charger or similar Standard car"
+        if similar and similar.lower() not in name.lower():
+            self.name_lbl.configure(text=name)
+            self.similar_lbl.configure(text=similar)
+        elif " or similar" in name.lower():
+            parts = re.split(r"(?i)\s+(or similar\b.*)$", name, maxsplit=1)
+            self.name_lbl.configure(text=(parts[0] or name).strip())
+            self.similar_lbl.configure(
+                text=(parts[1].strip() if len(parts) > 1 else "")
+            )
+        else:
+            self.name_lbl.configure(text=name)
+            self.similar_lbl.configure(text=similar)
         self.vendor_lbl.configure(text=offer.vendor or "")
         self.score_badge.configure(text=offer.score or "—")
         self.reviews_lbl.configure(text=offer.reviews or "")
-        seats = f"{offer.seats} seats" if offer.seats else ""
+        seats = ""
+        if offer.seats:
+            seats = (
+                offer.seats
+                if "seat" in offer.seats.lower()
+                else f"{offer.seats} seats"
+            )
         self.seats_lbl.configure(text=seats)
         self.fuel_lbl.configure(text=offer.fuel or "")
         self.pickup_lbl.configure(text=offer.pickup_note or "")

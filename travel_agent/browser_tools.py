@@ -662,6 +662,18 @@ _CAR_VENDORS = (
     "Europcar",
     "TOYOTA Rent a Car",
     "Times",
+    "nu",
+    "Nu Car Rentals",
+    "Ace",
+    "Fox",
+    "Payless",
+)
+
+_CAR_BRANDS = (
+    "Dodge|Toyota|Nissan|Ford|Chevrolet|Chevy|Jeep|Kia|Audi|BMW|Mercedes|"
+    "Honda|Hyundai|Tesla|Chrysler|Volkswagen|VW|Mazda|Subaru|Lexus|Volvo|"
+    "Porsche|Buick|GMC|Mitsubishi|Peugeot|Renault|Fiat|Mini|Land Rover|"
+    "Range Rover|Cadillac|Lincoln|Ram|Jaguar|Infiniti|Acura|Genesis"
 )
 
 
@@ -687,7 +699,7 @@ def _parse_car_chunk(chunk: str) -> dict[str, str]:
     }
 
     name_m = re.search(
-        r"(?im)^([A-Z][A-Za-z0-9 \-]+?)\s+(or similar\s+[A-Za-z ]+)",
+        r"(?i)([A-Z][A-Za-z0-9 \-]+?)\s+(or similar\s+[A-Za-z ]+)",
         blob,
     )
     if name_m:
@@ -695,9 +707,7 @@ def _parse_car_chunk(chunk: str) -> dict[str, str]:
         card["similar"] = name_m.group(2).strip()
     if not card["name"]:
         name_m = re.search(
-            r"(?i)(Porsche|Toyota|Nissan|Ford|Chevrolet|Jeep|Kia|Audi|"
-            r"BMW|Mercedes|Honda|Hyundai|Tesla|Chrysler|Volkswagen|"
-            r"Mazda|Subaru|Lexus|Volvo)\s+[A-Za-z0-9\-]+",
+            rf"(?i)({_CAR_BRANDS})\s+[A-Za-z0-9\-]+(?:\s+[A-Za-z0-9\-]+)?",
             blob,
         )
         if name_m:
@@ -713,7 +723,27 @@ def _parse_car_chunk(chunk: str) -> dict[str, str]:
     if rev_m:
         card["reviews"] = f"{rev_m.group(1)} review(s)"
 
-    if re.search(r"(?i)\bElectric\b", blob):
+    # Specs: seats / bags / Automatic (Trip.com list icons)
+    seats_m = re.search(
+        r"(?i)(?:^|[^\d])([2-9]|1[0-5])\s*(?:seats?|passengers?|pax)?\b",
+        blob,
+    )
+    # Compact icon row often appears as "5 4 Automatic" near the title
+    compact = re.search(
+        r"(?i)\b([2-9]|1[0-5])\s+([1-9]|1[0-5])\s+(Automatic|Manual)\b",
+        blob,
+    )
+    if compact:
+        card["seats"] = compact.group(1)
+        card["fuel"] = compact.group(3).title()
+    elif seats_m:
+        card["seats"] = seats_m.group(1)
+
+    if re.search(r"(?i)\bAutomatic\b", blob) and not card.get("fuel"):
+        card["fuel"] = "Automatic"
+    elif re.search(r"(?i)\bManual\b", blob) and not card.get("fuel"):
+        card["fuel"] = "Manual"
+    elif re.search(r"(?i)\bElectric\b", blob):
         card["fuel"] = "Electric"
     elif re.search(r"(?i)\bHybrid\b", blob):
         card["fuel"] = "Hybrid"
@@ -721,18 +751,37 @@ def _parse_car_chunk(chunk: str) -> dict[str, str]:
         card["fuel"] = "Diesel"
     elif re.search(r"(?i)\bPetrol\b|\bGasoline\b", blob):
         card["fuel"] = "Petrol"
+
     seat_fuel = re.search(
-        r"(?im)\b([2-9]|1[0-2])\s+(Electric|Hybrid|Petrol|Diesel|Gasoline)\b",
+        r"(?im)\b([2-9]|1[0-2])\s+(Electric|Hybrid|Petrol|Diesel|Gasoline|Automatic|Manual)\b",
         blob,
     )
-    if seat_fuel:
+    if seat_fuel and not card.get("seats"):
         card["seats"] = seat_fuel.group(1)
         fuel = seat_fuel.group(2)
-        card["fuel"] = "Petrol" if fuel.lower() == "gasoline" else fuel
+        if not card.get("fuel"):
+            card["fuel"] = "Petrol" if fuel.lower() == "gasoline" else fuel.title()
+    elif seat_fuel and not card.get("fuel"):
+        fuel = seat_fuel.group(2)
+        card["fuel"] = "Petrol" if fuel.lower() == "gasoline" else fuel.title()
 
-    if re.search(r"(?i)free shuttle", blob):
+    if re.search(r"(?i)airport train", blob):
+        card["pickup_note"] = "Airport train to the counter"
+    elif re.search(r"(?i)free shuttle", blob):
         card["pickup_note"] = "Free shuttle to counter"
-    cancel_m = re.search(r"(?i)(Free cancellation[^.!\n]*)", blob)
+    elif re.search(r"(?i)in[- ]terminal|meet and greet|counter", blob):
+        m = re.search(
+            r"(?i)(Free shuttle[^.!\n]+|In-terminal[^.!\n]+|Meet and greet[^.!\n]+|"
+            r"Airport train[^.!\n]+)",
+            blob,
+        )
+        if m:
+            card["pickup_note"] = m.group(1).strip()[:80]
+
+    cancel_m = re.search(
+        r"(?i)((?:Free cancellation|Cancellation with fee)[^.!\n]*)",
+        blob,
+    )
     if cancel_m:
         card["cancellation"] = cancel_m.group(1).strip()[:100]
     mile_m = re.search(
@@ -752,16 +801,38 @@ def _parse_car_chunk(chunk: str) -> dict[str, str]:
     if ins_m:
         card["insurance"] = ins_m.group(1).strip()[:100]
 
-    for vendor in _CAR_VENDORS:
-        if vendor.lower() in blob.lower():
-            card["vendor"] = (
-                vendor.title() if vendor.isupper() and len(vendor) > 8 else vendor
-            )
-            break
+    # Vendor — "nu Multinational chain" style
+    chain_m = re.search(
+        r"(?i)\b([A-Za-z][A-Za-z0-9 &.'\-]{1,40})\s+Multinational chain\b",
+        blob,
+    )
+    if chain_m:
+        card["vendor"] = f"{chain_m.group(1).strip()} · Multinational chain"
+    else:
+        for vendor in _CAR_VENDORS:
+            # Avoid matching "National" inside "Multinational chain"
+            if vendor.lower() == "national" and "multinational" in blob.lower():
+                continue
+            if re.search(rf"(?i)\b{re.escape(vendor)}\b", blob):
+                card["vendor"] = (
+                    vendor.title() if vendor.isupper() and len(vendor) > 8 else vendor
+                )
+                break
 
-    daily_m = re.search(r"(?i)HK\s*\$?\s*([0-9,]+(?:\.\d+)?)\s*/\s*day", blob)
+    daily_m = re.search(
+        r"(?i)HK\s*\$?\s*([0-9,]+(?:\.\d+)?)\s*/\s*day",
+        blob,
+    )
     if daily_m:
-        card["price_label"] = f"HK${daily_m.group(1)}"
+        card["price_label"] = f"HK${daily_m.group(1).replace(',', '')}"
+    else:
+        # Sometimes shown as HK$259 without /day next to Total
+        daily_m = re.search(
+            r"(?i)(?:^|[^\d])HK\s*\$?\s*([0-9]{2,5}(?:,\d{3})?(?:\.\d+)?)\b(?!\s*Total)",
+            blob,
+        )
+        if daily_m and int(daily_m.group(1).replace(",", "").split(".")[0]) < 5000:
+            card["price_label"] = f"HK${daily_m.group(1).replace(',', '')}"
     total_m = re.search(r"(?i)Total\s*HK\s*\$?\s*([0-9,]+(?:\.\d+)?)", blob)
     if total_m:
         card["total_label"] = f"Total HK${total_m.group(1)}"
@@ -2453,6 +2524,14 @@ class TripBrowser:
             keywords=["HK$", "HKD", "/day", "View deal", "car", "rental", "or similar"],
             attempts=16,
         )
+        # Wait for structured list cards (vehicle-item-fuse) used for name/photo/price
+        for _ in range(12):
+            try:
+                if page.locator(".vehicle-item-fuse, img.vehicle-item-fuse__image").count():
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(700)
         for _ in range(10):
             try:
                 probe = page.inner_text("body")
@@ -2486,7 +2565,17 @@ class TripBrowser:
         )
         detail = (card.get("url") or "").strip()
         if not self._car_detail_url_ok(detail):
-            detail = self._resolve_top_car_detail_url() or detail
+            # Prefer list-card hrefs over clicking "View deal" (click leaves the list)
+            for fc in self._scrape_car_fuse_cards(limit=3):
+                if self._car_detail_url_ok(fc.get("url") or ""):
+                    detail = fc["url"]
+                    # Fill any missing fields from the fuse card we just read
+                    for k, v in fc.items():
+                        if v and not card.get(k):
+                            card[k] = v
+                    break
+            if not self._car_detail_url_ok(detail):
+                detail = self._resolve_top_car_detail_url() or detail
             if detail:
                 card["url"] = detail
 
@@ -2497,6 +2586,21 @@ class TripBrowser:
             card["url"] = self.last_car_detail_url
         else:
             self.last_car_detail_url = ""
+
+        # Always try to attach the list-page vehicle photo (search results DOM)
+        if not (card.get("image_url") or "").startswith("http"):
+            try:
+                img = self._scrape_car_image_from_page(
+                    page, car_name=card.get("name") or ""
+                )
+            except Exception:
+                img = ""
+            if img:
+                card["image_url"] = img
+        elif card.get("image_url"):
+            card["image_url"] = (
+                self._normalize_car_image_url(card["image_url"]) or card["image_url"]
+            )
 
         self.last_car_card = dict(card)
 
@@ -2814,33 +2918,96 @@ class TripBrowser:
             body = page_body or page.inner_text("body")
         except Exception:
             body = page_body or ""
-        blob = body[:14000]
 
-        candidates = self._collect_car_candidates(
-            body,
-            location=location,
-            pickup_date=pickup_date,
-            dropoff_date=dropoff_date,
-            prices=daily_prices or ([lowest] if lowest is not None else None),
-        )
+        # Primary source: structured .vehicle-item-fuse list cards (name/price/photo)
+        fuse_cards = self._scrape_car_fuse_cards(limit=10)
+        for row in fuse_cards:
+            row.setdefault("location", location)
+            row.setdefault("pickup_date", pickup_date)
+            row.setdefault("dropoff_date", dropoff_date)
+
+        candidates = list(fuse_cards)
+        if len(candidates) < 2:
+            # Merge text/LLM candidates when fuse DOM is sparse
+            extra = self._collect_car_candidates(
+                body,
+                location=location,
+                pickup_date=pickup_date,
+                dropoff_date=dropoff_date,
+                prices=daily_prices or ([lowest] if lowest is not None else None),
+            )
+            for row in extra:
+                if fuse_cards and not row.get("image_url"):
+                    want = (row.get("name") or "").lower()
+                    for fc in fuse_cards:
+                        fname = (fc.get("name") or "").lower()
+                        if want and (
+                            want in fname
+                            or fname in want
+                            or want.split(" or ")[0].strip() in fname
+                        ):
+                            for k, v in fc.items():
+                                if v and not row.get(k):
+                                    row[k] = v
+                            break
+                    if not row.get("image_url") and fuse_cards:
+                        row["image_url"] = fuse_cards[0].get("image_url") or ""
+                candidates.append(row)
+
+        # Deduplicate by name+price
+        deduped: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in candidates:
+            key = (
+                (row.get("name") or "").lower(),
+                row.get("price_label") or "",
+            )
+            if key in seen and key != ("", ""):
+                continue
+            seen.add(key)
+            deduped.append(row)
+        candidates = deduped
+
+        def _finalize(card: dict[str, str]) -> dict[str, str]:
+            card.setdefault("price_unit", "/day")
+            card.setdefault("location", location)
+            card.setdefault("pickup_date", pickup_date)
+            card.setdefault("dropoff_date", dropoff_date)
+            if lowest is not None and not card.get("price_label"):
+                card["price_label"] = f"HK${lowest:,.0f}"
+            if card.get("image_url"):
+                card["image_url"] = (
+                    self._normalize_car_image_url(card["image_url"])
+                    or card["image_url"]
+                )
+            if not card.get("image_url"):
+                card["image_url"] = self._scrape_car_image_from_page(
+                    page, car_name=card.get("name") or ""
+                )
+            if not card.get("name") or card["name"].lower().startswith(
+                ("car rental in ", "recommended car", "searching")
+            ):
+                # Prefer a real fuse/list title over the location stub
+                for fc in fuse_cards:
+                    if fc.get("name") and not fc["name"].lower().startswith(
+                        "car rental"
+                    ):
+                        card["name"] = fc["name"]
+                        if fc.get("similar"):
+                            card["similar"] = fc["similar"]
+                        break
+            if not card.get("name"):
+                card["name"] = (
+                    f"Car rental in {location}" if location else "Recommended car"
+                )
+            return card
+
         if len(candidates) > 1:
             picked = self._pick_car_candidate(candidates)
             if picked:
-                card = dict(picked)
-                card.setdefault("price_unit", "/day")
-                card.setdefault("image_url", "")
-                card.setdefault("location", location)
-                card.setdefault("pickup_date", pickup_date)
-                card.setdefault("dropoff_date", dropoff_date)
-                if lowest is not None and not card.get("price_label"):
-                    card["price_label"] = f"HK${lowest:,.0f}"
-                if not card.get("image_url"):
-                    card["image_url"] = self._scrape_car_image_from_page(page)
-                if not card.get("name"):
-                    card["name"] = (
-                        f"Car rental in {location}" if location else "Recommended car"
-                    )
-                return card
+                return _finalize(dict(picked))
+        if candidates:
+            return _finalize(dict(candidates[0]))
 
         card: dict[str, str] = {
             "name": "",
@@ -2882,140 +3049,200 @@ class TripBrowser:
             except Exception:
                 pass
 
-        # Car name + similar
-        name_m = re.search(
-            r"(?im)^([A-Z][A-Za-z0-9 \-]+?)\s+(or similar\s+[A-Za-z ]+)",
-            blob,
-        )
-        if name_m:
-            card["name"] = name_m.group(1).strip()
-            card["similar"] = name_m.group(2).strip()
-        if not card["name"]:
-            name_m = re.search(
-                r"(?i)(Porsche|Toyota|Nissan|Ford|Chevrolet|Jeep|Kia|Audi|"
-                r"BMW|Mercedes|Honda|Hyundai|Tesla|Chrysler|Volkswagen|"
-                r"Mazda|Subaru|Lexus|Volvo)\s+[A-Za-z0-9\-]+",
-                blob,
-            )
-            if name_m:
-                card["name"] = name_m.group(0).strip()
-        sim_m = re.search(r"(?i)or similar\s+[A-Za-z ]+", blob)
-        if sim_m and not card["similar"]:
-            card["similar"] = sim_m.group(0).strip()
-
-        score_m = re.search(r"\b([6-9](?:\.\d)?|10(?:\.0)?)\s*/\s*10\b", blob)
-        if score_m:
-            card["score"] = f"{score_m.group(1)}/10"
-        rev_m = re.search(r"(?i)(\d[\d,]*)\s*review", blob)
-        if rev_m:
-            card["reviews"] = f"{rev_m.group(1)} review(s)"
-
-        seats_m = re.search(r"(?i)\b([2-9]|1[0-5])\s*(?:seats?|passengers?)?\b", blob)
-        # Prefer icon-adjacent digit near Electric/Petrol — fall back carefully
-        if re.search(r"(?i)\bElectric\b", blob):
-            card["fuel"] = "Electric"
-        elif re.search(r"(?i)\bHybrid\b", blob):
-            card["fuel"] = "Hybrid"
-        elif re.search(r"(?i)\bDiesel\b", blob):
-            card["fuel"] = "Diesel"
-        elif re.search(r"(?i)\bPetrol\b|\bGasoline\b", blob):
-            card["fuel"] = "Petrol"
-        # Seats: look for a standalone digit near capacity cues
-        seats2 = re.search(r"(?i)(?:seats?|passengers?|capacity)[^\d]{0,12}(\d{1,2})", blob)
-        if seats2:
-            card["seats"] = seats2.group(1)
-        elif seats_m and int(seats_m.group(1)) <= 15:
-            # Weak signal — only use if no better
-            pass
-
-        # Try to read seats from compact "5 Electric" style lines
-        seat_fuel = re.search(
-            r"(?im)\b([2-9]|1[0-2])\s+(Electric|Hybrid|Petrol|Diesel|Gasoline)\b",
-            blob,
-        )
-        if seat_fuel:
-            card["seats"] = seat_fuel.group(1)
-            fuel = seat_fuel.group(2)
-            card["fuel"] = "Petrol" if fuel.lower() == "gasoline" else fuel
-
-        if re.search(r"(?i)free shuttle", blob):
-            card["pickup_note"] = "Free shuttle to counter"
-        elif re.search(r"(?i)in[- ]terminal|meet and greet|counter", blob):
-            m = re.search(
-                r"(?i)(Free shuttle[^.!\n]+|In-terminal[^.!\n]+|Meet and greet[^.!\n]+)",
-                blob,
-            )
-            if m:
-                card["pickup_note"] = m.group(1).strip()[:80]
-
-        cancel_m = re.search(r"(?i)(Free cancellation[^.!\n]*)", blob)
-        if cancel_m:
-            card["cancellation"] = cancel_m.group(1).strip()[:100]
-        mile_m = re.search(
-            r"(?i)((?:\d[\d,]*)\s*(?:mi|km|miles)\s+per\s+(?:rental|day)|Unlimited mileage)",
-            blob,
-        )
-        if mile_m:
-            card["mileage"] = mile_m.group(1).strip()[:80]
-        if re.search(r"(?i)prepay online", blob):
-            card["payment"] = "Prepay online"
-        elif re.search(r"(?i)pay at pick[- ]?up", blob):
-            card["payment"] = "Pay at pick-up"
-        ins_m = re.search(
-            r"(?i)(Includes? (?:Third Party Liability|CDW|collision|insurance)[^.!\n]*)",
-            blob,
-        )
-        if ins_m:
-            card["insurance"] = ins_m.group(1).strip()[:100]
-
-        # Vendor — often uppercase brand near score
-        for vendor in (
-            "FAT UNCLE CAR RENTAL",
-            "Hertz",
-            "Avis",
-            "Budget",
-            "Sixt",
-            "Enterprise",
-            "Alamo",
-            "National",
-            "Dollar",
-            "Thrifty",
-            "Europcar",
-            "TOYOTA Rent a Car",
-            "Times",
-        ):
-            if vendor.lower() in blob.lower():
-                card["vendor"] = vendor.title() if vendor.isupper() and len(vendor) > 8 else vendor
-                break
-
-        daily_m = re.search(
-            r"(?i)HK\s*\$?\s*([0-9,]+(?:\.\d+)?)\s*/\s*day",
-            blob,
-        )
-        if daily_m:
-            card["price_label"] = f"HK${daily_m.group(1)}"
-        elif lowest is not None:
+        parsed = _parse_car_chunk(body[:14000])
+        for k, v in parsed.items():
+            if v and not card.get(k):
+                card[k] = v
+        if lowest is not None and not card.get("price_label"):
             card["price_label"] = f"HK${lowest:,.0f}"
-        total_m = re.search(
-            r"(?i)Total\s*HK\s*\$?\s*([0-9,]+(?:\.\d+)?)",
-            blob,
+        return _finalize(card)
+
+    def _scrape_car_fuse_cards(self, *, limit: int = 8) -> list[dict[str, str]]:
+        """Read Trip.com list cards (``.vehicle-item-fuse``) with photo + deal fields.
+
+        Matches the public search-results DOM (name, seats/bags/Automatic, vendor,
+        price, View deal link, ``img.vehicle-item-fuse__image``).
+        """
+        page = self._require_page()
+        try:
+            rows = page.evaluate(
+                """(limit) => {
+                  const roots = Array.from(
+                    document.querySelectorAll(
+                      '.vehicle-item-fuse, [class*="vehicle-item-fuse"]'
+                    )
+                  );
+                  const out = [];
+                  const seen = new Set();
+                  for (const card of roots) {
+                    const img =
+                      card.querySelector('img.vehicle-item-fuse__image') ||
+                      card.querySelector('img[class*="vehicle-item-fuse__image"]') ||
+                      card.querySelector('img[class*="vehicle-item"]') ||
+                      card.querySelector('img');
+                    let src = '';
+                    if (img) {
+                      src =
+                        img.currentSrc ||
+                        img.src ||
+                        img.getAttribute('data-src') ||
+                        img.getAttribute('src') ||
+                        '';
+                    }
+                    let href = '';
+                    const links = Array.from(
+                      card.querySelectorAll(
+                        "a[href*='carrentals/detail'], a[href*='/carrentals/'], a[href*='View']"
+                      )
+                    );
+                    for (const a of links) {
+                      const h = a.href || a.getAttribute('href') || '';
+                      if (h && h.includes('detail')) {
+                        href = h;
+                        break;
+                      }
+                      if (!href && h) href = h;
+                    }
+                    // Some deals store the detail URL on a button/data attr
+                    if (!href) {
+                      const any = card.querySelector('[href*="carrentals/detail"]');
+                      if (any) href = any.href || any.getAttribute('href') || '';
+                    }
+                    const text = (card.innerText || '')
+                      .replace(/\\u00a0/g, ' ')
+                      .replace(/[ \\t]+/g, ' ')
+                      .trim();
+                    if (!text || text.length < 20) continue;
+                    const key = text.slice(0, 80) + '|' + (src || '').slice(-40);
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    out.push({ image_url: src, url: href, text: text.slice(0, 900) });
+                    if (out.length >= limit) break;
+                  }
+                  return out;
+                }""",
+                limit,
+            )
+        except Exception:
+            rows = []
+
+        cleaned: list[dict[str, str]] = []
+        for row in rows or []:
+            text = str(row.get("text") or "")
+            parsed = _parse_car_chunk(text)
+            img = self._normalize_car_image_url(str(row.get("image_url") or ""))
+            href = str(row.get("url") or "").strip()
+            if href.startswith("/"):
+                href = f"{settings.trip_base_url.rstrip('/')}{href}"
+            if href and "trip.com" in href.lower():
+                href = ensure_locale_curr(normalize_trip_url(href))
+                if self._car_detail_url_ok(href):
+                    parsed["url"] = href
+            if img:
+                parsed["image_url"] = img
+            # Prefer full "Name or similar …" as display name
+            full = re.search(
+                r"(?i)([A-Z][A-Za-z0-9 \-]+?\s+or similar\s+[A-Za-z ]+)",
+                text,
+            )
+            if full:
+                whole = re.sub(r"\s+", " ", full.group(1)).strip()
+                # Split name / similar for the card layout
+                parts = re.match(
+                    r"(?i)(.+?)\s+(or similar\s+.+)$",
+                    whole,
+                )
+                if parts:
+                    parsed["name"] = parts.group(1).strip()
+                    parsed["similar"] = parts.group(2).strip()
+                else:
+                    parsed["name"] = whole
+            if parsed.get("name") or parsed.get("price_label") or img:
+                cleaned.append(parsed)
+        return cleaned
+
+    @staticmethod
+    def _normalize_car_image_url(src: str) -> str:
+        """Keep Trip.com / Ctrip CDN vehicle photos usable for the GUI card."""
+        out = (src or "").strip()
+        if not out or not out.startswith("http"):
+            return ""
+        low = out.lower()
+        if any(
+            x in low
+            for x in ("logo", "icon", "avatar", "qrcode", "badge", "sprite", "pixel")
+        ):
+            return ""
+        # Prefer CDN hosts used by Trip.com car hire list cards
+        if not any(
+            h in low
+            for h in (
+                "c-ctrip.com",
+                "tripcdn.com",
+                "ak-d.tripcdn",
+                "dimg04.",
+                "dimg.",
+            )
+        ):
+            # Still allow other https car photos if clearly from trip
+            if "trip.com" not in low and "ctrip" not in low:
+                return ""
+        # Prefer a slightly larger resize when Trip.com uses proc=resize
+        out = re.sub(
+            r"([?&]proc=resize/[^&]*w_)\d+",
+            r"\g<1>600",
+            out,
+            flags=re.I,
         )
-        if total_m:
-            card["total_label"] = f"Total HK${total_m.group(1)}"
+        out = re.sub(
+            r"([?&]proc=resize/[^&]*h_)\d+",
+            r"\g<1>400",
+            out,
+            flags=re.I,
+        )
+        return out
 
-        # Cover image
-        card["image_url"] = self._scrape_car_image_from_page(page)
-        if not card["name"]:
-            card["name"] = f"Car rental in {location}" if location else "Recommended car"
-        return card
+    def _scrape_car_image_from_page(self, page: Page, *, car_name: str = "") -> str:
+        """Cover photo from Trip.com car hire list (``.vehicle-item-fuse__image``)."""
+        # 1) Structured list cards — matches the search-page DOM the user inspected
+        fuse = self._scrape_car_fuse_cards(limit=10)
+        want = re.sub(r"\s+", " ", (car_name or "").strip()).lower()
+        if want:
+            for row in fuse:
+                name = (row.get("name") or "").lower()
+                if want in name or name in want or want.split(" or ")[0] in name:
+                    if row.get("image_url"):
+                        return row["image_url"]
+        for row in fuse:
+            if row.get("image_url"):
+                return row["image_url"]
 
-    def _scrape_car_image_from_page(self, page: Page) -> str:
-        """Best-effort cover photo from the current car hire list page."""
+        # 2) Direct selector used on hk.trip.com results
+        try:
+            loc = page.locator("img.vehicle-item-fuse__image")
+            count = min(loc.count(), 8)
+        except Exception:
+            count = 0
+        for i in range(count):
+            try:
+                src = (
+                    loc.nth(i).get_attribute("src")
+                    or loc.nth(i).evaluate("e => e.currentSrc || e.src || ''")
+                    or ""
+                ).strip()
+            except Exception:
+                continue
+            norm = self._normalize_car_image_url(src)
+            if norm:
+                return norm
+
+        # 3) Fallback: any CDN img that looks like a vehicle photo
         try:
             imgs = page.evaluate(
                 """() => Array.from(document.querySelectorAll('img')).map(e => ({
-                  src: e.currentSrc || e.src || '',
+                  src: e.currentSrc || e.src || e.getAttribute('data-src') || '',
                   alt: e.alt || '',
+                  cls: (e.className || '').toString(),
                   w: e.naturalWidth || e.width || 0,
                   h: e.naturalHeight || e.height || 0
                 })).filter(x => x.src && x.src.startsWith('http'))"""
@@ -3023,23 +3250,29 @@ class TripBrowser:
         except Exception:
             imgs = []
         best = ""
-        best_area = 0
+        best_score = -1
         for im in imgs or []:
-            src = str(im.get("src") or "")
-            low = src.lower()
-            alt = str(im.get("alt") or "").lower()
-            if any(x in low for x in ("logo", "icon", "avatar", "qrcode", "badge", "sprite")):
+            src = self._normalize_car_image_url(str(im.get("src") or ""))
+            if not src:
                 continue
-            if "car" in alt or "vehicle" in alt or "tripcdn" in low or "ak-d.tripcdn" in low:
-                area = int(im.get("w") or 0) * int(im.get("h") or 0)
-                if area > best_area:
-                    best_area = area
-                    best = src
-            elif best_area == 0 and ("tripcdn" in low or "ak-d.tripcdn" in low):
-                area = int(im.get("w") or 0) * int(im.get("h") or 0)
-                if area >= 20_000:
-                    best_area = area
-                    best = src
+            low = src.lower()
+            cls = str(im.get("cls") or "").lower()
+            alt = str(im.get("alt") or "").lower()
+            score = 0
+            if "vehicle-item-fuse__image" in cls:
+                score += 100
+            if "vehicle" in cls or "vehicle" in alt or "car" in alt:
+                score += 40
+            if "c-ctrip.com" in low or "dimg" in low:
+                score += 30
+            if "tripcdn" in low:
+                score += 20
+            area = int(im.get("w") or 0) * int(im.get("h") or 0)
+            if area >= 8_000:
+                score += 10
+            if score > best_score:
+                best_score = score
+                best = src
         return best
 
     def browse_url(self, url: str) -> str:
