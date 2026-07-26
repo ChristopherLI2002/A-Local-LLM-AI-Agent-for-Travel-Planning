@@ -127,6 +127,56 @@ class TravelAgent:
         self.model = resolve_ollama_model(self.model, host=settings.ollama_host)
         self.browser.llm_model = self.model
 
+    def _enforce_trip_length_args(self, name: str, args: dict) -> None:
+        """Overwrite tool args so hotels/route never shrink below the GUI trip length."""
+        if name not in {
+            "plan_trip",
+            "propose_trip_route",
+            "search_hotels",
+            "compare_hotel_prices",
+            "search_flights",
+            "compare_flight_prices",
+            "search_cars",
+        }:
+            return
+        ctx = self.browser.selection_context
+        ctx_n = int(getattr(ctx, "nights", 0) or 0)
+        ctx_in = (getattr(ctx, "checkin", "") or "").strip()
+        ctx_out = (getattr(ctx, "checkout", "") or "").strip()
+        if not ctx_n and not ctx_in and not ctx_out:
+            return
+
+        if ctx_in:
+            if name in {"plan_trip", "search_flights", "compare_flight_prices"}:
+                args["depart_date"] = ctx_in
+            if name in {"search_hotels", "compare_hotel_prices"}:
+                args["checkin"] = ctx_in
+            if name == "propose_trip_route":
+                args["depart_date"] = ctx_in
+            if name == "search_cars":
+                args["pickup_date"] = args.get("pickup_date") or ctx_in
+
+        if ctx_out:
+            if name in {"plan_trip", "search_flights", "compare_flight_prices"}:
+                args["return_date"] = ctx_out
+            if name in {"search_hotels", "compare_hotel_prices"}:
+                args["checkout"] = ctx_out
+            if name == "search_cars":
+                args["dropoff_date"] = args.get("dropoff_date") or ctx_out
+
+        if name == "propose_trip_route" and ctx_n:
+            try:
+                arg_n = int(args.get("nights") or 0)
+            except (TypeError, ValueError):
+                arg_n = 0
+            if arg_n < ctx_n:
+                args["nights"] = ctx_n
+
+        # plan_trip: if model return span is shorter than GUI nights, force checkout
+        if name == "plan_trip" and ctx_n and ctx_in and ctx_out:
+            args["depart_date"] = ctx_in
+            args["return_date"] = ctx_out
+
     def _apply_plan_flight_card(self) -> None:
         """Copy frozen open-jaw / plan flight scrape into booking_links."""
         plan_card = getattr(self.browser, "last_plan_flight_card", None) or {}
@@ -258,6 +308,9 @@ class TravelAgent:
 
                         args[key] = typed_place_name(str(args[key]))
 
+                # Force full trip length from the GUI selection (model often uses 7 nights)
+                self._enforce_trip_length_args(name, args)
+
                 # Enforce rough-route-before-scrape when the model skips propose
                 scrape_tools = {
                     "plan_trip",
@@ -267,13 +320,18 @@ class TravelAgent:
                     "compare_hotel_prices",
                 }
                 if name in scrape_tools and not route_ready:
+                    ctx = self.browser.selection_context
+                    ctx_n = int(getattr(ctx, "nights", 0) or 0)
                     propose_args = {
                         "destination": args.get("destination")
                         or args.get("city")
                         or args.get("hotel_city")
                         or "destination",
-                        "nights": args.get("nights") or 7,
-                        "depart_date": args.get("depart_date") or args.get("checkin") or "",
+                        "nights": ctx_n or args.get("nights") or 7,
+                        "depart_date": args.get("depart_date")
+                        or args.get("checkin")
+                        or getattr(ctx, "checkin", "")
+                        or "",
                         "origin": args.get("origin") or "Hong Kong",
                         "interests": args.get("interests") or "",
                     }
@@ -283,9 +341,12 @@ class TravelAgent:
 
                             d0 = _date.fromisoformat(str(args["depart_date"])[:10])
                             d1 = _date.fromisoformat(str(args["return_date"])[:10])
-                            propose_args["nights"] = max(1, (d1 - d0).days)
+                            span = max(1, (d1 - d0).days)
+                            propose_args["nights"] = max(ctx_n, span) if ctx_n else span
                         except ValueError:
                             pass
+                    if ctx_n and int(propose_args.get("nights") or 0) < ctx_n:
+                        propose_args["nights"] = ctx_n
                     if self.on_tool_start:
                         self.on_tool_start("propose_trip_route", propose_args)
                     propose_result = dispatch_tool(

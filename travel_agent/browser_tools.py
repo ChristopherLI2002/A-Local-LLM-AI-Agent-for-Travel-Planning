@@ -2772,8 +2772,15 @@ class TripBrowser:
         from travel_agent.regions import format_route_proposal, propose_trip_route
 
         try:
-            n = max(1, int(nights or 7))
+            n = max(1, int(nights or 0))
         except (TypeError, ValueError):
+            n = 0
+        # Prefer the trip length from the GUI / plan context when the model
+        # undershoots (e.g. proposes 8 nights for a 14-night trip).
+        ctx_n = int(getattr(self.selection_context, "nights", 0) or 0)
+        if ctx_n > 0 and (n <= 0 or n < ctx_n):
+            n = ctx_n
+        if n <= 0:
             n = 7
         depart_date = depart_date or _default_depart(21)
         route = propose_trip_route(
@@ -2959,7 +2966,26 @@ class TripBrowser:
         depart_date = depart_date or _default_depart(21)
         return_date = return_date or _default_return_from(depart_date, 7)
         hotel_city = typed_place_name(to_hotel_city(hotel_city or destination))
+
+        # GUI / selection_context is the source of truth for trip length.
+        # The model often passes a default ~7-night return even when the user
+        # asked for 14 nights — never shorten hotels below that.
+        ctx_n = int(getattr(self.selection_context, "nights", 0) or 0)
+        ctx_in = (getattr(self.selection_context, "checkin", "") or "").strip()
+        ctx_out = (getattr(self.selection_context, "checkout", "") or "").strip()
+        if ctx_in:
+            depart_date = ctx_in
+        if ctx_out:
+            return_date = ctx_out
         nights = max(1, nights_between(depart_date, return_date))
+        if ctx_n > nights:
+            nights = ctx_n
+            return_date = ctx_out or _default_return_from(depart_date, nights)
+        elif ctx_n > 0:
+            nights = max(nights, ctx_n)
+            if nights_between(depart_date, return_date) < nights:
+                return_date = ctx_out or _default_return_from(depart_date, nights)
+
         need_car = _wants_rental_car(rent_car, interests)
         want_flights = _as_bool(include_flights, default=True)
         want_trains = _as_bool(include_trains, default=True)
@@ -2983,7 +3009,10 @@ class TripBrowser:
         )
 
         from travel_agent.regions import (
+            align_route_to_nights,
+            build_regional_route,
             format_route_proposal,
+            is_regional_destination,
             propose_trip_route,
         )
 
@@ -2999,7 +3028,6 @@ class TripBrowser:
                 stay_cities=stay_cities or "",
                 interests=interests or "",
             )
-            self.last_proposed_route = regional
         elif self.last_proposed_route is not None:
             regional = self.last_proposed_route
         else:
@@ -3009,6 +3037,32 @@ class TripBrowser:
                 depart_date=depart_date,
                 interests=interests or "",
             )
+
+        # Hotels must cover the full trip — never keep a shorter proposed split
+        if regional is not None:
+            stay_total = sum(max(1, int(s.nights or 1)) for s in regional.stays)
+            if stay_total != nights:
+                rebuilt = None
+                if is_regional_destination(destination):
+                    rebuilt = build_regional_route(
+                        destination, nights, depart_date=depart_date
+                    )
+                if rebuilt is not None:
+                    rebuilt.arrive_airport = (
+                        regional.arrive_airport or rebuilt.arrive_airport
+                    )
+                    rebuilt.depart_airport = (
+                        regional.depart_airport or rebuilt.depart_airport
+                    )
+                    regional = rebuilt
+                else:
+                    regional = align_route_to_nights(
+                        regional, nights, depart_date=depart_date or ""
+                    )
+            else:
+                regional = align_route_to_nights(
+                    regional, nights, depart_date=depart_date or ""
+                )
             self.last_proposed_route = regional
 
         route_preamble = format_route_proposal(
@@ -4733,7 +4787,11 @@ Transport modes: {", ".join(modes)}
         adults: int = 2,
         stay_index: int = 2,
     ) -> dict[str, str]:
-        """Search Trip.com for a regional stay city via Playwright type→Search."""
+        """Search Trip.com for a regional stay city via Playwright type→Search.
+
+        Clears prior-city ``last_hotel_*`` first so a failed/partial search never
+        reuses the previous stay's hotel name or detail URL.
+        """
         fb = _fallback_stay_hotel(stay_city)
         stay_rec: dict[str, str] = {
             "city": stay_city,
@@ -4754,6 +4812,12 @@ Transport modes: {", ".join(modes)}
             "image_url": fb.get("image_url", ""),
             "features": fb.get("features", ""),
         }
+        # Never inherit the previous city's hotel into this stay
+        self.last_hotel_detail_url = ""
+        self.last_hotel_name = ""
+        self.last_hotel_list_url = ""
+        self.last_hotel_candidates = []
+
         h_text = ""
         try:
             h_text = self.search_hotels(
@@ -4769,8 +4833,12 @@ Transport modes: {", ".join(modes)}
             )
             return stay_rec
 
-        # Prefer hotel detail URL from Playwright; fall back to live list
+        # search_hotels already: list → LLM pick → open detail → scrape.
+        # Trust that result; do not re-pick off the detail page (wrong DOM).
+        from travel_agent.trip_urls import is_trusted_hotel_detail_url
+
         stay_url = (getattr(self, "last_hotel_detail_url", "") or "").strip()
+        live_name = (getattr(self, "last_hotel_name", "") or "").strip()
         h_url = ""
         try:
             h_url = self._require_page().url
@@ -4784,7 +4852,9 @@ Transport modes: {", ".join(modes)}
                 canon_h.group(1).rstrip(".,;") if canon_h else h_url
             ) or ""
         stay_url = ensure_locale_curr(normalize_trip_url(stay_url))
-        if stay_url:
+        if stay_url and is_trusted_hotel_detail_url(stay_url):
+            stay_rec["url"] = stay_url
+        elif stay_url:
             stay_rec["url"] = stay_url
 
         h_prices = summarize_prices(
@@ -4799,66 +4869,31 @@ Transport modes: {", ".join(modes)}
         if stay_total is not None:
             stay_rec["total_label"] = f"Est. stay total: HK${stay_total:,.0f}"
 
-        # LLM-pick a hotel for this stay city (not just the first anchor)
-        name = ""
-        detail = ""
-        stay_options: list[tuple[str, str]] = []
-        for u, label_txt in self._extract_hotel_detail_options(limit=12):
-            nu = ensure_locale_curr(normalize_trip_url(u))
-            if "/hotels/" not in nu.lower():
-                continue
-            if not (
-                "hotelid=" in nu.lower()
-                or re.search(r"hotel-detail-\d+", nu, re.I)
-                or re.search(r"/hotels/[^/?]+-\d+", nu)
-            ):
-                continue
-            stay_options.append((nu, label_txt))
-        if stay_options:
-            picked_url, picked_name = self._pick_hotel_from_options(
-                stay_options,
-                page_text=h_text or "",
-                city=stay_city,
-                prices=h_prices.get("prices_hkd") or [],
-            )
-            detail = picked_url or stay_options[0][0]
-            name = picked_name or stay_options[0][1]
-        if detail:
-            stay_rec["url"] = detail
-        if name and _hotel_name_plausible_for_city(name, stay_city):
-            stay_rec["name"] = name
+        if live_name and not live_name.lower().startswith(
+            ("hotels in ", "recommended hotel")
+        ) and _hotel_name_plausible_for_city(live_name, stay_city):
+            stay_rec["name"] = live_name
 
+        # Card fields from the detail page we already opened (if still there)
         card = self._scrape_top_hotel_card(
             city=stay_city,
-            fallback_name=name or fb["name"],
+            fallback_name=stay_rec["name"] or fb["name"],
             lowest=float(nightly) if nightly is not None else None,
         )
         card_name = card.get("name") or ""
-        live_name = (getattr(self, "last_hotel_name", "") or "").strip()
-        if live_name and not live_name.lower().startswith(
-            ("hotels in ", "recommended hotel")
-        ):
-            stay_rec["name"] = live_name
-        elif card_name and _hotel_name_plausible_for_city(card_name, stay_city):
-            # Prefer a real listing title over the generic "Hotels in …"
+        if (
+            not stay_rec["name"]
+            or stay_rec["name"].lower().startswith(("hotels in ", "recommended hotel"))
+        ) and card_name and _hotel_name_plausible_for_city(card_name, stay_city):
             if not card_name.lower().startswith(("hotels in ", "recommended hotel")):
                 stay_rec["name"] = card_name
-        elif name:
-            stay_rec["name"] = name
-
-        # Prefer detail URL from this search
-        if getattr(self, "last_hotel_detail_url", ""):
-            stay_rec["url"] = self.last_hotel_detail_url
-        elif detail:
-            stay_rec["url"] = detail
 
         for k in ("score", "score_label", "stars", "reviews", "price_label"):
             if card.get(k):
                 stay_rec[k] = card[k]
 
         img = card.get("image_url") or ""
-        detail_for_img = stay_rec.get("url") or detail
-        # Reject LoremFlickr-looking tiny/generic if we can get a real detail photo
+        detail_for_img = stay_rec.get("url") or ""
         if detail_for_img and (
             not img
             or "loremflickr" in img.lower()
@@ -4871,7 +4906,6 @@ Transport modes: {", ".join(modes)}
             if detail_img:
                 img = detail_img
         if not img or "loremflickr" in (img or "").lower():
-            # Named hotel photo via Wikipedia/Openverse
             try:
                 from travel_agent.attraction_images import lookup_image
 
@@ -4882,7 +4916,6 @@ Transport modes: {", ".join(modes)}
             img = _city_hotel_fallback_image(stay_city)
         stay_rec["image_url"] = img
 
-        # Still generic? use curated city hotel name only (keep detail URL)
         if stay_rec["name"].lower().startswith(("hotels in ", "recommended hotel")):
             curated = (fb.get("name") or "").strip()
             if curated and not curated.lower().startswith("recommended hotel"):

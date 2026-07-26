@@ -97,6 +97,73 @@ def _split_nights(nights: int, parts: int) -> list[int]:
     return [base + (1 if i < rem else 0) for i in range(parts)]
 
 
+def align_route_to_nights(
+    route: RegionalRoute,
+    nights: int,
+    *,
+    depart_date: str = "",
+) -> RegionalRoute:
+    """Redistribute stay nights so they sum to ``nights`` and chain check-in dates.
+
+    Keeps the same cities/airports; only night counts and dates change. Used when
+    a rough propose_trip_route undershoots the real trip length (e.g. 8 nights
+    proposed for a 14-night trip).
+    """
+    n = max(1, int(nights or 1))
+    if not route.stays:
+        return route
+
+    old = [max(1, int(s.nights or 1)) for s in route.stays]
+    old_sum = sum(old) or len(old)
+    if old_sum == n:
+        parts = old
+    elif len(route.stays) == 1:
+        parts = [n]
+    else:
+        # Proportional to the proposed split, then fix rounding so sum == n
+        parts = []
+        allocated = 0
+        for i, w in enumerate(old):
+            remaining_cities = len(old) - i - 1
+            if remaining_cities == 0:
+                parts.append(max(1, n - allocated))
+            else:
+                ni = max(1, int(round(n * w / old_sum)))
+                ni = min(ni, max(1, n - allocated - remaining_cities))
+                parts.append(ni)
+                allocated += ni
+        drift = n - sum(parts)
+        if drift != 0:
+            parts[-1] = max(1, parts[-1] + drift)
+
+    cursor = (depart_date or "").strip() or (route.stays[0].checkin or "")
+    new_stays: list[StaySegment] = []
+    for stay, nights_i in zip(route.stays, parts):
+        checkin = cursor
+        checkout = ""
+        if checkin:
+            try:
+                checkout = (
+                    date.fromisoformat(checkin) + timedelta(days=nights_i)
+                ).isoformat()
+                cursor = checkout
+            except ValueError:
+                checkout = stay.checkout or ""
+        new_stays.append(
+            StaySegment(
+                city=stay.city,
+                airport=stay.airport,
+                nights=nights_i,
+                checkin=checkin or stay.checkin,
+                checkout=checkout or stay.checkout,
+                guide_key=stay.guide_key or stay.city.lower(),
+                label=f"{stay.city} ({nights_i} night{'s' if nights_i != 1 else ''})",
+            )
+        )
+    route.stays = new_stays
+    return route
+
+
 def build_regional_route(
     destination: str,
     nights: int,

@@ -2787,6 +2787,7 @@ class TravelAgentApp(tk.Tk):
             "destination": destination,
             "depart_date": depart,
             "return_date": ret or "",
+            "nights": str(nights),
             "rent_car": "1" if getattr(self, "rent_car_var", None) and self.rent_car_var.get() else "",
         }
         # Vague regions (e.g. California) → multi-city open-jaw itinerary
@@ -3446,6 +3447,9 @@ class TravelAgentApp(tk.Tk):
             scraped = list(getattr(self.agent.browser, "last_hotel_stays", None) or [])
 
         stays: list[dict[str, str]] = []
+        # Multi-city: each stay already has its own scrape — do not stamp the
+        # global last_hotel_* (one city) onto every card.
+        multi_stay = len(ctx_stays) > 1 or len(scraped) > 1
 
         def _finalize_stay(rec: dict[str, str]) -> dict[str, str]:
             from travel_agent.browser_tools import _fallback_stay_hotel
@@ -3465,7 +3469,7 @@ class TravelAgentApp(tk.Tk):
             live_name = ""
             live_detail = ""
             live_list = ""
-            if self.agent:
+            if self.agent and not multi_stay:
                 live_name = (
                     getattr(self.agent.browser, "last_hotel_name", "") or ""
                 ).strip()
@@ -3478,7 +3482,7 @@ class TravelAgentApp(tk.Tk):
                 if not live_name:
                     live_name = (self.agent.booking_links.get("hotel_name") or "").strip()
 
-            # Prefer the real Trip.com hotel title scraped from the detail page
+            # Single-stay only: prefer the live Trip.com detail title
             if live_name and not live_name.lower().startswith(
                 ("hotels in ", "recommended hotel")
             ):
@@ -3531,10 +3535,15 @@ class TravelAgentApp(tk.Tk):
             checkout = (rec.get("checkout") or "").strip()
             raw_url = (rec.get("url") or saved_url or "").strip()
             booking_hotel = ""
-            if self.agent:
+            if self.agent and not multi_stay:
                 booking_hotel = (self.agent.booking_links.get("hotel") or "").strip()
-            # Detail page wins over list/search every time
-            for cand in (live_detail, booking_hotel, raw_url):
+            # Per-stay URL first when multi-city; else live detail wins
+            url_candidates = (
+                (raw_url, live_detail, booking_hotel)
+                if multi_stay
+                else (live_detail, booking_hotel, raw_url)
+            )
+            for cand in url_candidates:
                 if cand and is_trusted_hotel_detail_url(cand):
                     rec["url"] = (
                         canonicalize_hotel_detail_url(
@@ -3595,6 +3604,36 @@ class TravelAgentApp(tk.Tk):
                 stays.append(_finalize_stay(merged))
         elif scraped:
             stays = [_finalize_stay(dict(s)) for s in scraped]
+            # Single-city scrape often inherits a default 7-night stay — expand
+            # to the wizard trip length when needed.
+            try:
+                want_n = max(1, int(self._trip_context.get("nights") or 0))
+            except ValueError:
+                want_n = 0
+            if len(stays) == 1 and want_n:
+                try:
+                    have_n = int(stays[0].get("nights") or 0)
+                except ValueError:
+                    have_n = 0
+                if have_n < want_n:
+                    stays[0]["nights"] = str(want_n)
+                    cin = (stays[0].get("checkin") or self._trip_context.get("depart_date") or "").strip()
+                    cout = (self._trip_context.get("return_date") or "").strip()
+                    if cin and not cout:
+                        try:
+                            cout = (
+                                date.fromisoformat(cin) + timedelta(days=want_n)
+                            ).isoformat()
+                        except ValueError:
+                            cout = stays[0].get("checkout") or ""
+                    if cin:
+                        stays[0]["checkin"] = cin
+                    if cout:
+                        stays[0]["checkout"] = cout
+                    stays[0]["label"] = (
+                        f"Stay · {stays[0].get('city') or ''} "
+                        f"({want_n} night{'s' if want_n != 1 else ''})"
+                    ).strip()
         elif ctx_stays:
             stays = [_finalize_stay(dict(s)) for s in ctx_stays]
 
@@ -4267,14 +4306,58 @@ class TravelAgentApp(tk.Tk):
                     self.flight_row.set_offer(self._flight_offer_from_live_card(live))
             return
         self._last_plan = text
-        # Prefer the agent's proposed rough route for airports / multi-stay cards
+        # Prefer the agent's proposed rough route for airports / multi-stay cards,
+        # but never shrink below the nights the user set in the wizard.
         try:
             route = (
                 getattr(self.agent.browser, "last_proposed_route", None)
                 if self.agent
                 else None
             )
+            ctx_n = 0
+            try:
+                ctx_n = max(1, int(self._trip_context.get("nights") or 0))
+            except ValueError:
+                ctx_n = 0
+            if not ctx_n:
+                try:
+                    d0 = self._trip_context.get("depart_date") or ""
+                    d1 = self._trip_context.get("return_date") or ""
+                    if d0 and d1:
+                        ctx_n = max(
+                            1,
+                            (
+                                date.fromisoformat(d1) - date.fromisoformat(d0)
+                            ).days,
+                        )
+                except ValueError:
+                    ctx_n = 0
+
             if route is not None and getattr(route, "stays", None):
+                route_n = sum(max(1, int(getattr(s, "nights", 1) or 1)) for s in route.stays)
+                if ctx_n and route_n < ctx_n:
+                    from travel_agent.regions import (
+                        align_route_to_nights,
+                        build_regional_route,
+                    )
+
+                    dest = self._trip_context.get("destination") or ""
+                    depart = self._trip_context.get("depart_date") or ""
+                    rebuilt = build_regional_route(dest, ctx_n, depart_date=depart)
+                    if rebuilt is not None:
+                        rebuilt.arrive_airport = (
+                            route.arrive_airport or rebuilt.arrive_airport
+                        )
+                        rebuilt.depart_airport = (
+                            route.depart_airport or rebuilt.depart_airport
+                        )
+                        route = rebuilt
+                    else:
+                        route = align_route_to_nights(
+                            route, ctx_n, depart_date=depart
+                        )
+                    if self.agent:
+                        self.agent.browser.last_proposed_route = route
                 self._trip_context["arrive_airport"] = (
                     route.arrive_airport or ""
                 ).upper()
@@ -4286,9 +4369,20 @@ class TravelAgentApp(tk.Tk):
                     f"{s.city}|{s.nights}|{s.checkin}|{s.checkout}|{s.airport}"
                     for s in route.stays
                 )
+                self._trip_context["nights"] = str(
+                    sum(max(1, int(s.nights or 1)) for s in route.stays)
+                )
                 self._trip_context["internal_note"] = getattr(
                     route, "internal_note", ""
                 ) or ""
+            elif ctx_n and not self._trip_context.get("stays"):
+                # Single-city: keep a synthetic stay covering the full trip
+                dest = self._trip_context.get("destination") or "Destination"
+                depart = self._trip_context.get("depart_date") or ""
+                ret = self._trip_context.get("return_date") or ""
+                self._trip_context["stays"] = (
+                    f"{dest}|{ctx_n}|{depart}|{ret}|"
+                )
         except Exception:
             pass
         parsed = self._apply_booking_urls(parse_itinerary(text))
