@@ -108,7 +108,7 @@ def is_hotel_detail_url(url: str) -> bool:
     low = (url or "").lower()
     if not low or "trip.com" not in low:
         return False
-    if "/hotels/detail" in low:
+    if "/hotels/detail" in low or "/hotels/v2/detail" in low:
         return True
     return bool(_hotel_id_from_url(url))
 

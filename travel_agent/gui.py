@@ -1096,6 +1096,8 @@ class HotelRowCard(tk.Frame):
             fg=C["trip_blue"],
             font=FONTS["hotel_name"],
             anchor="w",
+            justify="left",
+            wraplength=220,
         )
         self.name_lbl.pack(side="left")
         self.stars_lbl = tk.Label(
@@ -1133,6 +1135,8 @@ class HotelRowCard(tk.Frame):
             fg=C["ink_soft"],
             font=FONT_SMALL,
             anchor="w",
+            justify="left",
+            wraplength=260,
         )
         self.location_lbl.pack(fill="x", pady=(8, 2))
         self.features_lbl = tk.Label(
@@ -1142,6 +1146,8 @@ class HotelRowCard(tk.Frame):
             fg=C["ink_soft"],
             font=FONT_SMALL,
             anchor="w",
+            justify="left",
+            wraplength=260,
         )
         self.features_lbl.pack(fill="x", pady=(0, 8))
 
@@ -1364,7 +1370,15 @@ class HotelRowCard(tk.Frame):
             heading = f"{heading} ({offer.nights} night{'s' if offer.nights != 1 else ''})"
         self.heading_lbl.configure(text=heading)
         self._set_hotel_photo(offer)
-        self.name_lbl.configure(text=offer.name)
+        try:
+            from travel_agent.browser_tools import clean_hotel_display_name
+
+            display_name = clean_hotel_display_name(
+                offer.name or "", offer.city or ""
+            ) or (offer.name or "Hotel")
+        except Exception:
+            display_name = offer.name or "Hotel"
+        self.name_lbl.configure(text=display_name)
         self.stars_lbl.configure(text="★" * max(0, min(offer.stars, 5)))
         self.score_badge.configure(text=offer.score or "—")
         self.score_word.configure(text=offer.score_label or "")
@@ -2000,12 +2014,13 @@ class TravelAgentApp(tk.Tk):
 
         split = tk.Frame(self.results, bg=C["paper"])
         split.pack(fill="x", anchor="n")
-        # Narrow bookings column (~32%); itinerary gets the rest
-        split.columnconfigure(0, weight=1, minsize=240)
-        split.columnconfigure(1, weight=3, minsize=440)
+        # Narrow bookings column; itinerary takes the rest
+        split.columnconfigure(0, weight=0, minsize=280)
+        split.columnconfigure(1, weight=1, minsize=480)
 
         left = tk.Frame(split, bg=C["paper"])
-        left.grid(row=0, column=0, sticky="nw", padx=(0, 16))
+        left.grid(row=0, column=0, sticky="nw", padx=(0, 12))
+        self._bookings_col = left
         right = tk.Frame(split, bg=C["paper"])
         right.grid(row=0, column=1, sticky="nsew")
 
@@ -2171,14 +2186,14 @@ class TravelAgentApp(tk.Tk):
                 self.hotel_row = card
 
     def _render_car_card(self, parsed: ParsedItinerary) -> None:
-        """Show or hide the car rental card based on scraped deal."""
+        """Show the car rental card only when Rent a car was selected."""
+        want = bool(self._trip_context.get("rent_car"))
+        if not want:
+            parsed.car_offer = None
+            if self.car_row.winfo_ismapped():
+                self.car_row.pack_forget()
+            return
         offer = parsed.car_offer
-        want = bool(self._trip_context.get("rent_car")) or bool(
-            offer and (offer.url or offer.price_label)
-        )
-        if not want and self.agent:
-            card = getattr(self.agent.browser, "last_car_card", None) or {}
-            want = self._car_card_useful(card)
         useful = bool(
             offer
             and self._car_card_useful(
@@ -2194,13 +2209,10 @@ class TravelAgentApp(tk.Tk):
             if not self.car_row.winfo_ismapped():
                 self.car_row.pack(fill="x", pady=(4, 8))
             self.car_row.set_offer(offer)
-        elif want:
+        else:
             if not self.car_row.winfo_ismapped():
                 self.car_row.pack(fill="x", pady=(4, 8))
             self.car_row.set_loading("No car deal scraped yet")
-        else:
-            if self.car_row.winfo_ismapped():
-                self.car_row.pack_forget()
 
     def _car_offer_from_live_card(self, card: dict[str, str]) -> CarRentalOffer:
         return CarRentalOffer(
@@ -2835,13 +2847,22 @@ class TravelAgentApp(tk.Tk):
             self.agent.browser.last_hotel_stays = []
             self.agent.browser.last_car_card = {}
             self.agent.browser.last_car_detail_url = ""
+            self.agent.browser.last_hotel_name = ""
+            self.agent.browser.last_hotel_detail_url = ""
+            self.agent.browser.last_hotel_list_url = ""
             self.agent.browser.last_attraction_day_plan = []
+            if not self._trip_context.get("rent_car"):
+                # Ensure no leftover car deal can paint the card
+                self.agent.browser.last_car_card = {}
+                self.agent.browser.last_car_detail_url = ""
         self._live_flight_card = {}
         self._live_flight_error = ""
 
         self._show_results()
         self.flight_row.set_loading("Comparing flights on Trip.com…")
         self.hotel_row.set_loading("Comparing hotels on Trip.com…")
+        if self.car_row.winfo_ismapped():
+            self.car_row.pack_forget()
         if self._trip_context.get("rent_car"):
             if not self.car_row.winfo_ismapped():
                 self.car_row.pack(fill="x", pady=(4, 8))
@@ -3452,7 +3473,16 @@ class TravelAgentApp(tk.Tk):
         multi_stay = len(ctx_stays) > 1 or len(scraped) > 1
 
         def _finalize_stay(rec: dict[str, str]) -> dict[str, str]:
-            from travel_agent.browser_tools import _fallback_stay_hotel
+            from travel_agent.browser_tools import (
+                _fallback_stay_hotel,
+                _is_curated_fallback_name,
+                clean_hotel_display_name,
+            )
+
+            def hotelId_match(a: str, b: str) -> bool:
+                ma = re.search(r"hotelId=(\d+)", a or "", re.I)
+                mb = re.search(r"hotelId=(\d+)", b or "", re.I)
+                return bool(ma and mb and ma.group(1) == mb.group(1))
 
             city = (rec.get("city") or "").strip()
             name = (rec.get("name") or "").strip()
@@ -3465,6 +3495,7 @@ class TravelAgentApp(tk.Tk):
                 not name
                 or low.startswith("hotels in ")
                 or low.startswith("recommended hotel")
+                or _is_curated_fallback_name(name, city)
             )
             live_name = ""
             live_detail = ""
@@ -3481,10 +3512,15 @@ class TravelAgentApp(tk.Tk):
                 ).strip()
                 if not live_name:
                     live_name = (self.agent.booking_links.get("hotel_name") or "").strip()
+                live_name = clean_hotel_display_name(live_name, city)
 
             # Single-stay only: prefer the live Trip.com detail title
-            if live_name and not live_name.lower().startswith(
-                ("hotels in ", "recommended hotel")
+            if (
+                live_name
+                and not live_name.lower().startswith(
+                    ("hotels in ", "recommended hotel")
+                )
+                and not _is_curated_fallback_name(live_name, city)
             ):
                 rec["name"] = live_name
                 name = live_name
@@ -3494,9 +3530,18 @@ class TravelAgentApp(tk.Tk):
                     m in low
                     for m in ("lishui", "high speed railway", "高铁", "火车站")
                 )
+            elif name:
+                cleaned = clean_hotel_display_name(name, city)
+                if cleaned:
+                    rec["name"] = cleaned
+                    name = cleaned
+                    low = name.lower()
 
             saved_url = (rec.get("url") or "").strip()
-            if (generic or china_wrong) and city:
+            has_detail = is_trusted_hotel_detail_url(saved_url)
+            # Never paint a curated city stub (e.g. Hotel del Coronado) over a
+            # real Trip.com detail link — that is how link≠name mismatches happen.
+            if (generic or china_wrong) and city and not has_detail:
                 fb = _fallback_stay_hotel(city)
                 # Only replace with curated fallback when we still lack a real name
                 if generic and not live_name:
@@ -3519,6 +3564,68 @@ class TravelAgentApp(tk.Tk):
                 if not rec.get("score"):
                     rec["score"] = fb.get("score", "")
                     rec["score_label"] = fb.get("score_label", "")
+            elif has_detail and _is_curated_fallback_name(rec.get("name") or "", city):
+                # Drop curated stub names when the URL already points at a real hotel
+                if live_name and not _is_curated_fallback_name(live_name, city):
+                    rec["name"] = live_name
+                else:
+                    for s in scraped:
+                        su = (s.get("url") or "").strip()
+                        if su and hotelId_match(su, saved_url) and s.get("name"):
+                            if not _is_curated_fallback_name(s["name"], city):
+                                rec["name"] = clean_hotel_display_name(
+                                    s["name"], city
+                                )
+                                break
+            if has_detail:
+                # Drop curated highlight text that belongs to a different stub hotel
+                fb_feats = (_fallback_stay_hotel(city).get("features") or "").strip()
+                if fb_feats and (rec.get("features") or "").strip() == fb_feats:
+                    rec["features"] = ""
+                # Detail URL is authoritative — pull official name/photo/score from
+                # Trip.com detail HTML when the card still shows a stub/mismatch.
+                need_meta = (
+                    generic
+                    or china_wrong
+                    or _is_curated_fallback_name(rec.get("name") or "", city)
+                    or not (rec.get("image_url") or "").startswith("http")
+                    or "loremflickr" in (rec.get("image_url") or "").lower()
+                    or not (rec.get("score") or "").strip()
+                )
+                if need_meta and saved_url:
+                    try:
+                        from travel_agent.browser_tools import (
+                            _http_fetch_hotel_detail_meta,
+                        )
+
+                        meta = _http_fetch_hotel_detail_meta(saved_url)
+                    except Exception:
+                        meta = {}
+                    if meta.get("name") and not _is_curated_fallback_name(
+                        meta["name"], city
+                    ):
+                        rec["name"] = meta["name"]
+                        name = meta["name"]
+                        low = name.lower()
+                        generic = False
+                    for k in (
+                        "image_url",
+                        "score",
+                        "score_label",
+                        "reviews",
+                        "stars",
+                        "location",
+                        "price_label",
+                    ):
+                        if meta.get(k) and not rec.get(k):
+                            rec[k] = meta[k]
+                        elif k == "image_url" and meta.get(k):
+                            cur_img = (rec.get("image_url") or "").lower()
+                            if (
+                                not cur_img.startswith("http")
+                                or "loremflickr" in cur_img
+                            ):
+                                rec["image_url"] = meta[k]
 
             if not (rec.get("image_url") or "").startswith("http"):
                 try:
@@ -3543,6 +3650,7 @@ class TravelAgentApp(tk.Tk):
                 if multi_stay
                 else (live_detail, booking_hotel, raw_url)
             )
+
             for cand in url_candidates:
                 if cand and is_trusted_hotel_detail_url(cand):
                     rec["url"] = (
@@ -3554,6 +3662,24 @@ class TravelAgentApp(tk.Tk):
                         )
                         or cand
                     )
+                    n = (rec.get("name") or "").strip()
+                    if (
+                        not n
+                        or n.lower().startswith(("hotels in ", "recommended hotel"))
+                        or _is_curated_fallback_name(n, city)
+                    ):
+                        if live_name and not _is_curated_fallback_name(live_name, city):
+                            rec["name"] = live_name
+                        else:
+                            for s in scraped:
+                                if hotelId_match(s.get("url") or "", cand) and s.get(
+                                    "name"
+                                ):
+                                    if not _is_curated_fallback_name(s["name"], city):
+                                        rec["name"] = clean_hotel_display_name(
+                                            s["name"], city
+                                        )
+                                        break
                     return rec
             if raw_url and is_hotel_list_url(raw_url) and (
                 "cityid=" in raw_url.lower() or "city=" in raw_url.lower()
@@ -3693,6 +3819,9 @@ class TravelAgentApp(tk.Tk):
 
     def _enrich_car_offer(self, parsed: ParsedItinerary) -> None:
         """Prefer Playwright carhire scrape for the left-column car card."""
+        if not self._trip_context.get("rent_car"):
+            parsed.car_offer = None
+            return
         live: dict[str, str] = {}
         if self.agent:
             live = dict(getattr(self.agent.browser, "last_car_card", None) or {})
@@ -3725,7 +3854,7 @@ class TravelAgentApp(tk.Tk):
                     live[dest] = val
         if self._car_card_useful(live):
             parsed.car_offer = self._car_offer_from_live_card(live)
-        elif self._trip_context.get("rent_car"):
+        else:
             # Keep loading state in the UI — do not paint a fake "Searching…" deal
             parsed.car_offer = None
 
@@ -4108,6 +4237,8 @@ class TravelAgentApp(tk.Tk):
         dest = to_hotel_city(ctx.get("destination", "") or "") or ctx.get("destination", "")
 
         def _bad_name(name: str) -> bool:
+            from travel_agent.browser_tools import _is_curated_fallback_name
+
             low = (name or "").lower()
             return (
                 not name
@@ -4122,16 +4253,23 @@ class TravelAgentApp(tk.Tk):
                 or "day-by-day" in low
                 or "sample hotel" in low
                 or "rates range" in low
+                or "deals & reviews" in low
+                or _is_curated_fallback_name(name, dest)
                 or ("option" in low and "hotel" in low and len(name) > 40)
-                or len(name) > 70
+                or len(name) > 100
             )
 
         if self.agent:
+            from travel_agent.browser_tools import clean_hotel_display_name
+
             links = self.agent.booking_links
             live_name = (
                 getattr(self.agent.browser, "last_hotel_name", "") or ""
             ).strip()
-            cand = live_name or links.get("hotel_name") or ""
+            cand = clean_hotel_display_name(
+                live_name or links.get("hotel_name") or "",
+                offer.city or offer.location or dest or "",
+            )
             if cand and not _bad_name(cand):
                 # Reject China rail-station hotels mapped onto Western cities
                 low = cand.lower()
@@ -4141,9 +4279,17 @@ class TravelAgentApp(tk.Tk):
                 ):
                     offer.name = cand
                 elif hotel_name and not _bad_name(hotel_name):
-                    offer.name = hotel_name
+                    offer.name = clean_hotel_display_name(
+                        hotel_name, offer.city or dest or ""
+                    )
             elif hotel_name and not _bad_name(hotel_name):
-                offer.name = hotel_name
+                offer.name = clean_hotel_display_name(
+                    hotel_name, offer.city or dest or ""
+                )
+            elif offer.name:
+                offer.name = clean_hotel_display_name(
+                    offer.name, offer.city or dest or ""
+                ) or offer.name
             # Force detail booking URL when Playwright found one
             live_detail = (
                 getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
@@ -4160,6 +4306,43 @@ class TravelAgentApp(tk.Tk):
                 )
             elif links.get("hotel") and is_trusted_hotel_detail_url(links["hotel"]):
                 offer.url = links["hotel"]
+            # If the booking URL is a real detail page but the name is still wrong,
+            # read the official Trip.com title / cover from the detail HTML.
+            detail_for_meta = ""
+            if offer.url and is_trusted_hotel_detail_url(offer.url):
+                detail_for_meta = offer.url
+            elif live_detail and is_trusted_hotel_detail_url(live_detail):
+                detail_for_meta = live_detail
+            if detail_for_meta and (
+                _bad_name(offer.name)
+                or not (offer.image_url or "").startswith("http")
+                or not (offer.score or "").strip()
+            ):
+                try:
+                    from travel_agent.browser_tools import _http_fetch_hotel_detail_meta
+
+                    meta = _http_fetch_hotel_detail_meta(detail_for_meta)
+                except Exception:
+                    meta = {}
+                if meta.get("name") and not _bad_name(meta["name"]):
+                    offer.name = meta["name"]
+                if meta.get("image_url") and (
+                    not (offer.image_url or "").startswith("http")
+                    or "loremflickr" in (offer.image_url or "").lower()
+                ):
+                    offer.image_url = meta["image_url"]
+                if meta.get("score") and not offer.score:
+                    offer.score = meta["score"]
+                    offer.score_label = meta.get("score_label") or offer.score_label
+                if meta.get("reviews") and not offer.reviews:
+                    offer.reviews = meta["reviews"]
+                if meta.get("location") and not offer.location:
+                    offer.location = meta["location"]
+                if meta.get("stars") and not offer.stars:
+                    try:
+                        offer.stars = int(meta["stars"])
+                    except ValueError:
+                        pass
             if links.get("hotel_price"):
                 offer.price_label = links["hotel_price"]
             if links.get("hotel_total"):

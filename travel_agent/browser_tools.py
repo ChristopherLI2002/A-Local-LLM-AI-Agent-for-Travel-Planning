@@ -7,6 +7,7 @@ import re
 from datetime import date, timedelta
 from typing import Any
 from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
@@ -72,6 +73,116 @@ def _prefer_hotel_photo_url(src: str) -> str:
     return out
 
 
+def _http_fetch_hotel_detail_meta(detail_url: str) -> dict[str, str]:
+    """Parse name / score / cover from Trip.com detail HTML (no Playwright).
+
+    Playwright navigations to `/hotels/detail` redirect to sign-in, but a normal
+    HTTP GET still returns the SSR `hotelDetailResponse` payload used by the
+    public detail page (e.g. THE KNOT TOKYO Shinjuku).
+    """
+    out: dict[str, str] = {}
+    url = (detail_url or "").strip()
+    if not url or "trip.com" not in url.lower() or "hotelid=" not in url.lower():
+        return out
+    try:
+        req = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-HK,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+        with urlopen(req, timeout=25) as resp:
+            html = resp.read().decode("utf-8", "replace")
+    except Exception:
+        return out
+    if not html or len(html) < 2000:
+        return out
+    flat = html.replace('\\"', '"')
+
+    name = ""
+    m = re.search(
+        r'"nameInfo"\s*:\s*\{[^}]{0,400}?"name"\s*:\s*"([^"]{3,120})"',
+        flat,
+    )
+    if m:
+        name = m.group(1)
+    if not name:
+        m = re.search(r'"hotelNames"\s*:\s*\[\s*"([^"]{3,120})"', flat)
+        if m:
+            name = m.group(1)
+    if not name:
+        m = re.search(
+            r'"seoTdk"\s*:\s*\{[^}]{0,200}?"title"\s*:\s*"([^"]{3,160})"',
+            flat,
+        )
+        if m:
+            name = m.group(1)
+    if name:
+        cleaned = clean_hotel_display_name(name)
+        if cleaned and 3 < len(cleaned) < 120:
+            out["name"] = cleaned
+
+    m = re.search(
+        r'"hotelComment"\s*:\s*\{\s*"comment"\s*:\s*\{([^}]{0,500})\}',
+        flat,
+    )
+    if m:
+        block = m.group(1)
+        sm = re.search(r'"score"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?', block)
+        if sm:
+            out["score"] = sm.group(1)
+            try:
+                val = float(out["score"])
+                desc = re.search(r'"scoreDescription"\s*:\s*"([^"]+)"', block)
+                out["score_label"] = (
+                    (desc.group(1).strip() if desc else "")
+                    or (
+                        "Great"
+                        if val >= 9
+                        else "Very Good"
+                        if val >= 8
+                        else "Good"
+                    )
+                )
+            except ValueError:
+                pass
+        rm = re.search(r'"totalComment"\s*:\s*(\d+)', block)
+        if rm:
+            out["reviews"] = f"{int(rm.group(1)):,} reviews"
+
+    m = re.search(r'"starInfo"\s*:\s*\{[^}]{0,120}?"level"\s*:\s*(\d+)', flat)
+    if m and 1 <= int(m.group(1)) <= 5:
+        out["stars"] = m.group(1)
+
+    m = re.search(
+        r'"imgUrl"\s*:\s*"(https://[^"]*(?:tripcdn|ak-d\.tripcdn)[^"]+)"',
+        flat,
+    )
+    if m:
+        out["image_url"] = _prefer_hotel_photo_url(m.group(1))
+
+    loc = ""
+    m = re.search(r'"cityName"\s*:\s*"([^"]{2,60})"', flat)
+    if m:
+        loc = m.group(1)
+    m = re.search(
+        r'"(?:fullAddress|addressDetail|address)"\s*:\s*"([^"]{5,120})"',
+        flat,
+    )
+    if m:
+        loc = m.group(1)
+    if loc:
+        out["location"] = loc[:80]
+
+    return out
+
+
 _CN_HOTEL_MARKERS = (
     "lishui",
     "leshan",
@@ -129,6 +240,42 @@ def _hotel_name_plausible_for_city(name: str, city: str) -> bool:
     if re.search(r"[\u4e00-\u9fff]", name or "") and western:
         return False
     return True
+
+
+def clean_hotel_display_name(name: str, city: str = "") -> str:
+    """Keep the Trip.com property title; only strip SEO page junk.
+
+    Official page heading (keep as-is):
+      "InterContinental Hotels SAN DIEGO by IHG"
+    og:title / browser tab often appends junk (strip this only):
+      "InterContinental Hotels SAN DIEGO by IHG: 2026 Deals & Reviews"
+    """
+    del city  # kept for call-site compatibility; do not rewrite the official name
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    # First line only (some scrapes include address under the title)
+    raw = raw.split("\n", 1)[0].strip()
+    # Drop pipe/em-dash site suffixes: "Name | Trip.com"
+    raw = re.split(r"\s*[|\u2013\u2014]\s*", raw)[0].strip()
+    # Drop ": 2026 Deals & Reviews" / ": Deals & Reviews" SEO tails
+    raw = re.sub(
+        r"\s*:\s*(?:\d{4}\s+)?Deals?\s*&?\s*Reviews?.*$",
+        "",
+        raw,
+        flags=re.I,
+    )
+    raw = re.sub(
+        r"\s+[-–—]\s*(?:Trip\.com|Booking\.com|Hotels\.com|Expedia).*$",
+        "",
+        raw,
+        flags=re.I,
+    )
+    raw = re.sub(r"\s*\(\d{4}\)\s*$", "", raw)
+    raw = re.sub(r"\s{2,}", " ", raw).strip(" :-–—")
+    if len(raw) > 100:
+        raw = raw[:97].rstrip(" -") + "…"
+    return raw
 
 
 def _city_hotel_fallback_image(city: str, *, hotel_name: str = "") -> str:
@@ -226,6 +373,21 @@ def _fallback_stay_hotel(city: str) -> dict[str, str]:
         "score": "8.4",
         "score_label": "Very Good",
     }
+
+
+def _is_curated_fallback_name(name: str, city: str = "") -> bool:
+    """True when ``name`` is a hard-coded city stub, not a live Trip.com title."""
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if city:
+        fb = _CITY_STAY_FALLBACKS.get(city.strip().lower()) or {}
+        if fb.get("name") and n == fb["name"].strip().lower():
+            return True
+    for fb in _CITY_STAY_FALLBACKS.values():
+        if fb.get("name") and n == fb["name"].strip().lower():
+            return True
+    return False
 
 
 def _default_depart(days_ahead: int = 21) -> str:
@@ -1569,31 +1731,39 @@ class TripBrowser:
                         hotel_card[k] = row[k]
                 break
 
-        # Always open the selected hotel detail page for authoritative fields
+        # Authoritative fields: list card + HTTP detail HTML (Playwright cannot
+        # open /hotels/detail — it redirects to sign-in).
         if self.last_hotel_detail_url:
             meta = self._scrape_hotel_detail_meta(self.last_hotel_detail_url)
             for k, v in meta.items():
                 if v:
                     hotel_card[k] = v
-            if meta.get("name") and _hotel_name_plausible_for_city(
-                meta["name"], city_name
-            ):
-                self.last_hotel_name = meta["name"]
-                hotel_card["name"] = meta["name"]
+            # Detail-page title wins over list/LLM labels (link and name must match)
+            if meta.get("name"):
+                cleaned = clean_hotel_display_name(meta["name"], city_name)
+                if cleaned and not cleaned.lower().startswith(
+                    ("hotels in ", "recommended hotel")
+                ):
+                    self.last_hotel_name = cleaned
+                    hotel_card["name"] = cleaned
             elif hotel_card.get("name") and _hotel_name_plausible_for_city(
                 hotel_card["name"], city_name
             ):
-                if not hotel_card["name"].lower().startswith(
+                cleaned = clean_hotel_display_name(hotel_card["name"], city_name)
+                hotel_card["name"] = cleaned
+                if not cleaned.lower().startswith(
                     ("hotels in ", "recommended hotel")
                 ):
-                    self.last_hotel_name = hotel_card["name"]
+                    self.last_hotel_name = cleaned
         elif hotel_card.get("name") and _hotel_name_plausible_for_city(
             hotel_card["name"], city_name
         ):
-            if not hotel_card["name"].lower().startswith(
+            cleaned = clean_hotel_display_name(hotel_card["name"], city_name)
+            hotel_card["name"] = cleaned
+            if not cleaned.lower().startswith(
                 ("hotels in ", "recommended hotel")
             ):
-                self.last_hotel_name = hotel_card["name"]
+                self.last_hotel_name = cleaned
 
         if not hotel_card.get("name") or hotel_card["name"].lower().startswith(
             ("hotels in ", "recommended hotel")
@@ -1606,6 +1776,15 @@ class TripBrowser:
             for k, v in list_card.items():
                 if v and not hotel_card.get(k):
                     hotel_card[k] = v
+
+        if hotel_card.get("name"):
+            hotel_card["name"] = clean_hotel_display_name(
+                hotel_card["name"], city_name
+            )
+        if self.last_hotel_name:
+            self.last_hotel_name = clean_hotel_display_name(
+                self.last_hotel_name, city_name
+            )
 
         rec_name = self.last_hotel_name or hotel_card.get("name") or ""
         candidates_block = ""
@@ -1677,108 +1856,353 @@ class TripBrowser:
             limit=9000,
         )
 
+    def _scrape_hotel_list_card_by_id(self, hotel_id: str) -> dict[str, str]:
+        """Read official name / score / price / cover from a Trip.com list card.
+
+        Trip.com hotel *detail* URLs redirect to sign-in under Playwright, so the
+        authoritative fields for the booking card come from `.list-item` on the
+        hotel list (same property as the detail link's hotelId).
+        """
+        page = self._require_page()
+        hid = re.sub(r"\D", "", str(hotel_id or ""))
+        out: dict[str, str] = {}
+        if not hid:
+            return out
+        try:
+            raw = page.evaluate(
+                """(hid) => {
+                  const links = Array.from(
+                    document.querySelectorAll('a[href*="hotelId="], a[href*="hotelid="]')
+                  );
+                  const hit = links.find((a) => {
+                    const m = (a.getAttribute('href') || a.href || '').match(
+                      /hotelId=(\\d+)/i
+                    );
+                    return m && m[1] === hid;
+                  });
+                  if (!hit) return null;
+                  let root =
+                    hit.closest('.list-item') ||
+                    hit.closest('[class*="list-item"]') ||
+                    null;
+                  if (!root) {
+                    let el = hit.parentElement;
+                    for (let i = 0; i < 12 && el; i++) {
+                      if (
+                        el.querySelector &&
+                        el.querySelector('.hotel-title, a.hotelName, .hotelName')
+                      ) {
+                        root = el;
+                        break;
+                      }
+                      el = el.parentElement;
+                    }
+                  }
+                  root = root || hit.parentElement || hit;
+                  const pickText = (sel) => {
+                    const n = root.querySelector(sel);
+                    return n ? (n.innerText || '').trim().split('\\n')[0].trim() : '';
+                  };
+                  const name =
+                    pickText('.hotel-title') ||
+                    pickText('a.hotelName') ||
+                    pickText('.hotelName') ||
+                    pickText('[class*="hotelName"]') ||
+                    '';
+                  const score =
+                    pickText('.comment-score .score') ||
+                    pickText('.score') ||
+                    pickText('.comment-score') ||
+                    '';
+                  const scoreLabel = pickText('.comment-desc') || '';
+                  const reviews = pickText('.comment-num') || '';
+                  const sale =
+                    pickText('.sale.sale-blue') ||
+                    pickText('.sale-blue') ||
+                    pickText('.sale') ||
+                    '';
+                  const total = pickText('.price-highlight') || '';
+                  const loc =
+                    pickText('.hotel-position') ||
+                    pickText('[class*="position"]') ||
+                    pickText('[class*="address"]') ||
+                    '';
+                  let image = '';
+                  const imgs = Array.from(
+                    root.querySelectorAll(
+                      "img.m-lazyImg__img, img[alt*='hotel overview' i], img"
+                    )
+                  );
+                  for (const img of imgs) {
+                    const src =
+                      img.currentSrc ||
+                      img.src ||
+                      img.getAttribute('data-src') ||
+                      '';
+                    const alt = (img.alt || '').toLowerCase();
+                    if (!src || !src.startsWith('http')) continue;
+                    const low = src.toLowerCase();
+                    if (!low.includes('tripcdn') && !low.includes('ak-d.tripcdn'))
+                      continue;
+                    if (
+                      ['logo', 'icon', 'avatar', 'qrcode', 'badge'].some((x) =>
+                        low.includes(x)
+                      )
+                    )
+                      continue;
+                    if (alt.includes('hotel overview') || alt.includes('overview')) {
+                      image = src;
+                      break;
+                    }
+                    if (!image) image = src;
+                  }
+                  const href = hit.href || hit.getAttribute('href') || '';
+                  return {
+                    name,
+                    score: (score.match(/\\d+(?:\\.\\d+)?/) || [score])[0],
+                    score_label: scoreLabel,
+                    reviews,
+                    price_label: sale,
+                    total_label: total,
+                    location: loc.replace(/\\s+/g, ' ').slice(0, 80),
+                    image_url: image,
+                    href,
+                  };
+                }""",
+                hid,
+            )
+        except Exception:
+            raw = None
+        if not isinstance(raw, dict):
+            return out
+        name = clean_hotel_display_name(str(raw.get("name") or ""))
+        if name and 3 < len(name) < 120:
+            out["name"] = name
+        score = str(raw.get("score") or "").strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", score):
+            out["score"] = score
+            try:
+                val = float(score)
+                out["score_label"] = (
+                    str(raw.get("score_label") or "").strip()
+                    or (
+                        "Great"
+                        if val >= 9
+                        else "Very Good"
+                        if val >= 8
+                        else "Good"
+                    )
+                )
+            except ValueError:
+                out["score_label"] = str(raw.get("score_label") or "Guest rating")
+        elif str(raw.get("score_label") or "").strip():
+            out["score_label"] = str(raw.get("score_label")).strip()
+        reviews = str(raw.get("reviews") or "").strip()
+        if reviews:
+            if not re.search(r"review", reviews, re.I):
+                reviews = f"{reviews} reviews"
+            out["reviews"] = reviews
+        price = str(raw.get("price_label") or "").strip()
+        if price:
+            price = re.sub(r"\s+", "", price)
+            if not price.upper().startswith("HK"):
+                price = f"HK${price.lstrip('$')}"
+            out["price_label"] = price
+        total = str(raw.get("total_label") or "").strip()
+        if total:
+            total = re.sub(r"\s+", " ", total)
+            if "HK" not in total.upper():
+                total = f"HK${total.lstrip('$')}"
+            out["total_label"] = total
+        loc = str(raw.get("location") or "").strip()
+        if loc and len(loc) > 2:
+            loc = re.sub(r"(?i)\s*(show on )?map\s*$", "", loc).strip()
+            loc = re.sub(r"(?i)^(.+?)(near\s+.+)$", r"\1 · \2", loc, count=1)
+            out["location"] = re.sub(r"\s{2,}", " ", loc)[:80]
+        img = str(raw.get("image_url") or "").strip()
+        if img.startswith("http"):
+            out["image_url"] = _prefer_hotel_photo_url(img)
+        return out
+
+    def _ensure_hotel_list_for_card_scrape(self) -> bool:
+        """Stay on /hotels/list when possible so list-card selectors work."""
+        page = self._require_page()
+        try:
+            cur = (page.url or "").lower()
+        except Exception:
+            cur = ""
+        if "/hotels/list" in cur and "signin" not in cur:
+            return True
+        list_url = (getattr(self, "last_hotel_list_url", "") or "").strip()
+        if not list_url or "trip.com" not in list_url.lower():
+            return False
+        try:
+            self._safe_goto(list_url)
+            page.wait_for_timeout(3500)
+            self._dismiss_popups()
+            return "/hotels/list" in ((page.url or "").lower())
+        except Exception:
+            return False
+
     def _scrape_hotel_detail_meta(self, detail_url: str) -> dict[str, str]:
-        """Open a hotel detail page and read name / score / cover image."""
+        """Resolve hotel card fields for a Trip.com hotel detail URL.
+
+        Playwright cannot open `/hotels/detail` (redirects to sign-in). Strategy:
+        1. Scrape the matching `.list-item` on the hotel list (name/price/photo)
+        2. HTTP-fetch the detail HTML SSR payload for official h1-equivalent
+           name, score, reviews, and cover image (works without login)
+        3. Only then try an in-browser detail page (logged-in / non-headless)
+        """
         page = self._require_page()
         out: dict[str, str] = {}
         if not detail_url or "trip.com" not in detail_url.lower():
             return out
-        try:
-            self._safe_goto(detail_url)
-            page.wait_for_timeout(3200)
-            self._dismiss_popups()
-        except Exception:
+
+        from travel_agent.trip_urls import (
+            _hotel_id_from_url,
+            is_trusted_hotel_detail_url,
+        )
+
+        if is_trusted_hotel_detail_url(detail_url):
+            self.last_hotel_detail_url = ensure_locale_curr(
+                normalize_trip_url(detail_url)
+            )
+
+        hotel_id = _hotel_id_from_url(detail_url)
+        if hotel_id:
+            self._ensure_hotel_list_for_card_scrape()
+            out = self._scrape_hotel_list_card_by_id(hotel_id)
+
+        # Official detail-page fields (name/score/image) via HTTP — matches the
+        # public page the booking URL opens in a normal browser.
+        http = _http_fetch_hotel_detail_meta(detail_url)
+        for k, v in http.items():
+            if not v:
+                continue
+            if k == "name" or not out.get(k):
+                out[k] = v
+
+        if out.get("name") and (out.get("image_url") or out.get("price_label")):
             return out
 
-        # Confirm we landed on a detail/book page with hotelId
+        # Rare path: already on a real detail page (non-headless / logged-in)
         try:
-            cur = page.url or ""
+            cur = (page.url or "").lower()
         except Exception:
-            cur = detail_url
-        from travel_agent.trip_urls import is_trusted_hotel_detail_url
+            cur = ""
+        on_detail = "/hotels/detail" in cur or "/hotels/v2/detail" in cur
+        on_signin = "/account/signin" in cur or "/signin" in cur
+        if on_signin or "/hotels/list" in cur or not on_detail:
+            return out
 
-        if is_trusted_hotel_detail_url(cur):
-            # Prefer the live navigated URL (Trip.com may rewrite path)
-            self.last_hotel_detail_url = ensure_locale_curr(normalize_trip_url(cur))
-        elif is_trusted_hotel_detail_url(detail_url):
-            self.last_hotel_detail_url = ensure_locale_curr(normalize_trip_url(detail_url))
+        if is_trusted_hotel_detail_url(page.url or ""):
+            self.last_hotel_detail_url = ensure_locale_curr(
+                normalize_trip_url(page.url or detail_url)
+            )
 
-        # Name: og:title, then h1, then document title
         name = ""
-        try:
-            og = page.locator("meta[property='og:title']")
-            if og.count():
-                name = (og.first.get_attribute("content") or "").strip()
-        except Exception:
-            name = ""
-        if not name:
+        for sel in (
+            "h1",
+            ".hotel-title",
+            "a.hotelName",
+            "[class*='hotelName' i]",
+            "[class*='HotelName' i]",
+            "[class*='hotel-name' i]",
+        ):
             try:
-                h1 = page.locator("h1").first
-                if h1.count():
-                    name = (h1.inner_text(timeout=1500) or "").strip()
+                loc = page.locator(sel).first
+                if loc.count():
+                    cand = (loc.inner_text(timeout=1500) or "").strip()
+                    cand = cand.split("\n", 1)[0].strip()
+                    if cand and 3 < len(cand) < 120 and "http" not in cand.lower():
+                        name = cand
+                        break
             except Exception:
-                pass
+                continue
         if not name:
             try:
-                name = (page.title() or "").strip()
+                og = page.locator("meta[property='og:title']")
+                if og.count():
+                    name = (og.first.get_attribute("content") or "").strip()
             except Exception:
                 name = ""
-        # Clean Trip.com suffixes: "Foo Hotel | Trip.com" / "Foo - Miami"
         if name:
-            name = re.split(r"\s*[|\u2013\u2014]\s*", name)[0].strip()
-            name = re.sub(r"\s+[-–—]\s+(Trip\.com|Hotels?).*$", "", name, flags=re.I)
-            name = re.sub(r"\s+", " ", name).strip()
-            if (
-                name
-                and 3 < len(name) < 90
-                and "http" not in name.lower()
-                and not name.lower().startswith(("hotels in ", "recommended hotel"))
-            ):
+            name = clean_hotel_display_name(name)
+            if name and 3 < len(name) < 120 and not out.get("name"):
                 out["name"] = name
 
-        try:
-            og_img = page.locator("meta[property='og:image']")
-            if og_img.count():
-                content = (og_img.first.get_attribute("content") or "").strip()
-                if content.startswith("http"):
-                    out["image_url"] = _prefer_hotel_photo_url(content)
-        except Exception:
-            pass
-
-        try:
-            body = page.inner_text("body")[:6000]
-        except Exception:
-            body = ""
-        score_m = re.search(r"\b([6-9](?:\.\d)?|10(?:\.0)?)\s*/?\s*10?\b", body)
-        if not score_m:
-            score_m = re.search(r"\b([89](?:\.\d)?|10(?:\.0)?)\b", body)
-        if score_m:
-            out["score"] = score_m.group(1)
+        if not out.get("image_url"):
             try:
-                val = float(out["score"])
-                out["score_label"] = (
-                    "Great" if val >= 9 else "Very Good" if val >= 8 else "Good"
-                )
-            except ValueError:
-                out["score_label"] = "Guest rating"
-        stars_m = re.search(r"(?i)([1-5])\s*[- ]?star", body)
-        if stars_m:
-            out["stars"] = stars_m.group(1)
-        rev_m = re.search(r"(?i)(\d[\d,]*)\s*review", body)
-        if rev_m:
-            out["reviews"] = f"{rev_m.group(1)} reviews"
-        price_m = re.search(
-            r"(?i)(?:HK\s*\$|HKD)\s*([0-9,]+(?:\.\d+)?)\s*(?:/|/night|per night|nightly)?",
-            body,
-        )
-        if price_m:
-            out["price_label"] = f"HK${price_m.group(1)}"
-        loc_m = re.search(
-            r"(?i)(?:Near|Located in|Area)[:\s]+([A-Za-z0-9 ,.\-]{3,60})",
-            body,
-        )
-        if loc_m:
-            out["location"] = loc_m.group(1).strip()[:80]
+                og_img = page.locator("meta[property='og:image']")
+                if og_img.count():
+                    content = (og_img.first.get_attribute("content") or "").strip()
+                    if content.startswith("http"):
+                        out["image_url"] = _prefer_hotel_photo_url(content)
+            except Exception:
+                pass
+        if not out.get("image_url"):
+            try:
+                overview = page.locator(
+                    "img[alt*='hotel overview' i], img.m-lazyImg__img"
+                ).first
+                if overview.count():
+                    src = (
+                        overview.get_attribute("src")
+                        or overview.evaluate("e => e.currentSrc || ''")
+                        or ""
+                    ).strip()
+                    if src.startswith("http"):
+                        out["image_url"] = _prefer_hotel_photo_url(src)
+            except Exception:
+                pass
+
+        if not out.get("price_label"):
+            try:
+                sale = page.locator(".sale.sale-blue, .sale-blue").first
+                if sale.count():
+                    pt = (sale.inner_text(timeout=800) or "").strip()
+                    if pt:
+                        out["price_label"] = re.sub(r"\s+", "", pt)
+            except Exception:
+                pass
+        if not out.get("total_label"):
+            try:
+                tot = page.locator(".price-highlight").first
+                if tot.count():
+                    tt = (tot.inner_text(timeout=800) or "").strip()
+                    if tt:
+                        out["total_label"] = re.sub(r"\s+", " ", tt)
+            except Exception:
+                pass
+        if not out.get("score"):
+            try:
+                sc = page.locator(".comment-score .score, .score").first
+                if sc.count():
+                    st = (sc.inner_text(timeout=800) or "").strip()
+                    m = re.search(r"\d+(?:\.\d+)?", st)
+                    if m:
+                        out["score"] = m.group(0)
+                        val = float(out["score"])
+                        out["score_label"] = (
+                            "Great"
+                            if val >= 9
+                            else "Very Good"
+                            if val >= 8
+                            else "Good"
+                        )
+            except Exception:
+                pass
+        if not out.get("reviews"):
+            try:
+                rv = page.locator(".comment-num").first
+                if rv.count():
+                    rt = (rv.inner_text(timeout=800) or "").strip()
+                    if rt:
+                        out["reviews"] = (
+                            rt if "review" in rt.lower() else f"{rt} reviews"
+                        )
+            except Exception:
+                pass
 
         return out
 
@@ -2986,7 +3410,11 @@ class TripBrowser:
             if nights_between(depart_date, return_date) < nights:
                 return_date = ctx_out or _default_return_from(depart_date, nights)
 
-        need_car = _wants_rental_car(rent_car, interests)
+        # Prefer explicit rent_car / GUI checkbox; do not infer from travel style
+        if rent_car is None or (isinstance(rent_car, str) and not str(rent_car).strip()):
+            need_car = bool(getattr(self.selection_context, "rent_car", False))
+        else:
+            need_car = _as_bool(rent_car, default=False)
         want_flights = _as_bool(include_flights, default=True)
         want_trains = _as_bool(include_trains, default=True)
         want_transfers = _as_bool(include_transfers, default=True)
@@ -4872,7 +5300,7 @@ Transport modes: {", ".join(modes)}
         if live_name and not live_name.lower().startswith(
             ("hotels in ", "recommended hotel")
         ) and _hotel_name_plausible_for_city(live_name, stay_city):
-            stay_rec["name"] = live_name
+            stay_rec["name"] = clean_hotel_display_name(live_name, stay_city)
 
         # Card fields from the detail page we already opened (if still there)
         card = self._scrape_top_hotel_card(
@@ -4935,77 +5363,72 @@ Transport modes: {", ".join(modes)}
         return stay_rec
 
     def scrape_hotel_image_url(self, detail_url: str = "") -> str:
-        """Return the main hotel photo URL from a Trip.com hotel detail page."""
+        """Return the main hotel photo URL for a Trip.com hotel.
+
+        Prefer the list-card overview image for the hotelId (detail pages redirect
+        to sign-in under automation). Fall back to HTTP detail HTML, then on-page.
+        """
         page = self._require_page()
         if detail_url and "trip.com" in detail_url.lower():
-            try:
-                self._safe_goto(detail_url)
-                page.wait_for_timeout(3500)
-                self._dismiss_popups()
-                # If Trip.com bounced to booknew, try to recover overview meta from there
-            except Exception:
-                return ""
+            from travel_agent.trip_urls import _hotel_id_from_url
 
-        # Prefer Open Graph cover image
+            hid = _hotel_id_from_url(detail_url)
+            if hid:
+                self._ensure_hotel_list_for_card_scrape()
+                meta = self._scrape_hotel_list_card_by_id(hid)
+                img = (meta.get("image_url") or "").strip()
+                if img.startswith("http"):
+                    return img
+            http = _http_fetch_hotel_detail_meta(detail_url)
+            img = (http.get("image_url") or "").strip()
+            if img.startswith("http"):
+                return img
+
+        # Prefer Open Graph cover image (only when already on a usable page)
         try:
-            og = page.locator("meta[property='og:image']")
-            if og.count():
-                content = (og.first.get_attribute("content") or "").strip()
-                if content.startswith("http") and "tripcdn.com" in content.lower():
-                    return _prefer_hotel_photo_url(content)
+            cur = (page.url or "").lower()
         except Exception:
-            pass
-
-        # Prefer dedicated overview / gallery hero image
-        for sel in (
-            "img[alt*='hotel overview' i]",
-            "img[alt*='overview picture' i]",
-            "img[alt*='Hotel' i]",
-        ):
+            cur = ""
+        if "/account/signin" not in cur:
             try:
-                loc = page.locator(sel)
-                count = min(loc.count(), 8)
+                og = page.locator("meta[property='og:image']")
+                if og.count():
+                    content = (og.first.get_attribute("content") or "").strip()
+                    if content.startswith("http") and "tripcdn.com" in content.lower():
+                        return _prefer_hotel_photo_url(content)
             except Exception:
-                continue
-            for i in range(count):
+                pass
+
+            for sel in (
+                "img[alt*='hotel overview' i]",
+                "img[alt*='overview picture' i]",
+                "img.m-lazyImg__img",
+            ):
                 try:
-                    src = (
-                        loc.nth(i).get_attribute("src")
-                        or loc.nth(i).evaluate("e => e.currentSrc || ''")
-                        or ""
-                    ).strip()
+                    loc = page.locator(sel)
+                    count = min(loc.count(), 8)
                 except Exception:
                     continue
-                if src.startswith("http") and "tripcdn.com" in src.lower():
-                    if any(x in src.lower() for x in ("logo", "icon", "avatar", "qrcode")):
+                for i in range(count):
+                    try:
+                        src = (
+                            loc.nth(i).get_attribute("src")
+                            or loc.nth(i).evaluate("e => e.currentSrc || ''")
+                            or ""
+                        ).strip()
+                    except Exception:
                         continue
-                    return _prefer_hotel_photo_url(src)
+                    if src.startswith("http") and (
+                        "tripcdn.com" in src.lower() or "ak-d.tripcdn" in src.lower()
+                    ):
+                        if any(
+                            x in src.lower()
+                            for x in ("logo", "icon", "avatar", "qrcode")
+                        ):
+                            continue
+                        return _prefer_hotel_photo_url(src)
 
-        # Largest on-page TripCDN photo
-        try:
-            imgs = page.evaluate(
-                """() => Array.from(document.querySelectorAll('img')).map(e => ({
-                  src: e.currentSrc || e.src || '',
-                  w: e.naturalWidth || e.width || 0,
-                  h: e.naturalHeight || e.height || 0
-                })).filter(x => x.src && x.src.startsWith('http'))"""
-            )
-        except Exception:
-            imgs = []
-        best = ""
-        best_area = 0
-        for im in imgs or []:
-            src = str(im.get("src") or "")
-            low = src.lower()
-            if "tripcdn.com" not in low and "ak-d.tripcdn" not in low:
-                continue
-            if any(x in low for x in ("logo", "icon", "avatar", "qrcode", "badge")):
-                continue
-            area = int(im.get("w") or 0) * int(im.get("h") or 0)
-            if area > best_area:
-                best_area = area
-                best = _prefer_hotel_photo_url(src)
-        return best if best_area >= 40_000 else ""
+        return ""
 
     def _scrape_top_hotel_card(
         self,
@@ -5016,11 +5439,6 @@ Transport modes: {", ".join(modes)}
     ) -> dict[str, str]:
         """Best-effort parse of the first hotel listing on the current page."""
         page = self._require_page()
-        try:
-            body = page.inner_text("body")
-        except Exception:
-            body = ""
-        blob = body[:10000]
         card: dict[str, str] = {
             "name": fallback_name or "",
             "stars": "",
@@ -5029,104 +5447,144 @@ Transport modes: {", ".join(modes)}
             "reviews": "",
             "location": city or "",
             "price_label": "",
+            "image_url": "",
         }
 
-        # Prefer anchor text from detail links
-        if not card["name"] or "sample" in card["name"].lower():
+        # Prefer structured `.list-item` fields (name/score/price/photo)
+        first_hid = ""
+        try:
+            first_hid = page.evaluate(
+                """() => {
+                  const a = document.querySelector(
+                    'a[href*="hotelId="], a[href*="hotelid="]'
+                  );
+                  if (!a) return '';
+                  const m = (a.getAttribute('href') || a.href || '').match(
+                    /hotelId=(\\d+)/i
+                  );
+                  return m ? m[1] : '';
+                }"""
+            ) or ""
+        except Exception:
+            first_hid = ""
+        if first_hid:
+            meta = self._scrape_hotel_list_card_by_id(str(first_hid))
+            for k, v in meta.items():
+                if v:
+                    card[k] = v
+
+        if not card.get("name") or "sample" in card["name"].lower():
             for _url, label in self._extract_hotel_detail_options(limit=8):
                 if (
                     label
                     and _hotel_name_plausible_for_city(label, city)
-                    and 3 < len(label) < 80
+                    and 3 < len(label) < 100
                 ):
                     card["name"] = label
                     break
 
-        score_m = re.search(r"\b([89](?:\.\d)?|10(?:\.0)?)\b", blob)
-        if score_m:
-            card["score"] = score_m.group(1)
-            try:
-                val = float(card["score"])
-                card["score_label"] = (
-                    "Great" if val >= 9 else "Very Good" if val >= 8 else "Good"
-                )
-            except ValueError:
-                card["score_label"] = "Guest rating"
-
-        stars_m = re.search(r"(?i)([1-5])\s*[- ]?star", blob)
-        if stars_m:
-            card["stars"] = stars_m.group(1)
-        else:
-            glyphs = blob.count("★") + blob.count("⭐")
-            if 1 <= glyphs <= 5:
-                card["stars"] = str(glyphs)
-
-        rev_m = re.search(r"(?i)(\d[\d,]*)\s*reviews?", blob)
-        if rev_m:
-            card["reviews"] = f"{rev_m.group(1)} reviews"
-
-        if lowest is not None:
+        if not card.get("price_label") and lowest is not None:
             card["price_label"] = f"HK${lowest:,.0f}"
-        else:
-            prices = [p for p in parse_prices(blob) if p >= 200]
-            if prices:
-                card["price_label"] = f"HK${min(prices):,.0f}"
 
-        # Cover photo from the listing card (avoid leaving the list page)
-        card["image_url"] = ""
-        try:
-            overview = page.locator("img[alt*='hotel overview' i]")
-            if overview.count():
-                src = (
-                    overview.first.get_attribute("src")
-                    or overview.first.evaluate("e => e.currentSrc || ''")
-                    or ""
-                ).strip()
-                if src.startswith("http") and (
-                    "tripcdn.com" in src.lower() or "ak-d.tripcdn" in src.lower()
-                ):
-                    card["image_url"] = _prefer_hotel_photo_url(src)
-        except Exception:
-            pass
         if not card.get("image_url"):
-            try:
-                imgs = page.evaluate(
-                    """() => Array.from(document.querySelectorAll('img')).map(e => ({
-                      src: e.currentSrc || e.src || '',
-                      w: e.naturalWidth || e.width || 0,
-                      h: e.naturalHeight || e.height || 0,
-                      alt: e.alt || ''
-                    })).filter(x => x.src && x.src.startsWith('http'))"""
-                )
-            except Exception:
-                imgs = []
-            best = ""
-            best_area = 0
-            for im in imgs or []:
-                src = str(im.get("src") or "")
-                low = src.lower()
-                if "tripcdn.com" not in low and "ak-d.tripcdn" not in low:
-                    continue
-                if any(x in low for x in ("logo", "icon", "avatar", "qrcode", "badge", "airline")):
-                    continue
-                area = int(im.get("w") or 0) * int(im.get("h") or 0)
-                # Prefer landscape hotel thumbs
-                if area > best_area and area >= 8_000:
-                    best_area = area
-                    best = _prefer_hotel_photo_url(src)
-            if best:
-                card["image_url"] = best
-        if not card.get("image_url"):
-            card["image_url"] = _city_hotel_fallback_image(city)
+            card["image_url"] = _city_hotel_fallback_image(
+                city, hotel_name=card.get("name") or ""
+            )
 
+        if card.get("name"):
+            card["name"] = clean_hotel_display_name(card["name"], city)
         if not card["name"] or not _hotel_name_plausible_for_city(card["name"], city):
             card["name"] = f"Hotels in {city}" if city else "Recommended hotel"
         return card
 
     def _extract_hotel_detail_options(self, limit: int = 8) -> list[tuple[str, str]]:
-        """Return (url, hotel_name) pairs from hotel list page anchors."""
+        """Return (url, hotel_name) pairs from Trip.com hotel list cards."""
         page = self._require_page()
         found: list[tuple[str, str]] = []
+        seen_ids: set[str] = set()
+        try:
+            rows = page.evaluate(
+                """(limit) => {
+                  const out = [];
+                  const seen = new Set();
+                  const items = Array.from(
+                    document.querySelectorAll('.list-item, [class*="list-item"]')
+                  );
+                  const pushFrom = (root, hrefHint) => {
+                    let href = hrefHint || '';
+                    if (!href) {
+                      const a = root.querySelector(
+                        'a[href*="hotelId="], a[href*="hotelid="]'
+                      );
+                      href = a ? a.href || a.getAttribute('href') || '' : '';
+                    }
+                    if (!href) return;
+                    const m = href.match(/hotelId=(\\d+)/i);
+                    if (!m || seen.has(m[1])) return;
+                    seen.add(m[1]);
+                    const nameEl =
+                      root.querySelector('.hotel-title') ||
+                      root.querySelector('a.hotelName') ||
+                      root.querySelector('.hotelName');
+                    let name = nameEl
+                      ? (nameEl.innerText || '').trim().split('\\n')[0].trim()
+                      : '';
+                    if (!name || name.length < 3 || name.length > 120) {
+                      name = '';
+                    }
+                    out.push({ href, name });
+                  };
+                  for (const item of items) {
+                    pushFrom(item, '');
+                    if (out.length >= limit) break;
+                  }
+                  if (out.length < limit) {
+                    const links = Array.from(
+                      document.querySelectorAll(
+                        'a[href*="hotelId="], a[href*="hotelid="]'
+                      )
+                    );
+                    for (const a of links) {
+                      const href = a.href || a.getAttribute('href') || '';
+                      const m = href.match(/hotelId=(\\d+)/i);
+                      if (!m || seen.has(m[1])) continue;
+                      const root =
+                        a.closest('.list-item') ||
+                        a.closest('[class*="list-item"]') ||
+                        a.parentElement;
+                      pushFrom(root || a, href);
+                      if (out.length >= limit) break;
+                    }
+                  }
+                  return out;
+                }""",
+                limit,
+            )
+        except Exception:
+            rows = []
+
+        for row in rows or []:
+            href = normalize_trip_url(str(row.get("href") or ""))
+            if not href or "trip.com" not in href.lower():
+                continue
+            low = href.lower()
+            if "/hotels/" not in low or "all-cities" in low:
+                continue
+            m = re.search(r"hotelId=(\d+)", href, re.I)
+            if not m or m.group(1) in seen_ids:
+                continue
+            seen_ids.add(m.group(1))
+            label = clean_hotel_display_name(str(row.get("name") or ""))
+            if href.startswith("/"):
+                href = f"{settings.trip_base_url.rstrip('/')}{href}"
+            found.append((ensure_locale_curr(href), label))
+            if len(found) >= limit:
+                break
+
+        if found:
+            return found
+
+        # Fallback: legacy anchor walk
         seen: set[str] = set()
         try:
             anchors = page.locator("a[href]")
@@ -5162,7 +5620,6 @@ Transport modes: {", ".join(modes)}
             try:
                 raw_label = (a.inner_text(timeout=500) or "").strip()
                 raw_label = re.sub(r"\s+", " ", raw_label)
-                # Prefer short title-like labels; drop CTA-only text
                 if (
                     raw_label
                     and 3 < len(raw_label) < 90
@@ -5172,7 +5629,7 @@ Transport modes: {", ".join(modes)}
                         raw_label,
                     )
                 ):
-                    label = raw_label
+                    label = clean_hotel_display_name(raw_label)
             except Exception:
                 label = ""
             seen.add(href)

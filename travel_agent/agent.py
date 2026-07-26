@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Callable
 
 import ollama
@@ -254,19 +253,29 @@ class TravelAgent:
             "car_name": "",
         }
         route_ready = self.browser.last_proposed_route is not None
-        want_car = bool(self.force_rent_car) or bool(
-            re.search(
-                r"(?i)rent_car\s*=\s*true|modes:\s*[^\n]*rental car",
-                user_message or "",
-            )
-        )
+        # GUI Rent-a-car checkbox is the only authority (do not infer from prompt text)
+        want_car = bool(self.force_rent_car)
+
+        tools = TOOL_DEFINITIONS
+        if not want_car:
+            tools = [
+                t
+                for t in TOOL_DEFINITIONS
+                if (t.get("function") or {}).get("name") != "search_cars"
+            ]
+            # Drop any leftover car scrape from a previous trip
+            self.browser.last_car_card = {}
+            self.browser.last_car_detail_url = ""
+            for k in list(self.booking_links):
+                if str(k).startswith("car"):
+                    self.booking_links[k] = ""
 
         for _ in range(settings.max_tool_rounds):
             try:
                 response = self.client.chat(
                     model=self.model,
                     messages=self.messages,
-                    tools=TOOL_DEFINITIONS,
+                    tools=tools,
                 )
             except Exception as exc:
                 msg = str(exc)
@@ -283,7 +292,8 @@ class TravelAgent:
             if not tool_calls:
                 self._apply_plan_flight_card()
                 self._prefer_live_hotel_detail()
-                self._prefer_live_car_card()
+                if want_car:
+                    self._prefer_live_car_card()
                 return (message.get("content") or "").strip() or "(No response from model.)"
 
             for call in tool_calls:
@@ -298,9 +308,25 @@ class TravelAgent:
                 else:
                     args = dict(raw_args or {})
 
-                # Never let the model skip the car hire scrape when the UI asked for it
-                if name == "plan_trip" and want_car:
-                    args["rent_car"] = True
+                # Rent-a-car checkbox is authoritative — never scrape cars when off
+                if name == "plan_trip":
+                    args["rent_car"] = bool(want_car)
+                if name == "search_cars" and not want_car:
+                    result = (
+                        "Car rental skipped — Rent a car was not selected in the planner."
+                    )
+                    if self.on_tool_start:
+                        self.on_tool_start(name, args)
+                    if self.on_tool_end:
+                        self.on_tool_end(name, result)
+                    self.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": name,
+                            "content": result,
+                        }
+                    )
+                    continue
                 # City/keyword args must be typed with spaces (not Los+Angeles)
                 for key in ("hotel_city", "city", "location", "destination"):
                     if args.get(key):
@@ -448,34 +474,36 @@ class TravelAgent:
                     self.booking_links["hotel_name"] = found["hotel_name"]
                 # Always win with the live detail page when Playwright found one
                 self._prefer_live_hotel_detail()
-                if found.get("car"):
-                    self.booking_links["car"] = found["car"]
-                if found.get("car_name"):
-                    self.booking_links["car_name"] = found["car_name"]
-                for key in (
-                    "car_similar",
-                    "car_vendor",
-                    "car_score",
-                    "car_reviews",
-                    "car_seats",
-                    "car_fuel",
-                    "car_pickup_note",
-                    "car_cancellation",
-                    "car_mileage",
-                    "car_payment",
-                    "car_insurance",
-                    "car_price",
-                    "car_total",
-                    "car_image",
-                    "car_location",
-                    "car_pickup",
-                    "car_dropoff",
-                ):
-                    if found.get(key):
-                        self.booking_links[key] = found[key]
-                self._prefer_live_car_card()
+                if want_car:
+                    if found.get("car"):
+                        self.booking_links["car"] = found["car"]
+                    if found.get("car_name"):
+                        self.booking_links["car_name"] = found["car_name"]
+                    for key in (
+                        "car_similar",
+                        "car_vendor",
+                        "car_score",
+                        "car_reviews",
+                        "car_seats",
+                        "car_fuel",
+                        "car_pickup_note",
+                        "car_cancellation",
+                        "car_mileage",
+                        "car_payment",
+                        "car_insurance",
+                        "car_price",
+                        "car_total",
+                        "car_image",
+                        "car_location",
+                        "car_pickup",
+                        "car_dropoff",
+                    ):
+                        if found.get(key):
+                            self.booking_links[key] = found[key]
+                    self._prefer_live_car_card()
                 if found.get("flight_price"):
                     self.booking_links["flight_price"] = found["flight_price"]
+
                 if found.get("flight_option"):
                     self.booking_links["flight_option"] = found["flight_option"]
                 if found.get("hotel_price"):
@@ -523,10 +551,13 @@ class TravelAgent:
                     }
                 )
 
-        response = self.client.chat(model=self.model, messages=self.messages)
+        response = self.client.chat(model=self.model, messages=self.messages, tools=tools)
         message = response["message"]
         self.messages.append(message)
         self._apply_plan_flight_card()
+        self._prefer_live_hotel_detail()
+        if want_car:
+            self._prefer_live_car_card()
         return (message.get("content") or "").strip() or (
             "I reached the tool-call limit. Please refine your request."
         )

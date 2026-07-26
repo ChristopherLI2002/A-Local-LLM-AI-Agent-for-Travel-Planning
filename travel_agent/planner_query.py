@@ -50,9 +50,12 @@ def build_plan_query(
     car_line = (
         "REQUIRED: call plan_trip with rent_car=true (also search_cars if needed)."
         if rent_car
-        else "Only include a rental car if clearly needed."
+        else (
+            "Do NOT search for a rental car. Do not call search_cars. "
+            "Pass rent_car=false to plan_trip."
+        )
     )
-    rent_arg = ", rent_car=true" if rent_car else ""
+    rent_arg = ", rent_car=true" if rent_car else ", rent_car=false"
     return_part = return_date or "(open return)"
 
     return (
