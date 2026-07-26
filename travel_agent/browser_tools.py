@@ -1564,6 +1564,24 @@ class TripBrowser:
                 self._safe_goto(patched)
                 page.wait_for_timeout(2000)
                 self._dismiss_popups()
+        else:
+            # Hub autocomplete failed (common on later multi-city stays) — open
+            # a constructed city list URL so we still get hotelId detail links.
+            from travel_agent.trip_urls import build_hotel_list_url
+
+            fallback_list = build_hotel_list_url(
+                city_name,
+                checkin,
+                checkout,
+                adults=adults_n,
+                rooms=rooms_n,
+            )
+            try:
+                self._safe_goto(fallback_list)
+                page.wait_for_timeout(3500)
+                self._dismiss_popups()
+            except Exception:
+                pass
 
         self._wait_for_results(
             keywords=["HK$", "HKD", "hotel", "guest", "star", "review", "night"],
@@ -4073,7 +4091,7 @@ class TripBrowser:
                 canonicalize_hotel_detail_url(
                     recommended_hotel_detail_links[0],
                     checkin=recommended_hotel_checkin,
-                    checkout=return_date,
+                    checkout=rec_checkout,
                     city=hotel_city,
                 )
                 or recommended_hotel_detail_links[0]
@@ -4088,23 +4106,39 @@ class TripBrowser:
                         n for n in recommended_hotel_names if n != meta["name"]
                     ]
                     self.last_hotel_name = meta["name"]
-                self.last_hotel_detail_url = (
-                    getattr(self, "last_hotel_detail_url", "") or detail0
-                )
+                self.last_hotel_detail_url = detail0
+                stay0_meta = meta
+            else:
+                stay0_meta = {}
+        else:
+            stay0_meta = {}
         # Prefer real hotel title over generic price snippets
         if recommended_hotel_names:
             recommended_hotel_option = recommended_hotel_names[0]
 
-        # Live list-card fields as fallback; prefer detail meta already applied
-        stay0_card = self._scrape_top_hotel_card(
-            city=hotel_city,
-            fallback_name=(
-                recommended_hotel_names[0]
-                if recommended_hotel_names
-                else f"Hotels in {hotel_city}"
+        # Prefer picked-hotel meta (HTTP/list-card by hotelId) over first list card
+        stay0_card = {
+            "name": (stay0_meta or {}).get("name")
+            or (
+                recommended_hotel_names[0] if recommended_hotel_names else ""
             ),
-            lowest=float(hotel_low) if hotel_low is not None else None,
-        )
+            "score": (stay0_meta or {}).get("score", ""),
+            "score_label": (stay0_meta or {}).get("score_label", ""),
+            "stars": (stay0_meta or {}).get("stars", ""),
+            "reviews": (stay0_meta or {}).get("reviews", ""),
+            "image_url": (stay0_meta or {}).get("image_url", ""),
+            "price_label": (stay0_meta or {}).get("price_label", ""),
+            "location": (stay0_meta or {}).get("location", hotel_city),
+        }
+        if not stay0_card.get("name") or not stay0_card.get("image_url"):
+            top = self._scrape_top_hotel_card(
+                city=hotel_city,
+                fallback_name=stay0_card.get("name") or f"Hotels in {hotel_city}",
+                lowest=float(hotel_low) if hotel_low is not None else None,
+            )
+            for k, v in top.items():
+                if v and not stay0_card.get(k):
+                    stay0_card[k] = v
         if stay0_card.get("name") and _hotel_name_plausible_for_city(
             stay0_card["name"], hotel_city
         ):
@@ -4112,13 +4146,22 @@ class TripBrowser:
                 recommended_hotel_names = [stay0_card["name"]]
                 recommended_hotel_option = stay0_card["name"]
         stay0_image = stay0_card.get("image_url") or ""
-        if not stay0_image and recommended_hotel_detail_links:
+        if recommended_hotel_detail_links:
             try:
-                stay0_image = self.scrape_hotel_image_url(recommended_hotel_detail_links[0])
+                picked_img = self.scrape_hotel_image_url(
+                    recommended_hotel_detail_links[0]
+                )
             except Exception:
-                stay0_image = ""
+                picked_img = ""
+            if picked_img:
+                stay0_image = picked_img
         if not stay0_image:
-            stay0_image = _city_hotel_fallback_image(hotel_city)
+            stay0_image = _city_hotel_fallback_image(
+                hotel_city,
+                hotel_name=(
+                    recommended_hotel_names[0] if recommended_hotel_names else ""
+                ),
+            )
 
         snip_hotels = (
             "\n".join(f"  · {s}" for s in hotel_snippets[:5])
@@ -4208,16 +4251,19 @@ class TripBrowser:
                     or (
                         recommended_hotel_detail_links[0]
                         if recommended_hotel_detail_links
-                        else recommended_hotel_url
+                        else ""
                     )
                 ),
-                "price_label": f"HK${hotel_low:,.0f}" if hotel_low is not None else "",
+                "price_label": (
+                    stay0_card.get("price_label")
+                    or (f"HK${hotel_low:,.0f}" if hotel_low is not None else "")
+                ),
                 "total_label": (
                     f"Est. stay total: HK${hotel_total:,.0f}"
                     if hotel_total is not None
                     else ""
                 ),
-                "location": hotel_city,
+                "location": stay0_card.get("location") or hotel_city,
                 "image_url": stay0_image,
                 "score": stay0_card.get("score", ""),
                 "score_label": stay0_card.get("score_label", ""),
@@ -4225,6 +4271,16 @@ class TripBrowser:
                 "reviews": stay0_card.get("reviews", ""),
             }
         ]
+        # Prefer detail URL for stay0; only fall back to list if no hotelId link
+        from travel_agent.trip_urls import is_trusted_hotel_detail_url as _is_detail
+
+        if not _is_detail(self.last_hotel_stays[0].get("url") or ""):
+            list_fallback = (
+                (getattr(self, "last_hotel_list_url", "") or "").strip()
+                or recommended_hotel_url
+            )
+            if list_fallback:
+                self.last_hotel_stays[0]["url"] = list_fallback
         if regional and len(regional.stays) > 1:
             extra_blocks: list[str] = []
             for si, stay in enumerate(regional.stays[1:], start=2):
@@ -4273,6 +4329,19 @@ class TripBrowser:
 {chr(10).join(extra_blocks)}"""
                 )
                 n += 1
+            # Restore stay-0 as the global hotel pointer so booking_links /
+            # single-card consumers are not left on the last city's list URL.
+            first_stay = self.last_hotel_stays[0] if self.last_hotel_stays else {}
+            first_url = (first_stay.get("url") or "").strip()
+            from travel_agent.trip_urls import is_trusted_hotel_detail_url as _ok_detail
+
+            if first_url and _ok_detail(first_url):
+                self.last_hotel_detail_url = first_url
+            if first_stay.get("name"):
+                self.last_hotel_name = first_stay["name"]
+            # Keep last list URL from stay 0 if we still have it on the record
+            if first_url and "/hotels/list" in first_url.lower():
+                self.last_hotel_list_url = first_url
 
         car_low = None
         car_total = None
@@ -5203,6 +5272,124 @@ Transport modes: {", ".join(modes)}
                     return times[0], times[1]
         return "", ""
 
+    def _enrich_stay_from_picked_hotel(
+        self,
+        stay_rec: dict[str, str],
+        *,
+        city: str,
+        checkin: str = "",
+        checkout: str = "",
+    ) -> dict[str, str]:
+        """Fill stay name/url/image/score from the LLM-picked hotelId.
+
+        Prefer ``last_hotel_detail_url`` + HTTP/list-card meta for that hotelId.
+        Never prefer the first list-card photo over the picked property.
+        """
+        from travel_agent.trip_urls import (
+            canonicalize_hotel_detail_url,
+            is_trusted_hotel_detail_url,
+        )
+
+        city = (city or stay_rec.get("city") or "").strip()
+        detail = (getattr(self, "last_hotel_detail_url", "") or "").strip()
+        live_name = (getattr(self, "last_hotel_name", "") or "").strip()
+        list_url = (getattr(self, "last_hotel_list_url", "") or "").strip()
+
+        if not detail:
+            # Recover a concrete hotelId from candidates / list DOM
+            for row in getattr(self, "last_hotel_candidates", None) or []:
+                cand = (row.get("url") or "").strip()
+                if cand and is_trusted_hotel_detail_url(cand):
+                    detail = cand
+                    if not live_name and row.get("name"):
+                        live_name = row["name"]
+                    break
+        if not detail:
+            try:
+                built = self._resolve_top_hotel_detail_url(
+                    checkin=checkin or stay_rec.get("checkin") or "",
+                    checkout=checkout or stay_rec.get("checkout") or "",
+                    adults=2,
+                    rooms=1,
+                )
+            except Exception:
+                built = ""
+            if built and is_trusted_hotel_detail_url(built):
+                detail = built
+
+        if detail and is_trusted_hotel_detail_url(detail):
+            detail = (
+                canonicalize_hotel_detail_url(
+                    detail,
+                    checkin=checkin or stay_rec.get("checkin") or "",
+                    checkout=checkout or stay_rec.get("checkout") or "",
+                    city=city,
+                )
+                or detail
+            )
+            self.last_hotel_detail_url = detail
+            stay_rec["url"] = detail
+            meta = self._scrape_hotel_detail_meta(detail)
+            if meta.get("name"):
+                cleaned = clean_hotel_display_name(meta["name"], city)
+                if cleaned and not cleaned.lower().startswith(
+                    ("hotels in ", "recommended hotel")
+                ):
+                    stay_rec["name"] = cleaned
+                    self.last_hotel_name = cleaned
+                    live_name = cleaned
+            for k in (
+                "score",
+                "score_label",
+                "stars",
+                "reviews",
+                "location",
+                "price_label",
+                "total_label",
+                "image_url",
+            ):
+                if meta.get(k):
+                    stay_rec[k] = meta[k]
+            if not stay_rec.get("image_url"):
+                try:
+                    img = self.scrape_hotel_image_url(detail)
+                except Exception:
+                    img = ""
+                if img:
+                    stay_rec["image_url"] = img
+        elif list_url:
+            # Last resort: keep list for booking, but still try HTTP on any
+            # hotelId we can find in candidates
+            low = list_url.lower()
+            if "/hotels/list" in low and (
+                "city=" in low or "cityid=" in low or "cityname=" in low
+            ):
+                stay_rec["url"] = ensure_locale_curr(normalize_trip_url(list_url))
+            else:
+                from travel_agent.trip_urls import build_hotel_list_url
+
+                stay_rec["url"] = build_hotel_list_url(
+                    city,
+                    checkin or stay_rec.get("checkin") or "",
+                    checkout or stay_rec.get("checkout") or "",
+                )
+
+        if (
+            live_name
+            and not live_name.lower().startswith(("hotels in ", "recommended hotel"))
+            and _hotel_name_plausible_for_city(live_name, city)
+        ):
+            if (
+                not stay_rec.get("name")
+                or stay_rec["name"].lower().startswith(
+                    ("hotels in ", "recommended hotel")
+                )
+                or _is_curated_fallback_name(stay_rec.get("name") or "", city)
+            ):
+                stay_rec["name"] = clean_hotel_display_name(live_name, city)
+
+        return stay_rec
+
     def _build_regional_stay_hotel(
         self,
         *,
@@ -5228,17 +5415,17 @@ Transport modes: {", ".join(modes)}
             "checkin": checkin,
             "checkout": checkout,
             "label": label,
-            "name": fb["name"],
+            "name": "",
             "url": "",
             "price_label": "",
             "total_label": "",
-            "score": fb.get("score", ""),
-            "score_label": fb.get("score_label", ""),
-            "stars": fb.get("stars", "4"),
+            "score": "",
+            "score_label": "",
+            "stars": "",
             "reviews": "",
             "location": stay_city,
-            "image_url": fb.get("image_url", ""),
-            "features": fb.get("features", ""),
+            "image_url": "",
+            "features": "",
         }
         # Never inherit the previous city's hotel into this stay
         self.last_hotel_detail_url = ""
@@ -5256,106 +5443,91 @@ Transport modes: {", ".join(modes)}
                 rooms=1,
             )
         except Exception:
+            stay_rec["name"] = fb.get("name") or f"Hotels in {stay_city}"
+            stay_rec["image_url"] = fb.get("image_url") or _city_hotel_fallback_image(
+                stay_city
+            )
+            stay_rec["features"] = fb.get("features", "")
+            stay_rec["score"] = fb.get("score", "")
+            stay_rec["score_label"] = fb.get("score_label", "")
+            stay_rec["stars"] = fb.get("stars", "4")
             stay_rec["_raw_excerpt"] = (
                 f"--- Raw hotel excerpt ({stay_city}) ---\n(search failed)"
             )
             return stay_rec
 
-        # search_hotels already: list → LLM pick → open detail → scrape.
-        # Trust that result; do not re-pick off the detail page (wrong DOM).
+        # Apply picked hotelId detail URL + official name/photo (not first list card)
+        self._enrich_stay_from_picked_hotel(
+            stay_rec,
+            city=stay_city,
+            checkin=checkin,
+            checkout=checkout,
+        )
+
         from travel_agent.trip_urls import is_trusted_hotel_detail_url
 
-        stay_url = (getattr(self, "last_hotel_detail_url", "") or "").strip()
-        live_name = (getattr(self, "last_hotel_name", "") or "").strip()
-        h_url = ""
-        try:
-            h_url = self._require_page().url
-        except Exception:
-            h_url = ""
-        if not stay_url:
+        if not stay_rec.get("url"):
             stay_url = (getattr(self, "last_hotel_list_url", "") or "").strip()
-        if not stay_url:
-            canon_h = re.search(r"Canonical search URL:\s*(\S+)", h_text or "")
-            stay_url = (
-                canon_h.group(1).rstrip(".,;") if canon_h else h_url
-            ) or ""
-        stay_url = ensure_locale_curr(normalize_trip_url(stay_url))
-        if stay_url and is_trusted_hotel_detail_url(stay_url):
-            stay_rec["url"] = stay_url
-        elif stay_url:
-            stay_rec["url"] = stay_url
+            if not stay_url:
+                canon_h = re.search(r"Canonical search URL:\s*(\S+)", h_text or "")
+                stay_url = (canon_h.group(1).rstrip(".,;") if canon_h else "") or ""
+            if stay_url:
+                stay_rec["url"] = ensure_locale_curr(normalize_trip_url(stay_url))
 
         h_prices = summarize_prices(
-            f"Hotels in {stay_city}", h_text, url=stay_url or h_url
+            f"Hotels in {stay_city}",
+            h_text,
+            url=stay_rec.get("url") or "",
         )
         nightly = h_prices.get("lowest_hkd")
-        stay_total = (
-            round(float(nightly) * nights, 2) if nightly is not None else None
-        )
-        if nightly is not None:
+        if not stay_rec.get("price_label") and nightly is not None:
             stay_rec["price_label"] = f"HK${nightly:,.0f}"
-        if stay_total is not None:
+        if not stay_rec.get("total_label") and nightly is not None:
+            stay_total = round(float(nightly) * nights, 2)
             stay_rec["total_label"] = f"Est. stay total: HK${stay_total:,.0f}"
 
-        if live_name and not live_name.lower().startswith(
-            ("hotels in ", "recommended hotel")
-        ) and _hotel_name_plausible_for_city(live_name, stay_city):
-            stay_rec["name"] = clean_hotel_display_name(live_name, stay_city)
-
-        # Card fields from the detail page we already opened (if still there)
-        card = self._scrape_top_hotel_card(
-            city=stay_city,
-            fallback_name=stay_rec["name"] or fb["name"],
-            lowest=float(nightly) if nightly is not None else None,
-        )
-        card_name = card.get("name") or ""
+        # Only use curated city stub when we still have no real hotel
+        name = (stay_rec.get("name") or "").strip()
         if (
-            not stay_rec["name"]
-            or stay_rec["name"].lower().startswith(("hotels in ", "recommended hotel"))
-        ) and card_name and _hotel_name_plausible_for_city(card_name, stay_city):
-            if not card_name.lower().startswith(("hotels in ", "recommended hotel")):
-                stay_rec["name"] = card_name
-
-        for k in ("score", "score_label", "stars", "reviews", "price_label"):
-            if card.get(k):
-                stay_rec[k] = card[k]
-
-        img = card.get("image_url") or ""
-        detail_for_img = stay_rec.get("url") or ""
-        if detail_for_img and (
-            not img
-            or "loremflickr" in img.lower()
-            or stay_rec["name"].lower().startswith(("hotels in ", "recommended hotel"))
+            not name
+            or name.lower().startswith(("hotels in ", "recommended hotel"))
+            or _is_curated_fallback_name(name, stay_city)
         ):
-            try:
-                detail_img = self.scrape_hotel_image_url(detail_for_img)
-            except Exception:
-                detail_img = ""
-            if detail_img:
-                img = detail_img
-        if not img or "loremflickr" in (img or "").lower():
-            try:
-                from travel_agent.attraction_images import lookup_image
-
-                img = lookup_image(stay_rec["name"], city=stay_city) or img
-            except Exception:
-                pass
-        if not img:
-            img = _city_hotel_fallback_image(stay_city)
-        stay_rec["image_url"] = img
-
-        if stay_rec["name"].lower().startswith(("hotels in ", "recommended hotel")):
-            curated = (fb.get("name") or "").strip()
-            if curated and not curated.lower().startswith("recommended hotel"):
-                stay_rec["name"] = curated
-            if not stay_rec.get("features"):
+            if not is_trusted_hotel_detail_url(stay_rec.get("url") or ""):
+                curated = (fb.get("name") or "").strip()
+                if curated and not curated.lower().startswith("recommended hotel"):
+                    stay_rec["name"] = curated
                 stay_rec["features"] = fb.get("features", "")
-            if "loremflickr" in (stay_rec.get("image_url") or "").lower() or not stay_rec.get(
-                "image_url"
-            ):
-                stay_rec["image_url"] = fb.get("image_url") or _city_hotel_fallback_image(
-                    stay_city
+                if not stay_rec.get("score"):
+                    stay_rec["score"] = fb.get("score", "")
+                    stay_rec["score_label"] = fb.get("score_label", "")
+                if not stay_rec.get("stars"):
+                    stay_rec["stars"] = fb.get("stars", "4")
+            elif not name:
+                stay_rec["name"] = f"Hotels in {stay_city}"
+
+        img = (stay_rec.get("image_url") or "").strip()
+        if not img or "loremflickr" in img.lower():
+            detail = stay_rec.get("url") or ""
+            if is_trusted_hotel_detail_url(detail):
+                try:
+                    img = self.scrape_hotel_image_url(detail) or img
+                except Exception:
+                    pass
+            if not img or "loremflickr" in (img or "").lower():
+                try:
+                    from travel_agent.attraction_images import lookup_image
+
+                    img = lookup_image(
+                        stay_rec.get("name") or stay_city, city=stay_city
+                    ) or img
+                except Exception:
+                    pass
+            if not img:
+                img = _city_hotel_fallback_image(
+                    stay_city, hotel_name=stay_rec.get("name") or ""
                 )
+            stay_rec["image_url"] = img
 
         stay_rec["_raw_excerpt"] = (
             f"--- Raw hotel excerpt ({stay_city}) ---\n" + (h_text or "")[:1800]

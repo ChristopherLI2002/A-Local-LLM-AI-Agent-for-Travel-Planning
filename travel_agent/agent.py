@@ -201,7 +201,25 @@ class TravelAgent:
                 self.booking_links[k] = v
 
     def _prefer_live_hotel_detail(self) -> None:
-        """Always prefer Playwright /hotels/detail/?hotelId=… over list/search."""
+        """Always prefer Playwright /hotels/detail/?hotelId=… over list/search.
+
+        For multi-city trips, prefer stay 0 from ``last_hotel_stays`` so globals
+        are not left pointing at the last city's list URL.
+        """
+        stays = list(getattr(self.browser, "last_hotel_stays", None) or [])
+        if len(stays) > 1:
+            first = stays[0]
+            first_url = (first.get("url") or "").strip()
+            if first_url and is_trusted_hotel_detail_url(first_url):
+                self.booking_links["hotel"] = first_url
+            first_name = (first.get("name") or "").strip()
+            if first_name and not first_name.lower().startswith(
+                ("hotels in ", "recommended hotel")
+            ):
+                self.booking_links["hotel_name"] = first_name
+            if first.get("image_url"):
+                self.booking_links["hotel_image"] = first["image_url"]
+            return
         live_detail = (getattr(self.browser, "last_hotel_detail_url", "") or "").strip()
         if live_detail and is_trusted_hotel_detail_url(live_detail):
             self.booking_links["hotel"] = live_detail

@@ -3582,10 +3582,11 @@ class TravelAgentApp(tk.Tk):
                 fb_feats = (_fallback_stay_hotel(city).get("features") or "").strip()
                 if fb_feats and (rec.get("features") or "").strip() == fb_feats:
                     rec["features"] = ""
-                # Detail URL is authoritative — pull official name/photo/score from
-                # Trip.com detail HTML when the card still shows a stub/mismatch.
+                # Detail URL is authoritative — always refresh name/photo/score from
+                # Trip.com detail HTML for multi-city (avoids first-list-card mismatch).
                 need_meta = (
-                    generic
+                    multi_stay
+                    or generic
                     or china_wrong
                     or _is_curated_fallback_name(rec.get("name") or "", city)
                     or not (rec.get("image_url") or "").startswith("http")
@@ -3608,8 +3609,18 @@ class TravelAgentApp(tk.Tk):
                         name = meta["name"]
                         low = name.lower()
                         generic = False
+                    if meta.get("image_url"):
+                        # Always replace stock/wrong photos when we have the
+                        # official cover for this hotelId
+                        cur_img = (rec.get("image_url") or "").lower()
+                        if (
+                            multi_stay
+                            or not cur_img.startswith("http")
+                            or "loremflickr" in cur_img
+                            or "unsplash" in cur_img
+                        ):
+                            rec["image_url"] = meta["image_url"]
                     for k in (
-                        "image_url",
                         "score",
                         "score_label",
                         "reviews",
@@ -3617,15 +3628,8 @@ class TravelAgentApp(tk.Tk):
                         "location",
                         "price_label",
                     ):
-                        if meta.get(k) and not rec.get(k):
+                        if meta.get(k) and (multi_stay or not rec.get(k)):
                             rec[k] = meta[k]
-                        elif k == "image_url" and meta.get(k):
-                            cur_img = (rec.get("image_url") or "").lower()
-                            if (
-                                not cur_img.startswith("http")
-                                or "loremflickr" in cur_img
-                            ):
-                                rec["image_url"] = meta[k]
 
             if not (rec.get("image_url") or "").startswith("http"):
                 try:
