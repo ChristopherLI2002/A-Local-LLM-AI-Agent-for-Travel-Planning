@@ -29,6 +29,7 @@ from travel_agent.pricing import (
 )
 from travel_agent.llm_select import (
     SelectionContext,
+    _attraction_base_key,
     arrange_attraction_route,
     enrich_car_candidates_from_page,
     enrich_hotel_candidates_from_page,
@@ -1296,7 +1297,7 @@ class TripBrowser:
                     f"&curr={settings.trip_currency}"
                 )
             key_u = re.sub(r"[?&](lasttraceid|ext-[^=]+)=[^&]*", "", url.lower())
-            key_n = label.lower()
+            key_n = _attraction_base_key(label)
             if key_u in seen_urls or key_n in seen_names:
                 return
             seen_urls.add(key_u)
@@ -1403,7 +1404,7 @@ class TripBrowser:
             name = _clean_label(card.get("name", ""))
             if not name or nav_skip.match(name) or product_skip.search(name):
                 continue
-            key = name.lower()
+            key = _attraction_base_key(name)
             if key in seen_final:
                 continue
             seen_final.add(key)

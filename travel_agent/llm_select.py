@@ -480,6 +480,19 @@ _ATTRACTION_NAV_RE = re.compile(
 )
 
 
+def _attraction_base_key(name: str) -> str:
+    """Normalize an attraction label for duplicate detection."""
+    text = re.sub(r"\s+", " ", (name or "").strip())
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", text, flags=re.I)
+    text = re.sub(
+        r"^(hotel check-in, then|last stop:\s*)",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    return text.lower()
+
+
 def _clean_attraction_names(attractions: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -489,7 +502,7 @@ def _clean_attraction_names(attractions: list[str]) -> list[str]:
             continue
         if _ATTRACTION_SKIP_RE.search(name) or _ATTRACTION_NAV_RE.match(name):
             continue
-        key = name.lower()
+        key = _attraction_base_key(name)
         if key in seen:
             continue
         seen.add(key)
@@ -512,6 +525,87 @@ def _match_attraction_name(candidate: str, pool: list[str]) -> str:
         if low in name.lower() or name.lower() in low:
             return name
     return text
+
+
+def _pick_unused_attraction(
+    pool: list[str],
+    used: set[str],
+    *,
+    exclude: str = "",
+) -> str:
+    """Return the next attraction from pool not yet scheduled this trip."""
+    ex = _attraction_base_key(exclude)
+    for name in pool:
+        key = _attraction_base_key(name)
+        if not key or key == ex or key in used:
+            continue
+        used.add(key)
+        return name
+    return ""
+
+
+def _dedupe_attraction_plan(
+    plan: list[dict[str, str]],
+    pool: list[str],
+    *,
+    city: str = "",
+) -> list[dict[str, str]]:
+    """Ensure each scraped attraction appears at most once across the trip."""
+    if not plan:
+        return plan
+    city_label = (city or "the city").strip() or "the city"
+    used: set[str] = set()
+    out: list[dict[str, str]] = []
+
+    for i, row in enumerate(plan):
+        title_l = str(row.get("title") or "").lower()
+        is_departure = "departure" in title_l
+        is_arrival = "arrival" in title_l and i == 0
+
+        go = str(row.get("go") or "").strip()
+        also = str(row.get("also") or "").strip()
+        go_key = _attraction_base_key(go)
+
+        if is_departure:
+            go = "Hotel checkout and luggage drop"
+            also = f"Transfer to airport ({city_label})"
+        else:
+            if go_key and go_key in used:
+                replacement = _pick_unused_attraction(pool, used, exclude=also)
+                go = replacement or f"Explore {city_label} neighbourhoods"
+                go_key = _attraction_base_key(go)
+            elif go_key:
+                used.add(go_key)
+
+            also_key = _attraction_base_key(also)
+            if (
+                not also
+                or also_key == go_key
+                or (also_key and also_key in used)
+            ):
+                also = _pick_unused_attraction(pool, used, exclude=go)
+                if not also:
+                    short = go.split("(")[0].strip() or city_label
+                    also = (
+                        f"Free time / coffee near {short}"
+                        if not is_arrival
+                        else f"Evening walk near {short}"
+                    )
+            else:
+                if also_key:
+                    used.add(also_key)
+
+        enriched = dict(row)
+        enriched["go"] = go
+        enriched["also"] = also
+        if is_departure:
+            enriched["lunch"] = enriched.get("lunch") or "Simple meal near the station"
+            enriched["dinner"] = "Light snack only before the flight"
+            enriched["route"] = (
+                "Airport express / pre-booked transfer; leave 3+ hours before departure"
+            )
+        out.append(enriched)
+    return out
 
 
 def _parse_attraction_route_json(
@@ -605,9 +699,29 @@ def _parse_attraction_route_json(
 
     if not plan:
         return None
+    used_in_plan: set[str] = set()
+    for row in plan:
+        for field in ("go", "also"):
+            key = _attraction_base_key(str(row.get(field) or ""))
+            if key:
+                used_in_plan.add(key)
     while len(plan) < n:
-        plan.append(dict(plan[min(len(plan) - 1, 1)]))
-    return plan[:n]
+        idx = len(plan)
+        filler_go = _pick_unused_attraction(attractions, used_in_plan)
+        if not filler_go:
+            filler_go = f"Explore {city_label}"
+        plan.append(
+            {
+                "title": f"{city_label} · day {idx + 1}",
+                "go": filler_go,
+                "also": f"Free time in {city_label}",
+                "lunch": f"Lunch in {city_label}",
+                "dinner": f"Dinner in {city_label}",
+                "route": f"Local transit around {city_label}",
+            }
+        )
+    deduped = _dedupe_attraction_plan(plan[:n], attractions, city=city)
+    return deduped
 
 
 def _format_attraction_card_line(i: int, card: dict[str, str] | str) -> str:
@@ -685,17 +799,41 @@ def _heuristic_attraction_route(
         return None
     n = max(1, int(nights or 1))
     city_label = (city or "the city").strip() or "the city"
+    used: set[str] = set()
     plan: list[dict[str, str]] = []
+
     for i in range(n):
-        go = cleaned[min(i * 2, len(cleaned) - 1)]
-        also = cleaned[min(i * 2 + 1, len(cleaned) - 1)]
-        if also == go and len(cleaned) > 1:
-            also = cleaned[(i * 2 + 1) % len(cleaned)]
-            if also == go:
-                also = cleaned[(i + 1) % len(cleaned)]
+        if i == n - 1 and n > 1:
+            plan.append(
+                {
+                    "title": "Departure",
+                    "go": "Hotel checkout and luggage drop",
+                    "also": f"Transfer to airport ({city_label})",
+                    "lunch": "Simple meal near the station",
+                    "dinner": "Light snack only before the flight",
+                    "route": (
+                        "Airport express / pre-booked transfer; "
+                        "leave 3+ hours before departure"
+                    ),
+                }
+            )
+            continue
+
+        go = _pick_unused_attraction(cleaned, used)
+        if not go:
+            go = f"Explore {city_label} city centre"
+        also = _pick_unused_attraction(cleaned, used, exclude=go)
+        if not also:
+            short = go.split("(")[0].strip()
+            also = (
+                f"Evening walk near {short}"
+                if i == 0
+                else f"Free time / coffee near {short}"
+            )
         short_go = go.split("(")[0].strip()
         if i == 0:
             title = f"Arrival · {city_label}"
+            go = f"Hotel check-in, then {go}"
         elif i == n - 1 and n > 1:
             title = "Departure"
         else:
@@ -714,10 +852,11 @@ def _heuristic_attraction_route(
                 "route": (
                     f"Local transit between {go} and {also}"
                     if go != also
-                    else f"Metro / bus to {go}"
+                    else f"Metro / bus to {short_go or city_label}"
                 ),
             }
         )
+    plan = _dedupe_attraction_plan(plan, cleaned, city=city_label)
     return _enrich_plan_with_card_meta(plan, cards or [])
 
 
@@ -782,6 +921,7 @@ def arrange_attraction_route(
         "- Respect open hours: schedule visits only while attractions are open.\n"
         "- Use recommended sightseeing time to pace the day (do not overbook).\n"
         "- Prefer same-area sights on the same day using addresses when given.\n"
+        "- Each attraction from the list may appear AT MOST ONCE across the whole trip.\n"
         "- Day 1 = arrival (lighter); last day = departure/checkout.\n"
         "- Match travel style (Culture, Food, Family, Adventure, Relaxed, First-time).\n"
         "- Name specific restaurants or food streets — never vague 'local dinner'."
@@ -810,6 +950,7 @@ def arrange_attraction_route(
             content, nights=n, attractions=cleaned, city=city
         )
         if plan:
+            plan = _dedupe_attraction_plan(plan, cleaned, city=city)
             return _enrich_plan_with_card_meta(plan, card_list)
     except Exception:
         pass

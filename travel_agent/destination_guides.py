@@ -542,7 +542,18 @@ def day_ideas_from_llm_plan(
             )
         )
     while len(ideas) < n and ideas:
-        ideas.append(ideas[min(1, len(ideas) - 1)])
+        # Never duplicate a prior day wholesale (causes repeated attractions).
+        last = ideas[-1]
+        ideas.append(
+            DayIdea(
+                title=f"Free day · {last.title.split('·')[-1].strip() if '·' in last.title else 'explore'}",
+                go="Flexible morning — revisit a favourite neighbourhood or market",
+                also="Afternoon rest or optional short walk near the hotel",
+                lunch=last.lunch,
+                dinner=last.dinner,
+                route="Short local trips only; keep the pace relaxed",
+            )
+        )
     return ideas[:n] if ideas else []
 
 
