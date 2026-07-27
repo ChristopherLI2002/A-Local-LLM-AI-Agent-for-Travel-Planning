@@ -2890,6 +2890,8 @@ class TravelAgentApp(tk.Tk):
             self.agent.browser.last_hotel_detail_url = ""
             self.agent.browser.last_hotel_list_url = ""
             self.agent.browser.last_attraction_day_plan = []
+            self.agent.browser.last_attraction_cards = []
+            self.agent.browser.last_attractions = []
             if not self._trip_context.get("rent_car"):
                 # Ensure no leftover car deal can paint the card
                 self.agent.browser.last_car_card = {}

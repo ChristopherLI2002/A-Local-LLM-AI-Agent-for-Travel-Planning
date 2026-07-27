@@ -183,6 +183,78 @@ def _http_fetch_hotel_detail_meta(detail_url: str) -> dict[str, str]:
     return out
 
 
+def _http_fetch_attraction_detail_meta(detail_url: str) -> dict[str, str]:
+    """Parse name / photo / address / hours / visit time from Trip.com attraction HTML."""
+    out: dict[str, str] = {}
+    url = (detail_url or "").strip()
+    if not url or "trip.com" not in url.lower():
+        return out
+    if "/travel-guide/attraction/" not in url.lower() and "/things-to-do/" not in url.lower():
+        return out
+    try:
+        req = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-HK,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+        with urlopen(req, timeout=25) as resp:
+            html = resp.read().decode("utf-8", "replace")
+    except Exception:
+        return out
+    if not html or len(html) < 1500:
+        return out
+    flat = html.replace('\\"', '"')
+
+    for pat in (
+        r'"poiName"\s*:\s*"([^"]{2,120})"',
+        r'"displayName"\s*:\s*"([^"]{2,120})"',
+        r'"ename"\s*:\s*"([^"]{2,120})"',
+    ):
+        m = re.search(pat, flat)
+        if m:
+            name = re.sub(r"\s+", " ", m.group(1)).strip()
+            if name and len(name) > 2 and "attraction" not in name.lower():
+                out["name"] = name
+                break
+
+    m = re.search(
+        r'"coverImageUrl"\s*:\s*"(https://[^"]*(?:tripcdn|ak-d\.tripcdn)[^"]+)"',
+        flat,
+    )
+    if not m:
+        m = re.search(
+            r'"coverImage"\s*:\s*"(https://[^"]*(?:tripcdn|ak-d\.tripcdn)[^"]+)"',
+            flat,
+        )
+    if m:
+        out["image_url"] = m.group(1).replace("\\u002F", "/")
+
+    m = re.search(r'"address"\s*:\s*"([^"]{8,200})"', flat)
+    if m and "@type" not in m.group(1):
+        out["address"] = re.sub(r"\s+", " ", m.group(1)).strip()
+
+    m = re.search(r'"openTimeDesc"\s*:\s*"([^"]{3,80})"', flat)
+    if m:
+        hours = re.sub(r"\s+", " ", m.group(1)).strip()
+        hours = re.sub(r"(?i)^open:\s*", "", hours)
+        hours = hours.replace("–", "-").replace("—", "-")
+        out["open_hours"] = hours
+
+    m = re.search(r'"playSpendTime"\s*:\s*"([^"]{2,40})"', flat)
+    if m:
+        spend = re.sub(r"\s+", " ", m.group(1)).strip().replace("–", "-").replace("—", "-")
+        out["visit_time"] = spend
+
+    return out
+
+
 _CN_HOTEL_MARKERS = (
     "lishui",
     "leshan",
@@ -898,6 +970,8 @@ class TripBrowser:
         self._browser: Browser | None = None
         self.page: Page | None = None
         self.last_attractions: list[str] = []
+        # Rich Trip.com attraction cards (name/url/image/address/hours/visit_time)
+        self.last_attraction_cards: list[dict[str, str]] = []
         # LLM-arranged day-by-day sightseeing route (title/go/also/lunch/dinner/route)
         self.last_attraction_day_plan: list[dict[str, str]] = []
         self.last_hotel_stays: list[dict[str, str]] = []
@@ -993,18 +1067,23 @@ class TripBrowser:
         nights: int,
         *,
         city: str = "",
+        cards: list[dict[str, str]] | None = None,
     ) -> list[dict[str, str]] | None:
-        """LLM-select attractions and build a day-by-day route after scraping."""
-        if not attractions:
+        """LLM-plan a day schedule from scraped Trip.com attractions (with details)."""
+        cards = cards if cards is not None else list(self.last_attraction_cards or [])
+        if not attractions and not cards:
             self.last_attraction_day_plan = []
             return None
         plan = arrange_attraction_route(
-            attractions,
+            attractions or [c.get("name", "") for c in cards],
             nights,
             self.selection_context,
             city=city,
             model=self.llm_model,
             host=self.llm_host,
+            cards=cards,
+            # Always LLM-schedule when we have real Trip.com attraction details
+            force_llm=bool(cards),
         )
         if plan:
             self.last_attraction_day_plan = plan
@@ -1131,13 +1210,20 @@ class TripBrowser:
         return f"Opened Trip.com Hong Kong home: {page.url}"
 
     def scrape_attractions(self, city: str, *, limit: int = 18) -> list[str]:
-        """Search Trip.com things-to-do and return named attractions for a city."""
+        """Search Trip.com Attractions tab and enrich from detail pages.
+
+        Flow: things-to-do search → Attractions tab → card links → HTTP detail
+        (name, photo, address, open hours, recommended sightseeing time).
+        """
         page = self._require_page()
         city_name = typed_place_name(to_hotel_city(city) or city)
         if not city_name:
+            self.last_attractions = []
+            self.last_attraction_cards = []
             return []
 
         from travel_agent.places import to_hotel_city_id
+        from travel_agent.attraction_images import set_trip_attraction_images
 
         city_id = ""
         try:
@@ -1154,10 +1240,6 @@ class TripBrowser:
                 f"{settings.trip_base_url}/things-to-do/?"
                 f"{urlencode({'keyword': city_name, 'locale': settings.trip_locale, 'curr': settings.trip_currency})}"
             ),
-            (
-                f"{settings.trip_base_url}/things-to-do/?locale={settings.trip_locale}"
-                f"&curr={settings.trip_currency}"
-            ),
         ]
         if city_id:
             candidates.insert(
@@ -1168,95 +1250,184 @@ class TripBrowser:
                 ),
             )
 
-        names: list[str] = []
-        seen: set[str] = set()
-        skip_re = re.compile(
+        nav_skip = re.compile(
+            r"(?i)^(attractions?\s*&\s*tours|attractions|experiences|must-have|"
+            r"top picks|filters?|search|book now|view all|see all|more|"
+            r"hotels?\s*&\s*homes|flights?|trains?|cars?|app)$"
+        )
+        product_skip = re.compile(
             r"(?i)\b(eSIM|SIM|wifi|wi-fi|JR Pass|airport express|lounge|voucher|"
-            r"private car|charter|transfer bus|gift card|insurance)\b"
+            r"private car|charter|transfer bus|gift card|insurance|"
+            r"go-kart|go kart|day trip from|day tour|unlimited|metro\s+\d|"
+            r"skyliner|limousine bus)\b"
         )
 
-        def _add(raw: str) -> None:
+        cards: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        seen_names: set[str] = set()
+
+        def _clean_label(raw: str) -> str:
             text = re.sub(r"\s+", " ", (raw or "").strip())
+            text = text.split("\n")[0].strip()
             text = re.sub(r"^(No\.\s*\d+\s+of\s+.+?:\s*)", "", text, flags=re.I)
-            if not text or len(text) < 3 or len(text) > 90:
+            return text
+
+        def _add_card(name: str, href: str, image_url: str = "") -> None:
+            label = _clean_label(name)
+            if not label or len(label) < 3 or len(label) > 90:
                 return
-            if skip_re.search(text):
+            if nav_skip.match(label) or product_skip.search(label):
                 return
-            # Skip pure prices / ratings
-            if re.fullmatch(r"[\d.,\sHK$%]+", text):
+            if re.fullmatch(r"[\d.,\sHK$%]+", label):
                 return
-            key = text.lower()
-            if key in seen:
+            if label.count("·") > 2 or label.count("|") > 2:
                 return
-            # Prefer landmark-like titles over long tour packages
-            if text.count("·") > 2 or text.count("|") > 2:
+            url = (href or "").strip()
+            if url.startswith("/"):
+                url = f"{settings.trip_base_url}{url}"
+            if "/travel-guide/attraction/" not in url.lower():
                 return
-            seen.add(key)
-            names.append(text)
+            url = url.split("#")[0]
+            # Drop tracking noise but keep locale
+            if "locale=" not in url.lower():
+                sep = "&" if "?" in url else "?"
+                url = (
+                    f"{url}{sep}locale={settings.trip_locale}"
+                    f"&curr={settings.trip_currency}"
+                )
+            key_u = re.sub(r"[?&](lasttraceid|ext-[^=]+)=[^&]*", "", url.lower())
+            key_n = label.lower()
+            if key_u in seen_urls or key_n in seen_names:
+                return
+            seen_urls.add(key_u)
+            seen_names.add(key_n)
+            cards.append(
+                {
+                    "name": label,
+                    "url": url,
+                    "image_url": image_url or "",
+                    "address": "",
+                    "open_hours": "",
+                    "visit_time": "",
+                }
+            )
 
         for url in candidates:
             try:
                 self._safe_goto(url)
-                page.wait_for_timeout(2200)
-                # Try typing into search if we're on the hub page
-                if "keyword=" not in url and "districtId=" not in url:
-                    for sel in (
-                        "input[placeholder*='Search' i]",
-                        "input[type='search']",
-                        "input[placeholder*='places' i]",
-                    ):
-                        try:
-                            box = page.locator(sel).first
-                            if box.count():
-                                box.click(timeout=2000)
-                                box.fill(typed_place_name(city_name), timeout=2000)
-                                box.press("Enter")
-                                page.wait_for_timeout(2500)
-                                break
-                        except Exception:
-                            continue
-
-                # Collect from attraction/detail anchors and headings
-                selectors = [
-                    "a[href*='/travel-guide/attraction/']",
-                    "a[href*='/things-to-do/detail']",
-                    "a[href*='/things-to-do/']",
-                    "h2",
-                    "h3",
-                ]
-                for sel in selectors:
+                page.wait_for_timeout(2000)
+                # Prefer Attractions tab (not Experiences / tours)
+                for tab_sel in (
+                    "text=Attractions",
+                    "[role='tab']:has-text('Attractions')",
+                    "a:has-text('Attractions')",
+                    "div:has-text('Attractions')",
+                ):
                     try:
-                        locs = page.locator(sel)
-                        count = min(locs.count(), 40)
-                        for i in range(count):
-                            try:
-                                label = (locs.nth(i).inner_text(timeout=800) or "").strip()
-                            except Exception:
-                                continue
-                            # Take first line only
-                            label = label.split("\n")[0].strip()
-                            _add(label)
-                            if len(names) >= limit:
-                                break
+                        tab = page.locator(tab_sel).first
+                        if tab.count():
+                            tab.click(timeout=2500)
+                            page.wait_for_timeout(1800)
+                            break
                     except Exception:
                         continue
-                    if len(names) >= limit:
-                        break
-                if len(names) >= max(6, limit // 2):
+
+                # Collect attraction detail anchors only
+                locs = page.locator("a[href*='/travel-guide/attraction/']")
+                count = min(locs.count(), 48)
+                for i in range(count):
+                    try:
+                        a = locs.nth(i)
+                        href = (a.get_attribute("href") or "").strip()
+                        label = ""
+                        try:
+                            label = (a.inner_text(timeout=700) or "").strip()
+                        except Exception:
+                            label = ""
+                        if not label:
+                            label = (a.get_attribute("title") or "").strip()
+                        if not label:
+                            label = (a.get_attribute("aria-label") or "").strip()
+                        img = ""
+                        try:
+                            img_el = a.locator("img").first
+                            if img_el.count():
+                                img = (
+                                    img_el.get_attribute("src")
+                                    or img_el.get_attribute("data-src")
+                                    or ""
+                                ).strip()
+                        except Exception:
+                            img = ""
+                        _add_card(label, href, img)
+                        if len(cards) >= max(limit, 8):
+                            break
+                    except Exception:
+                        continue
+                if len(cards) >= max(6, limit // 2):
                     break
             except Exception:
                 continue
 
-        self.last_attractions = names[:limit]
+        # Enrich from detail pages (photo, address, hours, visit time)
+        enrich_n = min(len(cards), max(6, min(int(limit or 18), 10)))
+        for card in cards[:enrich_n]:
+            meta = _http_fetch_attraction_detail_meta(card.get("url", ""))
+            if not meta:
+                continue
+            if meta.get("name") and len(meta["name"]) >= 3:
+                # Prefer detail poiName when list text was noisy
+                if (
+                    not card["name"]
+                    or len(card["name"]) > 70
+                    or nav_skip.match(card["name"])
+                ):
+                    card["name"] = meta["name"]
+                elif meta["name"].lower() not in card["name"].lower():
+                    # Keep shorter landmark-style name from detail when list is a package
+                    if len(meta["name"]) < len(card["name"]):
+                        card["name"] = meta["name"]
+            if meta.get("image_url"):
+                card["image_url"] = meta["image_url"]
+            if meta.get("address"):
+                card["address"] = meta["address"]
+            if meta.get("open_hours"):
+                card["open_hours"] = meta["open_hours"]
+            if meta.get("visit_time"):
+                card["visit_time"] = meta["visit_time"]
+
+        # Drop any leftover chrome / product rows after enrich
+        cleaned_cards: list[dict[str, str]] = []
+        seen_final: set[str] = set()
+        for card in cards:
+            name = _clean_label(card.get("name", ""))
+            if not name or nav_skip.match(name) or product_skip.search(name):
+                continue
+            key = name.lower()
+            if key in seen_final:
+                continue
+            seen_final.add(key)
+            card["name"] = name
+            cleaned_cards.append(card)
+            if len(cleaned_cards) >= limit:
+                break
+
+        self.last_attraction_cards = cleaned_cards
+        self.last_attractions = [c["name"] for c in cleaned_cards]
+        try:
+            set_trip_attraction_images(cleaned_cards)
+        except Exception:
+            pass
         return self.last_attractions
 
     def search_attractions(self, city: str, limit: int = 18) -> str:
-        """Tool wrapper: list Trip.com things-to-do attractions for a city."""
+        """Tool wrapper: list Trip.com attractions with detail fields for a city."""
         names = self.scrape_attractions(city, limit=max(6, int(limit or 18)))
+        cards = list(self.last_attraction_cards or [])
         city_name = to_hotel_city(city) or city
         n = int(self.selection_context.nights or 0)
-        if names and n > 0:
-            self._arrange_attractions_route(names, n, city=city_name)
+        if (names or cards) and n > 0:
+            self._arrange_attractions_route(names, n, city=city_name, cards=cards)
         if not names:
             return (
                 f"No attractions parsed for {city_name} on Trip.com things-to-do. "
@@ -1264,14 +1435,26 @@ class TripBrowser:
             )
         lines = [
             f"TRIP.COM ATTRACTIONS — {city_name}",
-            f"Source: https://hk.trip.com/things-to-do/?locale=en-HK&curr=HKD",
+            f"Source: https://hk.trip.com/things-to-do/list?keyword={city_name}"
+            f"&locale={settings.trip_locale}&curr={settings.trip_currency}",
+            "Tab: Attractions (detail pages scraped for photo / address / hours)",
             "",
         ]
-        for i, name in enumerate(names, 1):
-            lines.append(f"{i}. {name}")
+        for i, card in enumerate(cards or [{"name": n} for n in names], 1):
+            name = card.get("name") or ""
+            bits = [f"{i}. {name}"]
+            if card.get("visit_time"):
+                bits.append(f"Visit: {card['visit_time']}")
+            if card.get("open_hours"):
+                bits.append(f"Open: {card['open_hours']}")
+            if card.get("address"):
+                bits.append(f"Address: {card['address']}")
+            if card.get("url"):
+                bits.append(f"URL: {card['url']}")
+            lines.append(" | ".join(bits))
         if self.last_attraction_day_plan:
             lines.append("")
-            lines.append("LLM-arranged day route:")
+            lines.append("LLM day schedule (from attraction list):")
             for i, day in enumerate(self.last_attraction_day_plan, 1):
                 go = day.get("go", "")
                 also = day.get("also", "")
@@ -1279,8 +1462,8 @@ class TripBrowser:
                 lines.append(f"  Day {i}: {pair}")
         lines.append("")
         lines.append(
-            "Use these exact attraction names in the Day-by-day itinerary "
-            "(pair with nearby restaurants)."
+            "Use these exact attraction names (with hours/visit time) in the "
+            "Day-by-day itinerary — never write generic 'Attractions & Tours'."
         )
         return "\n".join(lines)
 
@@ -4117,10 +4300,27 @@ class TripBrowser:
         # Attractions after flights so fare scrapes stay reliable
         try:
             if regional:
+                merged_cards: list[dict[str, str]] = []
+                seen_card: set[str] = set()
                 for stay in regional.stays:
-                    attractions.extend(
-                        self.scrape_attractions(stay.city, limit=8)[:6]
-                    )
+                    names = self.scrape_attractions(stay.city, limit=8)[:6]
+                    attractions.extend(names)
+                    for card in list(self.last_attraction_cards or []):
+                        key = (card.get("name") or "").strip().lower()
+                        if not key or key in seen_card:
+                            continue
+                        seen_card.add(key)
+                        merged_cards.append(card)
+                self.last_attraction_cards = merged_cards
+                self.last_attractions = [
+                    c.get("name", "") for c in merged_cards if c.get("name")
+                ] or attractions
+                try:
+                    from travel_agent.attraction_images import set_trip_attraction_images
+
+                    set_trip_attraction_images(merged_cards)
+                except Exception:
+                    pass
             else:
                 attractions = self.scrape_attractions(
                     hotel_city or destination, limit=18
@@ -4133,6 +4333,7 @@ class TripBrowser:
                 attractions,
                 nights,
                 city=hotel_city or destination,
+                cards=list(self.last_attraction_cards or []),
             )
 
         train_url = ""
@@ -4724,10 +4925,21 @@ class TripBrowser:
                 )
             )
         if attractions:
-            sections.append(
-                "Attraction sources (Trip.com things-to-do):\n"
-                + "\n".join(f"- {a}" for a in attractions[:12])
-            )
+            lines = ["Attraction sources (Trip.com Attractions tab + detail pages):"]
+            cards = list(getattr(self, "last_attraction_cards", None) or [])
+            if cards:
+                for a in cards[:12]:
+                    bits = [f"- {a.get('name', '')}"]
+                    if a.get("visit_time"):
+                        bits.append(f"visit {a['visit_time']}")
+                    if a.get("open_hours"):
+                        bits.append(f"open {a['open_hours']}")
+                    if a.get("address"):
+                        bits.append(a["address"])
+                    lines.append(" · ".join(bits))
+            else:
+                lines.extend(f"- {a}" for a in attractions[:12])
+            sections.append("\n".join(lines))
         n += 1
 
         pick_lines = [
@@ -6346,9 +6558,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "search_attractions",
             "description": (
-                "Search Trip.com Hong Kong things-to-do "
-                "(https://hk.trip.com/things-to-do/?locale=en-HK&curr=HKD) "
-                "and return named attractions/experiences for a city. "
+                "Search Trip.com Hong Kong Attractions tab "
+                "(https://hk.trip.com/things-to-do/list) for a city, open each "
+                "attraction detail page, and return name, photo, address, open "
+                "hours, and recommended sightseeing time. Then schedule days "
+                "from that list — never return generic 'Attractions & Tours'."
                 "Use these exact names in the day-by-day itinerary."
             ),
             "parameters": {

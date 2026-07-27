@@ -474,6 +474,10 @@ _ATTRACTION_SKIP_RE = re.compile(
     r"(?i)\b(eSIM|SIM card|wifi|wi-fi|airport express|lounge|transfer|private car|"
     r"charter|ticket only|voucher|buffet deal|JR Pass)\b"
 )
+_ATTRACTION_NAV_RE = re.compile(
+    r"(?i)^(attractions?\s*&\s*tours|attractions|experiences|must-have|top picks|"
+    r"filters?|hotels?\s*&\s*homes|flights?|trains?|cars?)$"
+)
 
 
 def _clean_attraction_names(attractions: list[str]) -> list[str]:
@@ -483,7 +487,7 @@ def _clean_attraction_names(attractions: list[str]) -> list[str]:
         name = re.sub(r"\s+", " ", (raw or "").strip())
         if not name or len(name) < 3 or len(name) > 90:
             continue
-        if _ATTRACTION_SKIP_RE.search(name):
+        if _ATTRACTION_SKIP_RE.search(name) or _ATTRACTION_NAV_RE.match(name):
             continue
         key = name.lower()
         if key in seen:
@@ -498,6 +502,8 @@ def _match_attraction_name(candidate: str, pool: list[str]) -> str:
     text = re.sub(r"\s+", " ", (candidate or "").strip())
     if not text or not pool:
         return text
+    # Strip meta suffixes we may have attached earlier
+    text = re.sub(r"\s*\([^)]*(?:Open|hours?|h)\s*[^)]*\)\s*$", "", text, flags=re.I)
     low = text.lower()
     for name in pool:
         if name.lower() == low:
@@ -604,14 +610,77 @@ def _parse_attraction_route_json(
     return plan[:n]
 
 
+def _format_attraction_card_line(i: int, card: dict[str, str] | str) -> str:
+    if isinstance(card, str):
+        return f"{i}. {card}"
+    name = (card.get("name") or "").strip()
+    bits = [f"{i}. {name}"]
+    if card.get("visit_time"):
+        bits.append(f"recommended {card['visit_time']}")
+    if card.get("open_hours"):
+        bits.append(f"open {card['open_hours']}")
+    if card.get("address"):
+        bits.append(card["address"])
+    return " | ".join(bits)
+
+
+def _label_with_meta(name: str, cards_by_name: dict[str, dict[str, str]]) -> str:
+    """Attach visit time / open hours under a place name for the timetable."""
+    base = (name or "").strip()
+    if not base:
+        return base
+    bare = re.sub(r"\s*\([^)]*(?:Open|hours?|\d\s*[-–]\s*\d)\s*[^)]*\)\s*$", "", base, flags=re.I).strip()
+    card = cards_by_name.get(bare.lower()) or cards_by_name.get(base.lower())
+    if not card:
+        low = bare.lower()
+        for key, c in cards_by_name.items():
+            if key in low or low in key:
+                card = c
+                break
+    if not card:
+        return base
+    extras: list[str] = []
+    if card.get("visit_time"):
+        extras.append(card["visit_time"])
+    if card.get("open_hours"):
+        extras.append(f"Open {card['open_hours']}")
+    if not extras:
+        return bare or base
+    return f"{bare or base} ({' · '.join(extras)})"
+
+
+def _enrich_plan_with_card_meta(
+    plan: list[dict[str, str]],
+    cards: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    by_name = {
+        (c.get("name") or "").strip().lower(): c
+        for c in cards
+        if (c.get("name") or "").strip()
+    }
+    if not by_name:
+        return plan
+    out: list[dict[str, str]] = []
+    for row in plan:
+        enriched = dict(row)
+        for key in ("go", "also"):
+            if enriched.get(key):
+                enriched[key] = _label_with_meta(enriched[key], by_name)
+        out.append(enriched)
+    return out
+
+
 def _heuristic_attraction_route(
     attractions: list[str],
     nights: int,
     *,
     city: str = "",
+    cards: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]] | None:
     """Fast day-by-day plan without an extra Ollama call."""
     cleaned = _clean_attraction_names(attractions)
+    if not cleaned and cards:
+        cleaned = _clean_attraction_names([c.get("name", "") for c in cards])
     if not cleaned:
         return None
     n = max(1, int(nights or 1))
@@ -649,7 +718,7 @@ def _heuristic_attraction_route(
                 ),
             }
         )
-    return plan
+    return _enrich_plan_with_card_meta(plan, cards or [])
 
 
 def arrange_attraction_route(
@@ -660,15 +729,21 @@ def arrange_attraction_route(
     city: str = "",
     model: str | None = None,
     host: str | None = None,
+    cards: list[dict[str, str]] | None = None,
+    force_llm: bool = False,
 ) -> list[dict[str, str]] | None:
-    """Arrange attractions into a day-by-day route (heuristic in FAST_MODE)."""
-    cleaned = _clean_attraction_names(attractions)
+    """Arrange attractions into a day-by-day route from Trip.com detail cards."""
+    card_list = [c for c in (cards or []) if (c.get("name") or "").strip()]
+    cleaned = _clean_attraction_names(
+        [c["name"] for c in card_list] if card_list else attractions
+    )
     if not cleaned:
         return None
 
     n = max(1, int(nights or 1))
-    if not _should_llm_rank():
-        return _heuristic_attraction_route(cleaned, n, city=city)
+    use_llm = force_llm or _should_llm_rank()
+    if not use_llm:
+        return _heuristic_attraction_route(cleaned, n, city=city, cards=card_list)
 
     ctx = context or SelectionContext()
     if city and not ctx.destination:
@@ -676,19 +751,24 @@ def arrange_attraction_route(
 
     model = model or settings.ollama_model
     host = host or settings.ollama_host
-    numbered = "\n".join(f"{i}. {name}" for i, name in enumerate(cleaned[:24]))
+    if card_list:
+        numbered = "\n".join(
+            _format_attraction_card_line(i, c) for i, c in enumerate(card_list[:24])
+        )
+    else:
+        numbered = "\n".join(f"{i}. {name}" for i, name in enumerate(cleaned[:24]))
 
     system = (
-        "You are a travel concierge selecting and arranging sightseeing from live "
-        "Trip.com attraction search results. Reply with ONLY a JSON object:\n"
+        "You are a travel concierge scheduling sightseeing from live Trip.com "
+        "attraction detail pages. Reply with ONLY a JSON object:\n"
         "{\n"
         '  "days": [\n'
         "    {\n"
         '      "day": 1,\n'
         '      "title": "Arrival · neighbourhood",\n'
         '      "attractions": ["Exact name from list", "Second exact name"],\n'
-        '      "go": "Main sight (exact list name)",\n'
-        '      "also": "Second sight (exact list name)",\n'
+        '      "go": "Main sight (exact list name only)",\n'
+        '      "also": "Second sight (exact list name only)",\n'
         '      "lunch": "Named restaurant or food street",\n'
         '      "dinner": "Named restaurant",\n'
         '      "route": "Metro/train/walk between stops"\n'
@@ -698,18 +778,21 @@ def arrange_attraction_route(
         f"Rules:\n"
         f"- Produce exactly {n} day object(s) for a {n}-night trip.\n"
         "- Use ONLY attraction names from the provided numbered list (exact spelling).\n"
-        "- Day 1 = arrival (lighter pacing after travel); last day = departure/checkout.\n"
-        "- Group geographically close sights on the same day; avoid backtracking.\n"
+        "- NEVER write generic labels like 'Attractions & Tours' or 'sightseeing'.\n"
+        "- Respect open hours: schedule visits only while attractions are open.\n"
+        "- Use recommended sightseeing time to pace the day (do not overbook).\n"
+        "- Prefer same-area sights on the same day using addresses when given.\n"
+        "- Day 1 = arrival (lighter); last day = departure/checkout.\n"
         "- Match travel style (Culture, Food, Family, Adventure, Relaxed, First-time).\n"
-        "- Name specific restaurants or food streets — never vague 'local dinner'.\n"
-        "- Skip eSIM/wifi/transfer products if they appear in the list."
+        "- Name specific restaurants or food streets — never vague 'local dinner'."
     )
     user = (
         f"Trip context:\n{ctx.summary()}\n"
         f"City: {city or ctx.destination or 'destination'}\n"
         f"Trip length: {n} day(s)\n\n"
-        f"Trip.com attractions (use exact names):\n{numbered}\n\n"
-        f"Select the best sights and arrange them into a {n}-day route."
+        f"Trip.com attractions (name | visit time | open hours | address):\n"
+        f"{numbered}\n\n"
+        f"Build a {n}-day schedule using these specific places only."
     )
 
     try:
@@ -727,7 +810,7 @@ def arrange_attraction_route(
             content, nights=n, attractions=cleaned, city=city
         )
         if plan:
-            return plan
+            return _enrich_plan_with_card_meta(plan, card_list)
     except Exception:
         pass
-    return _heuristic_attraction_route(cleaned, n, city=city)
+    return _heuristic_attraction_route(cleaned, n, city=city, cards=card_list)

@@ -1071,6 +1071,7 @@ def is_vague_day_body(body: str) -> bool:
     """True when a day card still has generic or fluffy wording."""
     low = (body or "").lower()
     markers = (
+        "attractions & tours",
         "deeper first-time picks",
         "deeper food picks",
         "deeper culture picks",

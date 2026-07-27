@@ -23,6 +23,35 @@ _MIN_FETCH_GAP_S = 0.35
 _DISK_CACHE = Path.home() / ".cache" / "voyage_travel" / "thumbs"
 _LOOKUP_CACHE: dict[str, str] = {}
 _OPENVERSE_CACHE: dict[str, str] = {}
+# Trip.com attraction detail covers (name -> image URL), set after scrape
+_TRIP_ATTRACTION_IMAGES: dict[str, str] = {}
+
+
+def set_trip_attraction_images(cards: list[dict[str, str]] | None) -> None:
+    """Register scraped Trip.com attraction cover photos for timetable rows."""
+    _TRIP_ATTRACTION_IMAGES.clear()
+    for card in cards or []:
+        name = re.sub(r"\s+", " ", (card.get("name") or "").strip()).lower()
+        url = (card.get("image_url") or "").strip()
+        if name and url.startswith("http") and "tripcdn" in url.lower():
+            _TRIP_ATTRACTION_IMAGES[name] = url
+
+
+def lookup_trip_attraction_image(detail: str) -> str:
+    """Match a timetable line to a scraped Trip.com attraction cover."""
+    if not _TRIP_ATTRACTION_IMAGES:
+        return ""
+    low = re.sub(r"\s+", " ", (detail or "").strip()).lower()
+    low = re.sub(r"\s*\([^)]*(?:open|hours?|\d\s*[-–]\s*\d)[^)]*\)\s*$", "", low)
+    if not low:
+        return ""
+    if low in _TRIP_ATTRACTION_IMAGES:
+        return _TRIP_ATTRACTION_IMAGES[low]
+    for name, url in _TRIP_ATTRACTION_IMAGES.items():
+        if name in low or low in name:
+            return url
+    return ""
+
 
 # Keyword in timetable text -> Wikipedia page title
 _WIKI_TITLES: dict[str, str] = {
@@ -342,6 +371,8 @@ def fetch_image_bytes(url: str, *, retries: int = 4) -> bytes:
         referer = "https://openverse.org/"
     elif "loremflickr" in host:
         referer = "https://loremflickr.com/"
+    elif "tripcdn" in host or "trip.com" in host:
+        referer = "https://hk.trip.com/"
 
     last_err: Exception | None = None
     for attempt in range(max(1, retries)):
@@ -620,8 +651,11 @@ def candidate_image_urls(
 
 
 def lookup_image(text: str, city: str = "", *, exclude: set[str] | None = None) -> str:
-    """Return a photo URL from Wikipedia, Openverse, or LoremFlickr."""
+    """Return a photo URL from Trip.com covers, Wikipedia, Openverse, or LoremFlickr."""
     excl = exclude or set()
+    trip = lookup_trip_attraction_image(text)
+    if trip and _image_identity(trip) not in excl:
+        return trip
     cache_key = f"{(city or '').strip().lower()}|{(text or '').strip().lower()}"
     if not excl and cache_key in _LOOKUP_CACHE:
         cached = _LOOKUP_CACHE[cache_key]
@@ -646,12 +680,17 @@ def images_for_timetable(body: str, city: str = "") -> dict[str, str]:
         t = f"{int(m.group(1)):02d}:{m.group(2)}"
         detail = m.group(3).strip()
         url = ""
-        for cand in candidate_image_urls(detail, city, limit=10, exclude=used):
-            ident = _image_identity(cand)
-            if ident and ident not in used:
-                url = cand
-                used.add(ident)
-                break
+        trip = lookup_trip_attraction_image(detail)
+        if trip and _image_identity(trip) not in used:
+            url = trip
+            used.add(_image_identity(trip))
+        if not url:
+            for cand in candidate_image_urls(detail, city, limit=10, exclude=used):
+                ident = _image_identity(cand)
+                if ident and ident not in used:
+                    url = cand
+                    used.add(ident)
+                    break
         if not url:
             url = _loremflickr_image(f"{city}|{t}|{detail}")
             used.add(_image_identity(url))

@@ -28,7 +28,9 @@ Tools:
 - plan_trip: primary live scrape (flights + hotels + links)
 - compare_flight_prices / compare_hotel_prices: extra ranking if needed
 - search_flights / search_hotels / search_trains / search_transfers / search_cars
-- search_attractions: named sights from hk.trip.com/things-to-do
+- search_attractions: Trip.com Attractions tab + detail pages (name, photo,
+  address, open hours, recommended visit time) — then schedule days from that list
+  NEVER write generic labels like "Attractions & Tours"
 - browse_url / click_text / get_page_summary
 
 Output rules (plain text, no HTML):
@@ -59,6 +61,8 @@ Hard rules:
 - For regions like California / Florida, multi-city + open-jaw
   (e.g. SFO in / LAX out, or MIA in / MCO out).
 - Use search_attractions for named sights in each city.
+- NEVER schedule vague lines like "Attractions & Tours" — only real place names
+  from Trip.com attraction detail cards (with open hours / visit time when known).
 """
 
 
@@ -120,6 +124,8 @@ class TravelAgent:
         self.browser.last_car_card = {}
         self.browser.last_car_detail_url = ""
         self.browser.last_attraction_day_plan = []
+        self.browser.last_attraction_cards = []
+        self.browser.last_attractions = []
 
     def _ensure_model(self) -> None:
         """Fail fast with an actionable message when Ollama has no usable model."""
