@@ -15,12 +15,12 @@ Booking links open real `hk.trip.com` pages in your browser. The model is instru
 ## Prerequisites
 
 1. [Ollama](https://ollama.com/) installed and able to run locally  
-2. A tool-capable chat model (default: `qwen2.5:7b`)  
+2. A tool-capable chat model (default: `qwen2.5:3b` — lighter/faster locally)  
 3. Python **3.10+**
 
 ```bash
 ollama serve
-ollama pull qwen2.5:7b
+ollama pull qwen2.5:3b
 ```
 
 ## Setup
@@ -37,11 +37,16 @@ Edit `.env` if needed:
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama API |
-| `OLLAMA_MODEL` | `qwen2.5:7b` | Override with `-m` |
+| `OLLAMA_MODEL` | `qwen2.5:3b` | Override with `-m` (e.g. `qwen2.5:7b` for quality) |
 | `TRIP_BASE_URL` | `https://hk.trip.com` | Market site |
 | `TRIP_LOCALE` | `en_hk` | Locale query param |
 | `TRIP_CURRENCY` | `HKD` | Prices in HKD |
 | `HEADLESS` | `true` | Hide Chromium while scraping |
+| `FAST_MODE` | `true` | Skip extra LLM ranking / attraction-arrange calls |
+| `LLM_RANK_CANDIDATES` | `false` | Set `true` (+ `FAST_MODE=false`) to LLM-rank flights/hotels/cars |
+| `MAX_TOOL_ROUNDS` | `8` | Cap agent↔tool loops |
+| `OLLAMA_NUM_CTX` | `4096` | Context window (lower = faster) |
+| `OLLAMA_NUM_PREDICT` | `768` | Max new tokens per reply |
 
 ## Run
 
@@ -58,7 +63,7 @@ python -m travel_agent --show-browser
 Use another Ollama model:
 
 ```bash
-python -m travel_agent -m qwen2.5:14b
+python -m travel_agent -m qwen2.5:7b
 ```
 
 Terminal chat instead of the window:
@@ -80,7 +85,7 @@ Supporting tools (used as needed): `search_flights`, `search_hotels`, `search_ca
 
 ### Hotels
 
-- List results → LLM picks a property → booking URL is `/hotels/detail/?hotelId=…`
+- Hotels: list results → pick a property (cheapest/first in FAST_MODE, or LLM when ranking is on) → booking URL is `/hotels/detail/?hotelId=…`
 - Name / score / photo / price come from the matching list card and/or HTTP detail HTML (Playwright often cannot open detail pages due to sign-in redirects)
 - Multi-city trips search **each stay city** separately so cards keep their own hotel link, name, and image
 
@@ -135,7 +140,7 @@ Results go under `tests/live_results/` (`progress.jsonl`, transcripts, `summary.
 - Live prices and booking links come from Trip.com scrape / tool output — not model hallucination.
 - Closing the app does **not** stop Ollama (so other tools can keep using it).
 - No embedded map; use day cards plus Open Trip.Planner / booking links.
-- Default model: `qwen2.5:7b` (`OLLAMA_MODEL` or `-m` to override).
+- Default model: `qwen2.5:3b` (`OLLAMA_MODEL` or `-m` to override). With `FAST_MODE=true`, Voyage skips extra Ollama ranking calls and uses heuristics for flights/hotels/cars/day sights.
 
 ## License / attribution
 

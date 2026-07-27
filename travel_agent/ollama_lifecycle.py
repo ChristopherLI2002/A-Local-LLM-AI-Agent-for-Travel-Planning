@@ -105,7 +105,7 @@ def pull_ollama_model(
     timeout: float = 3600.0,
 ) -> None:
     """Download a model with ``ollama pull`` (hidden console on Windows)."""
-    want = (model or settings.ollama_model or "qwen2.5:7b").strip()
+    want = (model or settings.ollama_model or "qwen2.5:3b").strip()
     bin_path = ollama_bin()
     if not bin_path:
         raise FileNotFoundError(
@@ -184,7 +184,7 @@ def ensure_ollama_model(
 ) -> str:
     """Ensure the preferred model is installed; pull it automatically if missing."""
     host = host or settings.ollama_host
-    want = (model or settings.ollama_model or "qwen2.5:7b").strip()
+    want = (model or settings.ollama_model or "qwen2.5:3b").strip()
 
     if model_is_installed(want, host):
         installed = fetch_ollama_model_names(host)

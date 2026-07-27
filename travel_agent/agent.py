@@ -8,7 +8,7 @@ from typing import Any, Callable
 import ollama
 
 from travel_agent.browser_tools import TOOL_DEFINITIONS, TripBrowser, dispatch_tool
-from travel_agent.config import resolve_ollama_model, settings
+from travel_agent.config import ollama_chat_options, resolve_ollama_model, settings
 from travel_agent.trip_urls import extract_booking_urls, is_trusted_hotel_detail_url, score_booking_url
 
 SYSTEM_PROMPT = """You are Voyage — a Trip.Planner-style AI travel concierge for Trip.com Hong Kong (hk.trip.com, HKD).
@@ -294,6 +294,7 @@ class TravelAgent:
                     model=self.model,
                     messages=self.messages,
                     tools=tools,
+                    options=ollama_chat_options(),
                 )
             except Exception as exc:
                 msg = str(exc)
@@ -569,7 +570,12 @@ class TravelAgent:
                     }
                 )
 
-        response = self.client.chat(model=self.model, messages=self.messages, tools=tools)
+        response = self.client.chat(
+            model=self.model,
+            messages=self.messages,
+            tools=tools,
+            options=ollama_chat_options(),
+        )
         message = response["message"]
         self.messages.append(message)
         self._apply_plan_flight_card()

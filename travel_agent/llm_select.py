@@ -9,8 +9,15 @@ from typing import Any
 
 import ollama
 
-from travel_agent.config import settings
+from travel_agent.config import ollama_chat_options, settings
 from travel_agent.pricing import parse_prices
+
+
+def _should_llm_rank() -> bool:
+    """Extra Ollama ranking calls — off in FAST_MODE for quicker plans."""
+    if settings.fast_mode:
+        return False
+    return bool(settings.llm_rank_candidates)
 
 
 @dataclass
@@ -231,7 +238,7 @@ def _llm_pick_index(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            options={"temperature": 0.2},
+            options=ollama_chat_options(short=True),
         )
         content = (response.get("message") or {}).get("content") or ""
         return _parse_choice_index(content, limit)
@@ -254,13 +261,15 @@ def select_flight_row(
         return rows[0]
 
     ctx = context or SelectionContext()
-    idx = _llm_pick_index(
-        kind="flight",
-        candidates_text=_format_flight_candidates(rows),
-        context=ctx,
-        model=model,
-        host=host,
-    )
+    idx = None
+    if _should_llm_rank():
+        idx = _llm_pick_index(
+            kind="flight",
+            candidates_text=_format_flight_candidates(rows),
+            context=ctx,
+            model=model,
+            host=host,
+        )
     if idx is None:
         idx = _cheapest_flight_index(rows)
     row = rows[max(0, min(idx, len(rows) - 1))]
@@ -284,13 +293,15 @@ def select_hotel_candidate(
         return candidates[0]
 
     ctx = context or SelectionContext()
-    idx = _llm_pick_index(
-        kind="hotel",
-        candidates_text=_format_hotel_candidates(candidates),
-        context=ctx,
-        model=model,
-        host=host,
-    )
+    idx = None
+    if _should_llm_rank():
+        idx = _llm_pick_index(
+            kind="hotel",
+            candidates_text=_format_hotel_candidates(candidates),
+            context=ctx,
+            model=model,
+            host=host,
+        )
     if idx is None:
         idx = 0
     return candidates[max(0, min(idx, len(candidates) - 1))]
@@ -360,13 +371,15 @@ def select_car_candidate(
         return candidates[0]
 
     ctx = context or SelectionContext()
-    idx = _llm_pick_index(
-        kind="car",
-        candidates_text=_format_car_candidates(candidates),
-        context=ctx,
-        model=model,
-        host=host,
-    )
+    idx = None
+    if _should_llm_rank():
+        idx = _llm_pick_index(
+            kind="car",
+            candidates_text=_format_car_candidates(candidates),
+            context=ctx,
+            model=model,
+            host=host,
+        )
     if idx is None:
         idx = _cheapest_car_index(candidates)
     return candidates[max(0, min(idx, len(candidates) - 1))]
@@ -591,216 +604,52 @@ def _parse_attraction_route_json(
     return plan[:n]
 
 
-def arrange_attraction_route(
+def _heuristic_attraction_route(
     attractions: list[str],
     nights: int,
-    context: SelectionContext | None = None,
     *,
     city: str = "",
-    model: str | None = None,
-    host: str | None = None,
 ) -> list[dict[str, str]] | None:
-    """LLM-selects attractions and arranges them into a day-by-day route."""
+    """Fast day-by-day plan without an extra Ollama call."""
     cleaned = _clean_attraction_names(attractions)
     if not cleaned:
         return None
-
-    n = max(1, int(nights or 1))
-    ctx = context or SelectionContext()
-    if city and not ctx.destination:
-        ctx.destination = city
-
-    model = model or settings.ollama_model
-    host = host or settings.ollama_host
-    numbered = "\n".join(f"{i}. {name}" for i, name in enumerate(cleaned[:24]))
-
-    system = (
-        "You are a travel concierge selecting and arranging sightseeing from live "
-        "Trip.com attraction search results. Reply with ONLY a JSON object:\n"
-        "{\n"
-        '  "days": [\n'
-        "    {\n"
-        '      "day": 1,\n'
-        '      "title": "Arrival · neighbourhood",\n'
-        '      "attractions": ["Exact name from list", "Second exact name"],\n'
-        '      "go": "Main sight (exact list name)",\n'
-        '      "also": "Second sight (exact list name)",\n'
-        '      "lunch": "Named restaurant or food street",\n'
-        '      "dinner": "Named restaurant",\n'
-        '      "route": "Metro/train/walk between stops"\n'
-        "    }\n"
-        "  ]\n"
-        "}\n"
-        f"Rules:\n"
-        f"- Produce exactly {n} day object(s) for a {n}-night trip.\n"
-        "- Use ONLY attraction names from the provided numbered list (exact spelling).\n"
-        "- Day 1 = arrival (lighter pacing after travel); last day = departure/checkout.\n"
-        "- Group geographically close sights on the same day; avoid backtracking.\n"
-        "- Match travel style (Culture, Food, Family, Adventure, Relaxed, First-time).\n"
-        "- Name specific restaurants or food streets — never vague 'local dinner'.\n"
-        "- Skip eSIM/wifi/transfer products if they appear in the list."
-    )
-    user = (
-        f"Trip context:\n{ctx.summary()}\n"
-        f"City: {city or ctx.destination or 'destination'}\n"
-        f"Trip length: {n} day(s)\n\n"
-        f"Trip.com attractions (use exact names):\n{numbered}\n\n"
-        f"Select the best sights and arrange them into a {n}-day route."
-    )
-
-    try:
-        client = ollama.Client(host=host)
-        response = client.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            options={"temperature": 0.3},
-        )
-        content = (response.get("message") or {}).get("content") or ""
-        plan = _parse_attraction_route_json(
-            content, nights=n, attractions=cleaned, city=city
-        )
-        if plan:
-            return plan
-    except Exception:
-        pass
-    return None
-
-
-_ATTRACTION_SKIP_RE = re.compile(
-    r"(?i)\b(eSIM|SIM card|wifi|wi-fi|airport express|lounge|transfer|private car|"
-    r"charter|ticket only|voucher|buffet deal|JR Pass)\b"
-)
-
-
-def _clean_attraction_names(attractions: list[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in attractions:
-        name = re.sub(r"\s+", " ", (raw or "").strip())
-        if not name or len(name) < 3 or len(name) > 90:
-            continue
-        if _ATTRACTION_SKIP_RE.search(name):
-            continue
-        key = name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(name)
-    return out
-
-
-def _match_attraction_name(candidate: str, pool: list[str]) -> str:
-    """Map LLM text to the closest scraped attraction name."""
-    text = re.sub(r"\s+", " ", (candidate or "").strip())
-    if not text or not pool:
-        return text
-    low = text.lower()
-    for name in pool:
-        if name.lower() == low:
-            return name
-    for name in pool:
-        if low in name.lower() or name.lower() in low:
-            return name
-    return text
-
-
-def _parse_attraction_route_json(
-    raw: str,
-    *,
-    nights: int,
-    attractions: list[str],
-    city: str = "",
-) -> list[dict[str, str]] | None:
-    """Parse LLM JSON into per-day sightseeing plans."""
-    text = (raw or "").strip()
-    if not text:
-        return None
-
-    if "```" in text:
-        m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
-        if m:
-            text = m.group(1)
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            return None
-        try:
-            data = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-
-    days_raw = data.get("days") if isinstance(data, dict) else None
-    if not isinstance(days_raw, list) or not days_raw:
-        return None
-
     n = max(1, int(nights or 1))
     city_label = (city or "the city").strip() or "the city"
     plan: list[dict[str, str]] = []
-
-    for i, row in enumerate(days_raw[:n]):
-        if not isinstance(row, dict):
-            continue
-        attrs = row.get("attractions") or []
-        if isinstance(attrs, str):
-            attrs = [a.strip() for a in re.split(r"[,;]", attrs) if a.strip()]
-        go = _match_attraction_name(
-            str(row.get("go") or (attrs[0] if attrs else "")), attractions
-        )
-        also = _match_attraction_name(
-            str(
-                row.get("also")
-                or (attrs[1] if len(attrs) > 1 else (attrs[0] if attrs else ""))
-            ),
-            attractions,
-        )
-        if also == go and len(attractions) > 1:
-            for name in attractions:
-                if name != go:
-                    also = name
-                    break
-        title = str(row.get("title") or "").strip()
-        if not title:
-            if i == 0:
-                title = f"Arrival · {city_label}"
-            elif i == n - 1 and n > 1:
-                title = "Departure"
-            else:
-                title = f"{city_label} · {go.split('(')[0].strip()[:28]}"
-        lunch = str(row.get("lunch") or "").strip() or (
-            f"Lunch near {go.split('(')[0].strip()}" if go else f"Lunch in {city_label}"
-        )
-        dinner = str(row.get("dinner") or "").strip() or (
-            f"Dinner in {city_label}"
-            if i < n - 1
-            else "Light snack before the flight"
-        )
-        route = str(row.get("route") or "").strip() or (
-            f"Local transit between {go} and {also}"
-            if go and also and go != also
-            else f"Metro / bus to {go or city_label}"
-        )
+    for i in range(n):
+        go = cleaned[min(i * 2, len(cleaned) - 1)]
+        also = cleaned[min(i * 2 + 1, len(cleaned) - 1)]
+        if also == go and len(cleaned) > 1:
+            also = cleaned[(i * 2 + 1) % len(cleaned)]
+            if also == go:
+                also = cleaned[(i + 1) % len(cleaned)]
+        short_go = go.split("(")[0].strip()
+        if i == 0:
+            title = f"Arrival · {city_label}"
+        elif i == n - 1 and n > 1:
+            title = "Departure"
+        else:
+            title = f"{city_label} · {short_go[:28]}"
         plan.append(
             {
                 "title": title,
-                "go": go or f"Explore {city_label}",
-                "also": also or go or f"Evening walk in {city_label}",
-                "lunch": lunch,
-                "dinner": dinner,
-                "route": route,
+                "go": go,
+                "also": also,
+                "lunch": f"Lunch near {short_go}" if short_go else f"Lunch in {city_label}",
+                "dinner": (
+                    f"Dinner in {city_label}"
+                    if i < n - 1
+                    else "Light snack before the flight"
+                ),
+                "route": (
+                    f"Local transit between {go} and {also}"
+                    if go != also
+                    else f"Metro / bus to {go}"
+                ),
             }
         )
-
-    if not plan:
-        return None
-    while len(plan) < n:
-        plan.append(dict(plan[min(len(plan) - 1, 1)]))
-    return plan[:n]
+    return plan
 
 
 def arrange_attraction_route(
@@ -812,12 +661,15 @@ def arrange_attraction_route(
     model: str | None = None,
     host: str | None = None,
 ) -> list[dict[str, str]] | None:
-    """LLM-selects attractions and arranges them into a day-by-day route."""
+    """Arrange attractions into a day-by-day route (heuristic in FAST_MODE)."""
     cleaned = _clean_attraction_names(attractions)
     if not cleaned:
         return None
 
     n = max(1, int(nights or 1))
+    if not _should_llm_rank():
+        return _heuristic_attraction_route(cleaned, n, city=city)
+
     ctx = context or SelectionContext()
     if city and not ctx.destination:
         ctx.destination = city
@@ -868,7 +720,7 @@ def arrange_attraction_route(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            options={"temperature": 0.3},
+            options=ollama_chat_options(short=False),
         )
         content = (response.get("message") or {}).get("content") or ""
         plan = _parse_attraction_route_json(
@@ -878,4 +730,4 @@ def arrange_attraction_route(
             return plan
     except Exception:
         pass
-    return None
+    return _heuristic_attraction_route(cleaned, n, city=city)

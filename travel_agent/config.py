@@ -10,19 +10,48 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class Settings:
     ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+    # Lighter default for faster local responses (still tool-capable).
+    ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
     trip_base_url: str = os.getenv("TRIP_BASE_URL", "https://hk.trip.com")
     trip_locale: str = os.getenv("TRIP_LOCALE", "en_hk")
     trip_currency: str = os.getenv("TRIP_CURRENCY", "HKD")
-    headless: bool = os.getenv("HEADLESS", "true").lower() in {"1", "true", "yes"}
+    headless: bool = _env_bool("HEADLESS", True)
     browser_timeout_ms: int = int(os.getenv("BROWSER_TIMEOUT_MS", "45000"))
-    max_tool_rounds: int = int(os.getenv("MAX_TOOL_ROUNDS", "16"))
+    # Fewer agent↔tool loops = faster end-to-end plans
+    max_tool_rounds: int = int(os.getenv("MAX_TOOL_ROUNDS", "8"))
+    # Fast mode: skip extra LLM ranking/attraction-arrange calls; use heuristics
+    fast_mode: bool = _env_bool("FAST_MODE", True)
+    # When false (or fast_mode), pick cheapest/first scraped option without Ollama
+    llm_rank_candidates: bool = _env_bool("LLM_RANK_CANDIDATES", False)
+    ollama_num_ctx: int = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+    ollama_num_predict: int = int(os.getenv("OLLAMA_NUM_PREDICT", "768"))
+    ollama_temperature: float = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
 
 
 settings = Settings()
+
+
+def ollama_chat_options(*, short: bool = False) -> dict:
+    """Shared Ollama generation options tuned for local speed."""
+    opts: dict = {
+        "temperature": settings.ollama_temperature,
+        "num_ctx": max(1024, int(settings.ollama_num_ctx)),
+    }
+    if short:
+        opts["num_predict"] = min(96, max(32, int(settings.ollama_num_predict) // 4))
+    else:
+        opts["num_predict"] = max(128, int(settings.ollama_num_predict))
+    return opts
 
 
 def list_ollama_models(host: str | None = None) -> list[str]:
@@ -79,7 +108,7 @@ def resolve_ollama_model(
     if not chat_models:
         raise RuntimeError(
             f"No Ollama models installed at {host or settings.ollama_host}. "
-            f"Voyage will try to download {want or 'qwen2.5:7b'} on startup."
+            f"Voyage will try to download {want or 'qwen2.5:3b'} on startup."
         )
     if want:
         for name in chat_models:
