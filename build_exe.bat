@@ -28,16 +28,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if exist ".env.example" copy /Y ".env.example" "dist\VoyageRelease\.env.example" >nul
-if exist ".env" copy /Y ".env" "dist\VoyageRelease\.env" >nul
+if exist ".env.example" copy /Y ".env.example" "dist\VoyageApp\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\VoyageApp\.env" >nul
 
 echo.
 echo Done.
-echo   EXE:  %cd%\dist\VoyageRelease\Voyage.exe
+echo   EXE:  %cd%\dist\VoyageApp\Voyage.exe
 echo.
 echo Needs on this PC:
 echo   1. Ollama + ollama pull qwen2.5:3b
-echo   2. Chromium already installed to %%LOCALAPPDATA%%\ms-playwright
+echo   2. Chromium in %%LOCALAPPDATA%%\ms-playwright  (or Chrome / Edge)
 echo   Close old Voyage windows before rebuilding.
 echo.
 endlocal

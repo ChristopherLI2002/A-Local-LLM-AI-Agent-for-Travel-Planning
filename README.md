@@ -1,13 +1,13 @@
 # Voyage — AI Travel Agent for Trip.com
 
-Local desktop travel concierge inspired by [Trip.com Trip.Planner](https://hk.trip.com/webapp/tripmap/tripplanner?source=t_online_homepage&locale=en-HK&curr=HKD). It uses **Ollama** for planning and a **Playwright** Chromium session on **[hk.trip.com](https://hk.trip.com)** for live flights, hotels, and optional car rentals.
+Local desktop travel concierge inspired by [Trip.com Trip.Planner](https://hk.trip.com/webapp/tripmap/tripplanner?source=t_online_homepage&locale=en-HK&curr=HKD). It uses **Ollama** for planning and a **Playwright** Chromium session on **[hk.trip.com](https://hk.trip.com)** for live flights, hotels, attractions, and optional car rentals.
 
 ## What it does
 
 1. **Plan your trip** — destination, dates/nights, budget, travel style, and optional **Rent a car**
 2. **Propose a route** — single-city or multi-city regional stays (e.g. California → SF / LA / SD) with open-jaw airports when useful
-3. **Search live on Trip.com** — flights, hotels (with real detail links, names, scores, photos), and car hire when enabled
-4. **Build an itinerary board** — flight card, hotel card(s), optional car card, and day-by-day sightseeing
+3. **Search live on Trip.com** — flights, hotels (detail links, names, scores, photos), attractions, and car hire when enabled
+4. **Build an itinerary board** — flight card, hotel card(s), optional car card, and day-by-day sightseeing with timed stops
 5. **Refine in chat** — tweak the plan without leaving the desktop UI
 
 Booking links open real `hk.trip.com` pages in your browser. The model is instructed **not** to invent Trip.com URLs.
@@ -16,14 +16,15 @@ Booking links open real `hk.trip.com` pages in your browser. The model is instru
 
 1. [Ollama](https://ollama.com/) installed and able to run locally  
 2. A tool-capable chat model (default: `qwen2.5:3b` — lighter/faster locally)  
-3. Python **3.10+**
+3. Python **3.10+** (only needed for source runs / building the EXE)  
+4. Playwright Chromium (or Google Chrome / Microsoft Edge as fallback)
 
 ```bash
 ollama serve
 ollama pull qwen2.5:3b
 ```
 
-## Setup
+## Setup (from source)
 
 ```bash
 cd "d:\An AI Agent for travel planning"
@@ -42,13 +43,14 @@ Edit `.env` if needed:
 | `TRIP_LOCALE` | `en_hk` | Locale query param |
 | `TRIP_CURRENCY` | `HKD` | Prices in HKD |
 | `HEADLESS` | `true` | Hide Chromium while scraping |
-| `FAST_MODE` | `true` | Skip extra LLM ranking / attraction-arrange calls |
-| `LLM_RANK_CANDIDATES` | `false` | Set `true` (+ `FAST_MODE=false`) to LLM-rank flights/hotels/cars |
+| `FAST_MODE` | `true` | Skip extra LLM ranking of flight/hotel/car candidates |
+| `LLM_RANK_CANDIDATES` | `false` | Set `true` (+ `FAST_MODE=false`) to LLM-rank scrapes |
 | `MAX_TOOL_ROUNDS` | `8` | Cap agent↔tool loops |
 | `OLLAMA_NUM_CTX` | `4096` | Context window (lower = faster) |
 | `OLLAMA_NUM_PREDICT` | `768` | Max new tokens per reply |
+| `OLLAMA_TEMPERATURE` | `0.2` | Generation temperature |
 
-## Run
+## Run from source
 
 ```bash
 python -m travel_agent
@@ -59,28 +61,6 @@ Opens the **desktop GUI** (default). Trip.com scraping is **headless** unless yo
 ```bash
 python -m travel_agent --show-browser
 ```
-
-### Windows EXE
-
-Build a double-clickable app (no Python needed to *run* after build):
-
-```bat
-build_exe.bat
-```
-
-Then open:
-
-`dist\VoyageRelease\Voyage.exe`
-
-(Close any running Voyage window before rebuilding — Windows locks the old folder.)
-
-Still required on the PC:
-
-1. [Ollama](https://ollama.com/) + `ollama pull qwen2.5:3b`
-2. Chromium for Playwright (once): `python -m playwright install chromium`  
-   (or install Google Chrome / Microsoft Edge — Voyage falls back to them)
-
-Copy or edit `dist\VoyageRelease\.env` next to the EXE for model / speed settings. Rebuild with the same `build_exe.bat` after code changes.
 
 Use another Ollama model:
 
@@ -97,19 +77,68 @@ python -m travel_agent -q "Plan 5 nights in Tokyo from Hong Kong"
 
 Header button **Open Trip.Planner** launches the official web product for comparison.
 
+## Windows EXE
+
+### Run the built app
+
+Double-click:
+
+```text
+dist\VoyageApp\Voyage.exe
+```
+
+Still required on the PC (not bundled inside the EXE):
+
+1. [Ollama](https://ollama.com/) + `ollama pull qwen2.5:3b`
+2. Playwright Chromium in the user cache, **or** installed Chrome / Edge
+
+Chromium install (once):
+
+```bat
+set PLAYWRIGHT_BROWSERS_PATH=%LOCALAPPDATA%\ms-playwright
+python -m playwright install chromium
+```
+
+Voyage reads `.env` next to the EXE (`dist\VoyageApp\.env`). Copy from `.env.example` if missing.
+
+### Build / rebuild
+
+```bat
+build_exe.bat
+```
+
+This installs deps, ensures Chromium is in `%LOCALAPPDATA%\ms-playwright`, and runs PyInstaller.
+
+**Important:** close any running `Voyage.exe` before rebuilding — Windows locks `dist\VoyageApp` and the build will fail with Access Denied.
+
+Output:
+
+```text
+dist\VoyageApp\Voyage.exe
+```
+
+Ignore older folders such as `dist\Voyage\` or `dist\VoyageRelease\` if present — use **VoyageApp** only.
+
 ## Typical agent flow
 
 1. **`propose_trip_route`** — choose fly-into / fly-out airports and hotel cities for the trip length  
-2. **`plan_trip`** — live Trip.com search for flights + hotels (+ cars if **Rent a car** is checked)  
+2. **`plan_trip`** — live Trip.com search for flights + hotels (+ cars if **Rent a car** is checked) + attractions  
 3. GUI renders structured cards from scraped fields and trusted booking URLs  
 
-Supporting tools (used as needed): `search_flights`, `search_hotels`, `search_cars`, `search_trains`, `search_transfers`, attraction scraping / day arrangement.
+Supporting tools (used as needed): `search_flights`, `search_hotels`, `search_cars`, `search_trains`, `search_transfers`, `search_attractions`.
 
 ### Hotels
 
-- Hotels: list results → pick a property (cheapest/first in FAST_MODE, or LLM when ranking is on) → booking URL is `/hotels/detail/?hotelId=…`
+- List results → pick a property (cheapest/first in `FAST_MODE`, or LLM when ranking is on) → booking URL is `/hotels/detail/?hotelId=…`
 - Name / score / photo / price come from the matching list card and/or HTTP detail HTML (Playwright often cannot open detail pages due to sign-in redirects)
 - Multi-city trips search **each stay city** separately so cards keep their own hotel link, name, and image
+
+### Attractions & day schedule
+
+- Searches Trip.com **Attractions** tab (`things-to-do/list`)
+- Opens attraction detail pages for **name, photo, address, open hours, recommended visit time**
+- Builds a day timetable with specific places (not generic “Attractions & Tours” labels)
+- Each attraction is scheduled at most once across the trip
 
 ### Car rental (optional)
 
@@ -117,32 +146,38 @@ Supporting tools (used as needed): `search_flights`, `search_hotels`, `search_ca
 - Scrapes Trip.com list cards (`.vehicle-item-fuse`) for name, specs, vendor, price, and `img.vehicle-item-fuse__image`
 - **View deal** opens the scraped `/carrentals/detail` link
 
+### Budget
+
+- Budget from the wizard is passed into the planning prompt and `plan_trip`
+- Tool output includes a low-end estimate (transport + hotel [+ car/transfers]) vs your budget
+- With `FAST_MODE=true`, candidate picks prefer cheapest/first heuristics rather than full LLM ranking against budget
+
 ## Project layout
 
 ```
 travel_agent/
-  gui.py                 # Desktop wizard + itinerary board (flights / hotels / car / days)
+  gui.py                 # Desktop wizard + itinerary board
   agent.py               # Ollama tool-calling loop + booking_links merge
   browser_tools.py       # Playwright Trip.com tools (flights, hotels, cars, plan_trip)
   planner_query.py       # Prompt builder from GUI context
   itinerary_parse.py     # Parse LLM text into structured offers / day blocks
-  trip_urls.py           # Normalize / trust Trip.com flight & hotel & car URLs
+  trip_urls.py           # Normalize / trust Trip.com URLs
   regions.py             # Multi-city regional routes + night alignment
-  llm_select.py          # LLM ranking of scraped flight / hotel / car candidates
+  llm_select.py          # Ranking / attraction day arrangement
   destination_guides.py  # Day-idea fallbacks when scrape is thin
-  attraction_images.py   # Attraction / fallback image helpers
+  attraction_images.py   # Attraction / timetable image helpers
   places.py              # City ↔ airport / hotel city helpers
   pricing.py             # HKD price parse + comparisons
   airline_names.py       # Airline code / logo helpers
   ollama_lifecycle.py    # Start / ensure Ollama + model availability
   cli.py                 # Entry: GUI by default, --cli / -q for terminal
-  config.py              # Settings from .env
+  config.py              # Settings from .env (+ frozen EXE paths)
 
 tests/                   # Trip example suite (logic + optional live scrape)
 scripts/                 # Ad-hoc debug helpers for scraping / cards
 voyage.py                # Frozen EXE entry point
 voyage.spec              # PyInstaller build definition
-build_exe.bat            # One-click Windows EXE build
+build_exe.bat            # One-click Windows EXE build → dist\VoyageApp\
 ```
 
 ## Tests
@@ -164,8 +199,10 @@ Results go under `tests/live_results/` (`progress.jsonl`, transcripts, `summary.
 
 - Live prices and booking links come from Trip.com scrape / tool output — not model hallucination.
 - Closing the app does **not** stop Ollama (so other tools can keep using it).
+- Playwright browsers are loaded from `%LOCALAPPDATA%\ms-playwright` (not from inside the EXE `_internal` folder).
+- If Chromium is missing, Voyage tries installed **Chrome** or **Edge**.
 - No embedded map; use day cards plus Open Trip.Planner / booking links.
-- Default model: `qwen2.5:3b` (`OLLAMA_MODEL` or `-m` to override). With `FAST_MODE=true`, Voyage skips extra Ollama ranking calls and uses heuristics for flights/hotels/cars/day sights.
+- Default model: `qwen2.5:3b` (`OLLAMA_MODEL` or `-m` to override).
 
 ## License / attribution
 
