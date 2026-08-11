@@ -4923,8 +4923,10 @@ class TravelAgentApp(tk.Tk):
                         "Startup error",
                         f"{e}\n\n"
                         "Need Ollama on PATH. Voyage starts Ollama and downloads "
-                        f"{self.model} automatically when missing.\n"
-                        "Also run: playwright install chromium",
+                        f"{self.model} automatically when missing.\n\n"
+                        "For the browser, run once:\n"
+                        "  python -m playwright install chromium\n"
+                        "Or install Google Chrome / Microsoft Edge.",
                     )
 
                 self.after(0, _fail_ui)

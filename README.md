@@ -60,6 +60,28 @@ Opens the **desktop GUI** (default). Trip.com scraping is **headless** unless yo
 python -m travel_agent --show-browser
 ```
 
+### Windows EXE
+
+Build a double-clickable app (no Python needed to *run* after build):
+
+```bat
+build_exe.bat
+```
+
+Then open:
+
+`dist\VoyageRelease\Voyage.exe`
+
+(Close any running Voyage window before rebuilding — Windows locks the old folder.)
+
+Still required on the PC:
+
+1. [Ollama](https://ollama.com/) + `ollama pull qwen2.5:3b`
+2. Chromium for Playwright (once): `python -m playwright install chromium`  
+   (or install Google Chrome / Microsoft Edge — Voyage falls back to them)
+
+Copy or edit `dist\VoyageRelease\.env` next to the EXE for model / speed settings. Rebuild with the same `build_exe.bat` after code changes.
+
 Use another Ollama model:
 
 ```bash
@@ -118,6 +140,9 @@ travel_agent/
 
 tests/                   # Trip example suite (logic + optional live scrape)
 scripts/                 # Ad-hoc debug helpers for scraping / cards
+voyage.py                # Frozen EXE entry point
+voyage.spec              # PyInstaller build definition
+build_exe.bat            # One-click Windows EXE build
 ```
 
 ## Tests

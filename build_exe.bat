@@ -1,0 +1,43 @@
+@echo off
+REM Build Voyage.exe with PyInstaller (Windows).
+setlocal
+cd /d "%~dp0"
+
+echo Installing build tools...
+python -m pip install -q --upgrade pip
+python -m pip install -q "pyinstaller>=6.0" -r requirements.txt
+if errorlevel 1 (
+  echo Failed to install dependencies.
+  exit /b 1
+)
+
+echo.
+echo Ensuring Playwright Chromium is installed...
+set "PLAYWRIGHT_BROWSERS_PATH=%LOCALAPPDATA%\ms-playwright"
+python -m playwright install chromium
+if errorlevel 1 (
+  echo Warning: could not install Chromium. Install Google Chrome or Edge instead.
+)
+
+echo.
+echo Close any running Voyage.exe window first if rebuild fails with Access Denied.
+echo Building Voyage.exe...
+python -m PyInstaller --noconfirm voyage.spec
+if errorlevel 1 (
+  echo Build failed.
+  exit /b 1
+)
+
+if exist ".env.example" copy /Y ".env.example" "dist\VoyageRelease\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\VoyageRelease\.env" >nul
+
+echo.
+echo Done.
+echo   EXE:  %cd%\dist\VoyageRelease\Voyage.exe
+echo.
+echo Needs on this PC:
+echo   1. Ollama + ollama pull qwen2.5:3b
+echo   2. Chromium already installed to %%LOCALAPPDATA%%\ms-playwright
+echo   Close old Voyage windows before rebuilding.
+echo.
+endlocal

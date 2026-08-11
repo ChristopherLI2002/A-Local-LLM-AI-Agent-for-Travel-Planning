@@ -1143,10 +1143,29 @@ class TripBrowser:
 
     def start(self) -> None:
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=settings.headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        launch_args = ["--disable-blink-features=AutomationControlled"]
+        last_err: Exception | None = None
+        # Prefer Playwright Chromium; fall back to installed Chrome / Edge
+        # (important for the frozen Voyage.exe when browsers live in ms-playwright).
+        for kwargs in (
+            {"headless": settings.headless, "args": launch_args},
+            {"channel": "chrome", "headless": settings.headless, "args": launch_args},
+            {"channel": "msedge", "headless": settings.headless, "args": launch_args},
+        ):
+            try:
+                self._browser = self._pw.chromium.launch(**kwargs)
+                last_err = None
+                break
+            except Exception as exc:
+                last_err = exc
+                continue
+        if self._browser is None:
+            hint = (
+                "Playwright Chromium is missing. In a terminal run:\n"
+                "  python -m playwright install chromium\n"
+                "Or install Google Chrome / Microsoft Edge and try again."
+            )
+            raise RuntimeError(f"{hint}\n\nLast error: {last_err}") from last_err
         context = self._browser.new_context(
             locale="en-HK",
             timezone_id="Asia/Hong_Kong",

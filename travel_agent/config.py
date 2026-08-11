@@ -3,11 +3,37 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+
+def app_dir() -> Path:
+    """Directory containing the EXE (frozen) or the project root (dev)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    # travel_agent/config.py → project root
+    return Path(__file__).resolve().parent.parent
+
+
+def _load_env() -> None:
+    """Load .env from the app folder first, then the process cwd."""
+    base = app_dir()
+    load_dotenv(base / ".env")
+    load_dotenv()  # cwd override if present
+
+
+_load_env()
+
+# Always use the shared user browser cache — never look under a frozen
+# PyInstaller _internal/playwright/... tree (that path has no Chromium).
+if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ or not str(
+    os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or ""
+).strip():
+    _local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(Path(_local) / "ms-playwright")
 
 
 def _env_bool(name: str, default: bool) -> bool:
