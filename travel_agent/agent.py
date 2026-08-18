@@ -87,15 +87,29 @@ class TravelAgent:
         ]
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
-        self.booking_links: dict[str, str] = {
+        self.booking_links: dict[str, str] = self._new_booking_links()
+        # GUI / prompt override — do not rely on the model to pass rent_car
+        self.force_rent_car: bool = False
+
+    def _new_booking_links(self) -> dict[str, str]:
+        """Initialize the minimal set of fields the GUI expects.
+
+        Tool/scrape code may later add extra keys (e.g. pricing/score/image URLs)
+        when available.
+        """
+
+        return {
             "flight": "",
             "hotel": "",
             "hotel_name": "",
             "car": "",
             "car_name": "",
         }
-        # GUI / prompt override — do not rely on the model to pass rent_car
-        self.force_rent_car: bool = False
+
+    def clear_booking_links(self) -> None:
+        """Reset booking links back to the GUI's minimal empty state."""
+
+        self.booking_links = self._new_booking_links()
 
     def start(self) -> None:
         try:
@@ -110,13 +124,7 @@ class TravelAgent:
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        self.booking_links = {
-            "flight": "",
-            "hotel": "",
-            "hotel_name": "",
-            "car": "",
-            "car_name": "",
-        }
+        self.clear_booking_links()
         self.force_rent_car = False
         self.browser.last_proposed_route = None
         self.browser.last_plan_flight_card = {}
@@ -269,13 +277,7 @@ class TravelAgent:
     def chat(self, user_message: str) -> str:
         self._ensure_model()
         self.messages.append({"role": "user", "content": user_message})
-        self.booking_links = {
-            "flight": "",
-            "hotel": "",
-            "hotel_name": "",
-            "car": "",
-            "car_name": "",
-        }
+        self.clear_booking_links()
         route_ready = self.browser.last_proposed_route is not None
         # GUI Rent-a-car checkbox is the only authority (do not infer from prompt text)
         want_car = bool(self.force_rent_car)

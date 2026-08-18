@@ -28,8 +28,8 @@ ollama pull qwen2.5:3b
 
 ```bash
 cd "d:\An AI Agent for travel planning"
-pip install -r requirements.txt
-playwright install chromium
+python -m pip install -r requirements.txt
+python -m playwright install chromium
 copy .env.example .env
 ```
 
@@ -49,6 +49,8 @@ Edit `.env` if needed:
 | `OLLAMA_NUM_CTX` | `4096` | Context window (lower = faster) |
 | `OLLAMA_NUM_PREDICT` | `768` | Max new tokens per reply |
 | `OLLAMA_TEMPERATURE` | `0.2` | Generation temperature |
+
+Tip: if you want the browser to stay hidden while scraping, keep `HEADLESS=true` (default).
 
 ## Run from source
 

@@ -2858,13 +2858,7 @@ class TravelAgentApp(tk.Tk):
         except Exception:
             pass
         if self.agent:
-            self.agent.booking_links = {
-                "flight": "",
-                "hotel": "",
-                "hotel_name": "",
-                "car": "",
-                "car_name": "",
-            }
+            self.agent.clear_booking_links()
             self.agent.force_rent_car = bool(self._trip_context.get("rent_car"))
             style_line = ", ".join(styles)
             self.agent.browser._update_selection_context(
