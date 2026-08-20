@@ -13,14 +13,14 @@ import urllib.request
 from pathlib import Path
 
 _UA = (
-    "VoyageTravelAgent/1.0 (educational travel planner; "
-    "+https://github.com/local/voyage) Python-urllib"
+    "LocalLLMTravelAgent/1.0 (educational travel planner; "
+    "+https://github.com/local/local-llm-travel-agent) Python-urllib"
 )
 _ALLOWED_THUMB_WIDTHS = (500, 330, 250, 120)
 _FETCH_LOCK = threading.Lock()
 _LAST_FETCH_AT = 0.0
 _MIN_FETCH_GAP_S = 0.35
-_DISK_CACHE = Path.home() / ".cache" / "voyage_travel" / "thumbs"
+_DISK_CACHE = Path.home() / ".cache" / "local_llm_travel_agent" / "thumbs"
 _LOOKUP_CACHE: dict[str, str] = {}
 _OPENVERSE_CACHE: dict[str, str] = {}
 # Trip.com attraction detail covers (name -> image URL), set after scrape

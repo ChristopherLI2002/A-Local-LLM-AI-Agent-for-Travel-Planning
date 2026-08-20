@@ -1,4 +1,4 @@
-"""Trip.Planner-style desktop UI for the Voyage travel agent (tkinter)."""
+"""Trip.Planner-style desktop UI for the local LLM travel planning agent (tkinter)."""
 
 from __future__ import annotations
 
@@ -102,9 +102,9 @@ def _scaled_pt(base: int, step: int) -> int:
 
 def make_fonts(step: int = DEFAULT_FONT_STEP) -> dict[str, tuple]:
     """Build the app font set for a given slider step."""
-    # Baselines are already larger than the original Voyage defaults
+    # Baselines are already larger than the original compact defaults
     return {
-        "brand": ("Georgia", _scaled_pt(36, step), "bold"),
+        "brand": ("Georgia", _scaled_pt(24, step), "bold"),
         "display": ("Georgia", _scaled_pt(20, step)),
         "ui": ("Segoe UI", _scaled_pt(13, step)),
         "ui_bold": ("Segoe UI Semibold", _scaled_pt(13, step)),
@@ -228,12 +228,19 @@ class GradientHeader(tk.Canvas):
             outline="",
             fill=_lerp_hex(C["sky_top"], "#FFFFFF", glow),
         )
-        self.create_text(36, 38, anchor="w", text="Voyage", fill=C["ink"], font=FONT_BRAND)
+        self.create_text(
+            36,
+            38,
+            anchor="w",
+            text="A Local LLM AI Agent for Travel Planning",
+            fill=C["ink"],
+            font=FONT_BRAND,
+        )
         self.create_text(
             40,
             78,
             anchor="w",
-            text="Trip.Planner-style itineraries · live from Trip.com Hong Kong",
+            text="Local Ollama planning · Trip.Planner-style itineraries · live from Trip.com Hong Kong",
             fill=C["ink_soft"],
             font=FONT_DISPLAY,
         )
@@ -1729,7 +1736,7 @@ class TravelAgentApp(tk.Tk):
         self._font_step = DEFAULT_FONT_STEP
         apply_font_globals(self._font_step)
 
-        self.title("Voyage — Trip.Planner-style Travel Agent")
+        self.title("A Local LLM AI Agent for Travel Planning")
         self.geometry("1080x780")
         self.minsize(880, 600)
         self.configure(bg=C["paper"])
@@ -1938,7 +1945,7 @@ class TravelAgentApp(tk.Tk):
         ).pack(fill="x", pady=(24, 6))
         tk.Label(
             form,
-            text="Destination, dates, and style on one page — then Voyage builds flights, hotels, and a day-by-day plan.",
+            text="Destination, dates, and style on one page — then the local LLM builds flights, hotels, and a day-by-day plan.",
             bg=C["paper"],
             fg=C["muted"],
             font=FONT_UI,
@@ -4920,7 +4927,7 @@ class TravelAgentApp(tk.Tk):
                     messagebox.showerror(
                         "Startup error",
                         f"{e}\n\n"
-                        "Need Ollama on PATH. Voyage starts Ollama and downloads "
+                        "Need Ollama on PATH. This app starts Ollama and downloads "
                         f"{self.model} automatically when missing.\n\n"
                         "For the browser, run once:\n"
                         "  python -m playwright install chromium\n"
@@ -4947,7 +4954,7 @@ class TravelAgentApp(tk.Tk):
             self.agent = None
 
         self._browser_thread = threading.Thread(
-            target=worker_loop, daemon=True, name="voyage-browser"
+            target=worker_loop, daemon=True, name="travel-agent-browser"
         )
         self._browser_thread.start()
 
@@ -5044,7 +5051,9 @@ class TravelAgentApp(tk.Tk):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Voyage Trip.Planner-style desktop agent")
+    parser = argparse.ArgumentParser(
+        description="A local LLM AI agent for travel planning (Trip.Planner-style desktop)"
+    )
     parser.add_argument("-m", "--model", default=settings.ollama_model)
     parser.add_argument(
         "--show-browser",

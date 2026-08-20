@@ -1,8 +1,9 @@
 from setuptools import find_packages, setup
 
 setup(
-    name="travel-agent",
+    name="local-llm-travel-agent",
     version="0.1.0",
+    description="A local LLM AI agent for travel planning (Ollama + Trip.com)",
     packages=find_packages(),
     install_requires=[
         "ollama>=0.6.0",

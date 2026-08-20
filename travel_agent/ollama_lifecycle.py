@@ -1,4 +1,4 @@
-"""Start / stop the local Ollama server for the Voyage app (no console flash)."""
+"""Start / stop the local Ollama server for the travel planning agent (no console flash)."""
 
 from __future__ import annotations
 

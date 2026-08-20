@@ -20,7 +20,7 @@ from travel_agent.config import settings
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="AI travel agent using Ollama + Trip.com Hong Kong (desktop window)",
+        description="A local LLM AI agent for travel planning (Ollama + Trip.com Hong Kong)",
     )
     parser.add_argument(
         "-m",

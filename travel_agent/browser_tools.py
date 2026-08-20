@@ -1146,7 +1146,7 @@ class TripBrowser:
         launch_args = ["--disable-blink-features=AutomationControlled"]
         last_err: Exception | None = None
         # Prefer Playwright Chromium; fall back to installed Chrome / Edge
-        # (important for the frozen Voyage.exe when browsers live in ms-playwright).
+        # (important for the frozen LocalLLMTravelAgent.exe when browsers live in ms-playwright).
         for kwargs in (
             {"headless": settings.headless, "args": launch_args},
             {"channel": "chrome", "headless": settings.headless, "args": launch_args},

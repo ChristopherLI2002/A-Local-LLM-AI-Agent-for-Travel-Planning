@@ -1,6 +1,6 @@
-# Voyage — AI Travel Agent for Trip.com
+# A Local LLM AI Agent for Travel Planning
 
-Local desktop travel concierge inspired by [Trip.com Trip.Planner](https://hk.trip.com/webapp/tripmap/tripplanner?source=t_online_homepage&locale=en-HK&curr=HKD). It uses **Ollama** for planning and a **Playwright** Chromium session on **[hk.trip.com](https://hk.trip.com)** for live flights, hotels, attractions, and optional car rentals.
+Local desktop travel concierge inspired by [Trip.com Trip.Planner](https://hk.trip.com/webapp/tripmap/tripplanner?source=t_online_homepage&locale=en-HK&curr=HKD). It uses a **local Ollama LLM** for planning and a **Playwright** Chromium session on **[hk.trip.com](https://hk.trip.com)** for live flights, hotels, attractions, and optional car rentals.
 
 ## What it does
 
@@ -27,7 +27,7 @@ ollama pull qwen2.5:3b
 ## Setup (from source)
 
 ```bash
-cd "d:\An AI Agent for travel planning"
+cd "d:\A Local LLM AI Agent for Travel Planning"
 python -m pip install -r requirements.txt
 python -m playwright install chromium
 copy .env.example .env
@@ -86,7 +86,7 @@ Header button **Open Trip.Planner** launches the official web product for compar
 Double-click:
 
 ```text
-dist\VoyageApp\Voyage.exe
+dist\LocalLLMTravelAgent\LocalLLMTravelAgent.exe
 ```
 
 Still required on the PC (not bundled inside the EXE):
@@ -101,7 +101,7 @@ set PLAYWRIGHT_BROWSERS_PATH=%LOCALAPPDATA%\ms-playwright
 python -m playwright install chromium
 ```
 
-Voyage reads `.env` next to the EXE (`dist\VoyageApp\.env`). Copy from `.env.example` if missing.
+The app reads `.env` next to the EXE (`dist\LocalLLMTravelAgent\.env`). Copy from `.env.example` if missing.
 
 ### Build / rebuild
 
@@ -111,15 +111,15 @@ build_exe.bat
 
 This installs deps, ensures Chromium is in `%LOCALAPPDATA%\ms-playwright`, and runs PyInstaller.
 
-**Important:** close any running `Voyage.exe` before rebuilding — Windows locks `dist\VoyageApp` and the build will fail with Access Denied.
+**Important:** close any running `LocalLLMTravelAgent.exe` before rebuilding — Windows locks `dist\LocalLLMTravelAgent` and the build will fail with Access Denied.
 
 Output:
 
 ```text
-dist\VoyageApp\Voyage.exe
+dist\LocalLLMTravelAgent\LocalLLMTravelAgent.exe
 ```
 
-Ignore older folders such as `dist\Voyage\` or `dist\VoyageRelease\` if present — use **VoyageApp** only.
+Ignore older folders such as `dist\VoyageApp\` if present — use **LocalLLMTravelAgent** only.
 
 ## Typical agent flow
 
@@ -190,9 +190,9 @@ scripts/                 # Ad-hoc debug helpers (require live browser)
   debug_return_scrape.py #   Scrape return-leg after "Select" click
   debug_hotel_image.py   #   Inspect hotel photo URLs
 
-voyage.py                # Frozen EXE entry point (PyInstaller)
-voyage.spec              # PyInstaller build definition
-build_exe.bat            # One-click Windows EXE build → dist\VoyageApp\
+launch.py                # Frozen EXE entry point (PyInstaller)
+launch.spec              # PyInstaller build definition
+build_exe.bat            # One-click Windows EXE build → dist\LocalLLMTravelAgent\
 setup.py                 # pip-installable package metadata
 ```
 
@@ -225,7 +225,7 @@ This folder is git-ignored.
 - Live prices and booking links come from Trip.com scrape / tool output — not model hallucination.
 - Closing the app does **not** stop Ollama (so other tools can keep using it).
 - Playwright browsers are loaded from `%LOCALAPPDATA%\ms-playwright` (not from inside the EXE `_internal` folder).
-- If Chromium is missing, Voyage tries installed **Chrome** or **Edge**.
+- If Chromium is missing, the app tries installed **Chrome** or **Edge**.
 - No embedded map; use day cards plus Open Trip.Planner / booking links.
 - Default model: `qwen2.5:3b` (`OLLAMA_MODEL` or `-m` to override).
 
@@ -237,7 +237,7 @@ If you see `WinError 10054`, `502`, or “Ollama failed during generation”:
 2. Run the diagnostic: `python scripts/diagnose_ollama.py`
 3. Confirm Ollama works: `ollama run qwen2.5:3b "Say hi"`
 
-Voyage auto-starts Ollama when needed; you do **not** need a second `ollama serve` if port 11434 is already in use.
+The app auto-starts Ollama when needed; you do **not** need a second `ollama serve` if port 11434 is already in use.
 
 ## License / attribution
 

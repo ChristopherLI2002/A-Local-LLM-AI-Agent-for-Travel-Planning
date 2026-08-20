@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for Voyage (Trip.com travel agent desktop app).
-# Build:  python -m PyInstaller --noconfirm voyage.spec
+# PyInstaller spec for A Local LLM AI Agent for Travel Planning.
+# Build:  python -m PyInstaller --noconfirm launch.spec
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 import certifi
@@ -50,7 +50,7 @@ for pkg in ("playwright", "ollama"):
 hiddenimports += collect_submodules("travel_agent")
 
 a = Analysis(
-    ["voyage.py"],
+    ["launch.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -72,7 +72,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="Voyage",
+    name="LocalLLMTravelAgent",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -93,5 +93,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="VoyageApp",
+    name="LocalLLMTravelAgent",
 )

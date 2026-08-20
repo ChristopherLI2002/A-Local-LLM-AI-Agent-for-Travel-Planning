@@ -152,7 +152,7 @@ def resolve_ollama_model(
     if not chat_models:
         raise RuntimeError(
             f"No Ollama models installed at {host or settings.ollama_host}. "
-            f"Voyage will try to download {want or 'qwen2.5:3b'} on startup."
+            f"The app will try to download {want or 'qwen2.5:3b'} on startup."
         )
     if want:
         for name in chat_models:

@@ -1,4 +1,4 @@
-"""Voyage desktop launcher (used by PyInstaller and for local runs)."""
+"""Desktop launcher for the local LLM travel planning agent (PyInstaller and local runs)."""
 
 from __future__ import annotations
 

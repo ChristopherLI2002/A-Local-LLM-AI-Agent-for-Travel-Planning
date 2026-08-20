@@ -1,1 +1,1 @@
-"""Tests package for Voyage travel agent."""
+"""Tests package for the local LLM travel planning agent."""

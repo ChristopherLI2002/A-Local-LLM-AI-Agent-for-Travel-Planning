@@ -1,4 +1,4 @@
-"""Quick Ollama connectivity check for Voyage (Windows IPv4 localhost fix)."""
+"""Quick Ollama connectivity check for the local LLM travel agent (Windows IPv4 localhost fix)."""
 
 from __future__ import annotations
 

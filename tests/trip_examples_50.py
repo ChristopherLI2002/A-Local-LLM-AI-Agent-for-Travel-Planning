@@ -1,4 +1,4 @@
-"""50 reasonable trip scenarios for Voyage app logic tests.
+"""50 reasonable trip scenarios for local LLM travel agent logic tests.
 
 Each example is a realistic planner input (destination, nights, styles, budget).
 Run:  python -m tests.run_trip_examples

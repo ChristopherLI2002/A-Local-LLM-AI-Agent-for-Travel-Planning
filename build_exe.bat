@@ -1,5 +1,5 @@
 @echo off
-REM Build Voyage.exe with PyInstaller (Windows).
+REM Build LocalLLMTravelAgent.exe with PyInstaller (Windows).
 setlocal
 cd /d "%~dp0"
 
@@ -20,24 +20,24 @@ if errorlevel 1 (
 )
 
 echo.
-echo Close any running Voyage.exe window first if rebuild fails with Access Denied.
-echo Building Voyage.exe...
-python -m PyInstaller --noconfirm voyage.spec
+echo Close any running LocalLLMTravelAgent.exe window first if rebuild fails with Access Denied.
+echo Building LocalLLMTravelAgent.exe...
+python -m PyInstaller --noconfirm launch.spec
 if errorlevel 1 (
   echo Build failed.
   exit /b 1
 )
 
-if exist ".env.example" copy /Y ".env.example" "dist\VoyageApp\.env.example" >nul
-if exist ".env" copy /Y ".env" "dist\VoyageApp\.env" >nul
+if exist ".env.example" copy /Y ".env.example" "dist\LocalLLMTravelAgent\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\LocalLLMTravelAgent\.env" >nul
 
 echo.
 echo Done.
-echo   EXE:  %cd%\dist\VoyageApp\Voyage.exe
+echo   EXE:  %cd%\dist\LocalLLMTravelAgent\LocalLLMTravelAgent.exe
 echo.
 echo Needs on this PC:
 echo   1. Ollama + ollama pull qwen2.5:3b
 echo   2. Chromium in %%LOCALAPPDATA%%\ms-playwright  (or Chrome / Edge)
-echo   Close old Voyage windows before rebuilding.
+echo   Close old app windows before rebuilding.
 echo.
 endlocal

@@ -1,4 +1,4 @@
-"""Run all 50 trip examples against Voyage app logic (no live browser/LLM).
+"""Run all 50 trip examples against travel agent logic (no live browser/LLM).
 
 Validates for each scenario:
   - plan query builds correctly
@@ -314,7 +314,7 @@ def run_example(ex: TripExample) -> ExampleReport:
 
 
 def main() -> int:
-    print(f"Voyage — running {len(EXAMPLES)} trip examples\n")
+    print(f"Local LLM travel agent — running {len(EXAMPLES)} trip examples\n")
     reports: list[ExampleReport] = []
     failures = 0
 
