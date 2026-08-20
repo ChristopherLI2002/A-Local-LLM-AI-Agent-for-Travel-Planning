@@ -37,7 +37,7 @@ Edit `.env` if needed:
 
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama API |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API (use IPv4 loopback, not `localhost`, on Windows) |
 | `OLLAMA_MODEL` | `qwen2.5:3b` | Override with `-m` (e.g. `qwen2.5:7b` for quality) |
 | `TRIP_BASE_URL` | `https://hk.trip.com` | Market site |
 | `TRIP_LOCALE` | `en_hk` | Locale query param |
@@ -157,38 +157,60 @@ Supporting tools (used as needed): `search_flights`, `search_hotels`, `search_ca
 ## Project layout
 
 ```
-travel_agent/
-  gui.py                 # Desktop wizard + itinerary board
-  agent.py               # Ollama tool-calling loop + booking_links merge
-  browser_tools.py       # Playwright Trip.com tools (flights, hotels, cars, plan_trip)
-  planner_query.py       # Prompt builder from GUI context
-  itinerary_parse.py     # Parse LLM text into structured offers / day blocks
-  trip_urls.py           # Normalize / trust Trip.com URLs
-  regions.py             # Multi-city regional routes + night alignment
-  llm_select.py          # Ranking / attraction day arrangement
-  destination_guides.py  # Day-idea fallbacks when scrape is thin
-  attraction_images.py   # Attraction / timetable image helpers
-  places.py              # City ↔ airport / hotel city helpers
-  pricing.py             # HKD price parse + comparisons
-  airline_names.py       # Airline code / logo helpers
-  ollama_lifecycle.py    # Start / ensure Ollama + model availability
-  cli.py                 # Entry: GUI by default, --cli / -q for terminal
-  config.py              # Settings from .env (+ frozen EXE paths)
+travel_agent/             # Main package
+  agent.py               #   Ollama tool-calling loop + booking_links merge
+  browser_tools.py       #   Playwright Trip.com tools (flights, hotels, cars, plan_trip)
+  gui.py                 #   Desktop wizard + itinerary board (tkinter + Pillow)
+  cli.py                 #   Entry: GUI by default, --cli / -q for terminal
+  config.py              #   Settings from .env (+ frozen EXE paths)
+  planner_query.py       #   Prompt builder from GUI context
+  itinerary_parse.py     #   Parse LLM text into structured offers / day blocks
+  trip_urls.py           #   Normalize / trust Trip.com URLs
+  regions.py             #   Multi-city regional routes + night alignment
+  llm_select.py          #   Ranking / attraction day arrangement
+  destination_guides.py  #   Day-idea fallbacks when scrape is thin
+  attraction_images.py   #   Attraction / timetable image helpers
+  places.py              #   City ↔ airport / hotel city helpers
+  pricing.py             #   HKD price parse + comparisons
+  airline_names.py       #   Airline code / logo helpers
+  ollama_lifecycle.py    #   Start / ensure Ollama + model availability
 
-tests/                   # Trip example suite (logic + optional live scrape)
-scripts/                 # Ad-hoc debug helpers for scraping / cards
-voyage.py                # Frozen EXE entry point
+tests/                   # Automated tests
+  run_trip_examples.py   #   Fast logic suite (50 scenarios, no browser)
+  run_trip_examples_live.py  # Full live Trip.com scrape (slow, hours)
+  trip_examples_50.py    #   Scenario definitions
+  test_llm_select.py     #   Unit tests for ranking/selection helpers
+  test_card_parse.py     #   Itinerary card parsing assertions
+  test_structured_cards.py   # Structured tool card vs bad LLM text
+  test_flight_row_parse.py   # Flight row parser (uses fixture from scripts/)
+  test_hotel_link.py     #   Hotel URL resolution (live browser)
+
+scripts/                 # Ad-hoc debug helpers (require live browser)
+  debug_flight_scrape.py #   Capture flight body text fixture
+  debug_return_scrape.py #   Scrape return-leg after "Select" click
+  debug_hotel_image.py   #   Inspect hotel photo URLs
+
+voyage.py                # Frozen EXE entry point (PyInstaller)
 voyage.spec              # PyInstaller build definition
 build_exe.bat            # One-click Windows EXE build → dist\VoyageApp\
+setup.py                 # pip-installable package metadata
 ```
 
 ## Tests
 
 ```bash
-# Fast logic checks (no browser)
+# Fast logic checks — 50 scenarios, no browser (seconds)
 python -m tests.run_trip_examples
 
-# Live Trip.com scrape for the example set (slow)
+# Unit tests (no browser)
+python -m tests.test_card_parse
+python -m tests.test_structured_cards
+python -m tests.test_llm_select
+
+# Flight row parser (needs fixture from scripts/debug_flight_scrape.py)
+python -m tests.test_flight_row_parse
+
+# Live Trip.com scrape for the full example set (slow — hours)
 python -m tests.run_trip_examples_live
 python -m tests.run_trip_examples_live --resume
 python -m tests.run_trip_examples_live --ids 1,27,50
@@ -196,6 +218,7 @@ python -m tests.run_trip_examples_live --mode scrape
 ```
 
 Results go under `tests/live_results/` (`progress.jsonl`, transcripts, `summary.json`).
+This folder is git-ignored.
 
 ## Notes
 
@@ -205,6 +228,16 @@ Results go under `tests/live_results/` (`progress.jsonl`, transcripts, `summary.
 - If Chromium is missing, Voyage tries installed **Chrome** or **Edge**.
 - No embedded map; use day cards plus Open Trip.Planner / booking links.
 - Default model: `qwen2.5:3b` (`OLLAMA_MODEL` or `-m` to override).
+
+### Ollama troubleshooting (Windows)
+
+If you see `WinError 10054`, `502`, or “Ollama failed during generation”:
+
+1. Use IPv4 in `.env`: `OLLAMA_HOST=http://127.0.0.1:11434` (not `localhost`)
+2. Run the diagnostic: `python scripts/diagnose_ollama.py`
+3. Confirm Ollama works: `ollama run qwen2.5:3b "Say hi"`
+
+Voyage auto-starts Ollama when needed; you do **not** need a second `ollama serve` if port 11434 is already in use.
 
 ## License / attribution
 

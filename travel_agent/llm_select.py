@@ -7,9 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import ollama
-
-from travel_agent.config import ollama_chat_options, settings
+from travel_agent.config import make_ollama_client, ollama_chat_options, settings
 from travel_agent.pricing import parse_prices
 
 
@@ -231,7 +229,7 @@ def _llm_pick_index(
     )
 
     try:
-        client = ollama.Client(host=host)
+        client = make_ollama_client(host)
         response = client.chat(
             model=model,
             messages=[
@@ -936,7 +934,7 @@ def arrange_attraction_route(
     )
 
     try:
-        client = ollama.Client(host=host)
+        client = make_ollama_client(host)
         response = client.chat(
             model=model,
             messages=[

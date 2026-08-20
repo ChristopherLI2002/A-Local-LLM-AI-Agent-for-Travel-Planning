@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-import ollama
-
 from travel_agent.browser_tools import TOOL_DEFINITIONS, TripBrowser, dispatch_tool
-from travel_agent.config import ollama_chat_options, resolve_ollama_model, settings
+from travel_agent.config import (
+    make_ollama_client,
+    ollama_chat_options,
+    resolve_ollama_model,
+    settings,
+)
+from travel_agent.ollama_lifecycle import ensure_ollama_running
 from travel_agent.trip_urls import extract_booking_urls, is_trusted_hotel_detail_url, score_booking_url
 
 SYSTEM_PROMPT = """You are Voyage — a Trip.Planner-style AI travel concierge for Trip.com Hong Kong (hk.trip.com, HKD).
@@ -72,13 +76,14 @@ class TravelAgent:
         model: str | None = None,
         on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_end: Callable[[str, str], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
     ) -> None:
         preferred = model or settings.ollama_model
         try:
             self.model = resolve_ollama_model(preferred, host=settings.ollama_host)
         except RuntimeError:
             self.model = preferred
-        self.client = ollama.Client(host=settings.ollama_host)
+        self.client = make_ollama_client(settings.ollama_host)
         self.browser = TripBrowser()
         self.browser.llm_model = self.model
         self.browser.llm_host = settings.ollama_host
@@ -87,6 +92,7 @@ class TravelAgent:
         ]
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
+        self.on_status = on_status
         self.booking_links: dict[str, str] = self._new_booking_links()
         # GUI / prompt override — do not rely on the model to pass rent_car
         self.force_rent_car: bool = False
@@ -189,6 +195,70 @@ class TravelAgent:
         if name == "plan_trip" and ctx_n and ctx_in and ctx_out:
             args["depart_date"] = ctx_in
             args["return_date"] = ctx_out
+
+    @staticmethod
+    def _is_retryable_ollama_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "10054" in msg
+            or "forcibly closed by the remote host" in msg
+            or "connection reset" in msg
+            or "connection aborted" in msg
+            or "status code: 502" in msg
+            or "502 bad gateway" in msg
+        )
+
+    def _chat_with_recovery(self, *, tools: list[dict[str, Any]]) -> dict[str, Any]:
+        """Run one Ollama chat call, reconnecting once on socket reset.
+
+        Avoid force-restarting Ollama here because the user may already be
+        running ``ollama serve`` manually in a visible terminal window.
+        """
+
+        try:
+            return self.client.chat(
+                model=self.model,
+                messages=self.messages,
+                tools=tools,
+                options=ollama_chat_options(),
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "not found" in msg.lower() or "404" in msg:
+                raise RuntimeError(
+                    f"Ollama model '{self.model}' is not available. "
+                    f"Run: ollama pull {self.model}"
+                ) from exc
+            if not self._is_retryable_ollama_error(exc):
+                raise
+            if self.on_status:
+                self.on_status("Lost connection to Ollama, retrying…")
+
+        ensure_ollama_running(
+            restart=False,
+            model=self.model,
+            on_progress=self.on_status,
+            ensure_model=True,
+        )
+        self.client = make_ollama_client(settings.ollama_host)
+        self.browser.llm_host = settings.ollama_host
+        self.browser.llm_model = self.model
+        if self.on_status:
+            self.on_status("Reconnected to Ollama")
+        try:
+            return self.client.chat(
+                model=self.model,
+                messages=self.messages,
+                tools=tools,
+                options=ollama_chat_options(),
+            )
+        except Exception as exc:
+            if self._is_retryable_ollama_error(exc):
+                raise RuntimeError(
+                    "Ollama failed during generation and did not recover. "
+                    "Keep `ollama serve` running in a separate terminal and try again."
+                ) from exc
+            raise
 
     def _apply_plan_flight_card(self) -> None:
         """Copy frozen open-jaw / plan flight scrape into booking_links."""
@@ -297,21 +367,7 @@ class TravelAgent:
                     self.booking_links[k] = ""
 
         for _ in range(settings.max_tool_rounds):
-            try:
-                response = self.client.chat(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=tools,
-                    options=ollama_chat_options(),
-                )
-            except Exception as exc:
-                msg = str(exc)
-                if "not found" in msg.lower() or "404" in msg:
-                    raise RuntimeError(
-                        f"Ollama model '{self.model}' is not available. "
-                        f"Run: ollama pull {self.model}"
-                    ) from exc
-                raise
+            response = self._chat_with_recovery(tools=tools)
             message = response["message"]
             self.messages.append(message)
 
@@ -578,12 +634,7 @@ class TravelAgent:
                     }
                 )
 
-        response = self.client.chat(
-            model=self.model,
-            messages=self.messages,
-            tools=tools,
-            options=ollama_chat_options(),
-        )
+        response = self._chat_with_recovery(tools=tools)
         message = response["message"]
         self.messages.append(message)
         self._apply_plan_flight_card()

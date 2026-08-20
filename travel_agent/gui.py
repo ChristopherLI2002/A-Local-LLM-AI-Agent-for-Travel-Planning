@@ -4891,6 +4891,10 @@ class TravelAgentApp(tk.Tk):
                     model=self.model,
                     on_tool_start=self._on_tool_start,
                     on_tool_end=self._on_tool_end,
+                    on_status=lambda msg: self.after(
+                        0,
+                        lambda m=msg: self._set_status(m, C["muted"]),
+                    ),
                 )
                 agent.start()
                 self.agent = agent

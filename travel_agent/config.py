@@ -43,9 +43,27 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def normalize_ollama_host(host: str | None = None) -> str:
+    """Use IPv4 loopback — ``localhost`` often resolves to ``::1`` on Windows
+    while Ollama listens on ``127.0.0.1``, causing WinError 10054 / 502."""
+    raw = (host or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
+    return raw.replace("://localhost", "://127.0.0.1").replace("://localhost:", "://127.0.0.1:")
+
+
+def make_ollama_client(host: str | None = None):
+    """Shared Ollama client — bypasses system proxy for local API calls."""
+    import ollama
+
+    return ollama.Client(
+        host=normalize_ollama_host(host),
+        trust_env=False,
+        timeout=300.0,
+    )
+
+
 @dataclass
 class Settings:
-    ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    ollama_host: str = normalize_ollama_host()
     # Lighter default for faster local responses (still tool-capable).
     ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
     trip_base_url: str = os.getenv("TRIP_BASE_URL", "https://hk.trip.com")
@@ -94,7 +112,7 @@ def list_ollama_models(host: str | None = None) -> list[str]:
     try:
         import ollama
 
-        client = ollama.Client(host=host or settings.ollama_host)
+        client = make_ollama_client(host or settings.ollama_host)
         raw = client.list()
     except Exception:
         return []

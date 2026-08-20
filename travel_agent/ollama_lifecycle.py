@@ -11,7 +11,7 @@ import time
 import urllib.request
 from typing import Callable
 
-from travel_agent.config import settings
+from travel_agent.config import normalize_ollama_host, settings
 
 _CREATE_NO_WINDOW = 0x08000000
 _DETACHED_PROCESS = 0x00000008
@@ -51,7 +51,7 @@ def _run_hidden(args: list[str], *, timeout: float = 20) -> None:
 
 
 def is_ollama_ready(host: str | None = None, timeout: float = 2.0) -> bool:
-    base = (host or settings.ollama_host).rstrip("/")
+    base = normalize_ollama_host(host or settings.ollama_host).rstrip("/")
     url = f"{base}/api/tags"
     try:
         req = urllib.request.Request(url, method="GET")
@@ -63,7 +63,7 @@ def is_ollama_ready(host: str | None = None, timeout: float = 2.0) -> bool:
 
 def fetch_ollama_model_names(host: str | None = None, timeout: float = 5.0) -> list[str]:
     """List installed model tags via the HTTP API."""
-    base = (host or settings.ollama_host).rstrip("/")
+    base = normalize_ollama_host(host or settings.ollama_host).rstrip("/")
     url = f"{base}/api/tags"
     try:
         req = urllib.request.Request(url, method="GET")
@@ -183,7 +183,7 @@ def ensure_ollama_model(
     on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Ensure the preferred model is installed; pull it automatically if missing."""
-    host = host or settings.ollama_host
+    host = normalize_ollama_host(host or settings.ollama_host)
     want = (model or settings.ollama_model or "qwen2.5:3b").strip()
 
     if model_is_installed(want, host):
@@ -379,7 +379,7 @@ def ensure_ollama_running(
 
     Returns the resolved model name when ``ensure_model`` is True, else None.
     """
-    host = host or settings.ollama_host
+    host = normalize_ollama_host(host or settings.ollama_host)
 
     if not restart and is_ollama_ready(host):
         if on_progress:

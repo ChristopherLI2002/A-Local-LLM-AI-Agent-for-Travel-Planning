@@ -117,6 +117,7 @@ def _run_cli(args: argparse.Namespace) -> int:
         on_tool_end=lambda name, preview: console.print(
             f"[green]<- {name}[/green]\n[dim]{preview}[/dim]\n"
         ),
+        on_status=lambda msg: console.print(f"[dim]{msg}[/dim]"),
     )
 
     try:
