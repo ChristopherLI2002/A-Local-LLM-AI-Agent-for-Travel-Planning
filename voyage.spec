@@ -3,10 +3,11 @@
 # Build:  python -m PyInstaller --noconfirm voyage.spec
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+import certifi
 
 block_cipher = None
 
-datas = []
+datas = [(certifi.where(), "certifi")]
 binaries = []
 hiddenimports = [
     "travel_agent",
@@ -30,6 +31,9 @@ hiddenimports = [
     "PIL.Image",
     "PIL.ImageTk",
     "dotenv",
+    "certifi",
+    "httpx",
+    "httpcore",
     "ollama",
     "rich",
 ]

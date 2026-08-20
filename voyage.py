@@ -20,6 +20,17 @@ def _prepare_env() -> None:
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         os.chdir(exe_dir)
+        # httpx/ollama need a CA bundle inside the PyInstaller _internal tree.
+        meipass = getattr(sys, "_MEIPASS", "")
+        for base in (meipass, exe_dir):
+            if not base:
+                continue
+            for rel in ("certifi/cacert.pem", "cacert.pem"):
+                ca = os.path.join(base, rel)
+                if os.path.isfile(ca):
+                    os.environ.setdefault("SSL_CERT_FILE", ca)
+                    os.environ.setdefault("REQUESTS_CA_BUNDLE", ca)
+                    break
 
 
 def main() -> int:
