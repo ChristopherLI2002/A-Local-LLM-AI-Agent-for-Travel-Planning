@@ -459,6 +459,24 @@ def _acceptable_image_url(url: str) -> str:
 def _search_phrases(text: str, city: str = "") -> list[str]:
     """Build ordered search phrases for multi-source image lookup."""
     phrases: list[str] = []
+    raw = text or ""
+
+    # Compound lines: "Westminster Abbey + Big Ben / photo stop"
+    for part in re.split(r"\s*[+/|]\s*", raw):
+        part = part.strip()
+        if len(part) < 4:
+            continue
+        specific = _title_lookup(part)
+        if specific and specific.lower() != "airport":
+            phrases.append(specific)
+        parsed = _wiki_title_from_text(part)
+        if (
+            parsed
+            and parsed not in phrases
+            and len(parsed) > 2
+            and parsed.lower() != "airport"
+        ):
+            phrases.append(parsed)
 
     # Airports: use a real photo subject, never the generic "Airport" diagram page
     if _is_airport_query(text):
@@ -605,6 +623,18 @@ def _loremflickr_image(query: str, *, width: int = 480, height: int = 320) -> st
     return f"https://picsum.photos/seed/{seed}/{w}/{h}"
 
 
+def is_generic_stock_image_url(url: str) -> bool:
+    """True for Picsum/LoremFlickr placeholders — not landmark photos."""
+    low = (url or "").strip().lower()
+    if not low.startswith("http"):
+        return False
+    return (
+        "picsum.photos" in low
+        or "loremflickr.com" in low
+        or "defaultimage" in low
+    )
+
+
 def candidate_image_urls(
     text: str,
     city: str = "",
@@ -705,9 +735,9 @@ def images_for_timetable(body: str, city: str = "") -> dict[str, str]:
 def images_for_timetable_offline(body: str, city: str = "") -> dict[str, str]:
     """Map HH:MM rows to URLs without network I/O (UI-thread safe).
 
-    Uses scraped Trip.com covers when present; otherwise a deterministic
-    Picsum seed URL. Wikipedia/Openverse resolution happens later
-    via the async thumb binder.
+    Uses scraped Trip.com covers when present. Otherwise leaves the slot
+    empty so the async binder can resolve Wikipedia/Openverse photos
+    (never random Picsum stock on first paint).
     """
     out: dict[str, str] = {}
     used: set[str] = set()
@@ -722,10 +752,6 @@ def images_for_timetable_offline(body: str, city: str = "") -> dict[str, str]:
         if trip and _image_identity(trip) not in used:
             out[t] = trip
             used.add(_image_identity(trip))
-            continue
-        url = _loremflickr_image(f"{city}|{t}|{detail}")
-        out[t] = url
-        used.add(_image_identity(url))
     return out
 
 

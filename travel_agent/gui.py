@@ -2753,7 +2753,20 @@ class TravelAgentApp(tk.Tk):
     def _day_theme_icon(self, text: str) -> str:
         """Pick a simple footer icon from the day's activity text."""
         low = (text or "").lower()
-        if any(k in low for k in ("flight", "airport", "arrive", "depart", "transfer")):
+        if any(
+            k in low
+            for k in (
+                "land at airport",
+                "hotel check-in",
+                "check-in and drop",
+                "arrival ·",
+                "arrive at",
+            )
+        ):
+            return "⌂"
+        if any(k in low for k in ("flight departs", "departure day", "checkout →")):
+            return "✈"
+        if any(k in low for k in ("flight", "airport", "depart", "transfer")):
             return "✈"
         if any(k in low for k in ("dinner", "lunch", "food", "cuisine", "ramen", "sushi", "cafe")):
             return "🍽"
@@ -2846,12 +2859,15 @@ class TravelAgentApp(tk.Tk):
             _loremflickr_image,
             candidate_image_urls,
             fetch_image_bytes,
+            is_generic_stock_image_url,
             sanitize_image_url,
         )
 
         dest = self._trip_context.get("destination", "") or ""
         avoid = set(used_ids or ())
         first = sanitize_image_url(url) if url else ""
+        if first and is_generic_stock_image_url(first):
+            first = ""
         if first:
             avoid.discard(_image_identity(first))
             cache_key = f"{first}|{size[0]}x{size[1]}"
@@ -2903,16 +2919,19 @@ class TravelAgentApp(tk.Tk):
                 chosen = cand
                 return True
 
-            # Fetch the assigned URL first — never block on Wiki/Openverse before
-            # showing the LoremFlickr / Trip.com cover we already have.
-            if not (first and _try(first)):
+            # Trip.com cover first; otherwise Wikipedia/Openverse (not random stock).
+            if first and not is_generic_stock_image_url(first) and _try(first):
+                pass
+            else:
                 claimed = set(used_ids or ())
                 if first:
                     claimed.discard(_image_identity(first))
                 try:
                     for cand in candidate_image_urls(
-                        detail, dest, limit=4, exclude=set(avoid) | claimed
+                        detail, dest, limit=6, exclude=set(avoid) | claimed
                     ):
+                        if is_generic_stock_image_url(cand):
+                            continue
                         if _try(cand):
                             break
                 except Exception:
@@ -3484,24 +3503,67 @@ class TravelAgentApp(tk.Tk):
     def _time_looks_ok(self, raw: str) -> bool:
         return bool(re.fullmatch(r"[0-2]?\d:[0-5]\d", (raw or "").strip()))
 
+    def _flight_card_snapshot(self) -> dict[str, str]:
+        """Merged flight scrape + booking_links for readiness checks."""
+        if not self.agent:
+            return {}
+        plan = dict(getattr(self.agent.browser, "last_plan_flight_card", None) or {})
+        live = dict(getattr(self.agent.browser, "last_flight_card", None) or {})
+        links = {
+            k: v
+            for k, v in self.agent.booking_links.items()
+            if k.startswith("flight") and v
+        }
+        card = plan if self._time_looks_ok(plan.get("flight_depart", "")) else live
+        merged = {**card, **links}
+        for k, v in plan.items():
+            if v and k.startswith("flight"):
+                merged.setdefault(k, v)
+        return merged
+
+    def _flight_leg_plausible(self, card: dict[str, str], *, ret: bool = False) -> bool:
+        from travel_agent.itinerary_parse import is_plausible_flight_clock_times
+
+        if ret:
+            dep = card.get("flight_return_depart", "")
+            arr = card.get("flight_return_arrive", "")
+            from_code = card.get("flight_return_from", "")
+            to_code = card.get("flight_return_to", "")
+            duration = card.get("flight_return_duration", "")
+        else:
+            dep = card.get("flight_depart", "")
+            arr = card.get("flight_arrive", "")
+            from_code = card.get("flight_from", "")
+            to_code = card.get("flight_to", "")
+            duration = card.get("flight_duration", "")
+        if not self._time_looks_ok(dep):
+            return False
+        return is_plausible_flight_clock_times(
+            dep,
+            arr,
+            from_code=from_code,
+            to_code=to_code,
+            duration=duration,
+        )
+
     def _flight_fields_ready(self) -> bool:
         """True when scraped flight times are good enough to paint without re-scrape."""
         if not self.agent:
             return False
-        plan = dict(getattr(self.agent.browser, "last_plan_flight_card", None) or {})
-        live = dict(getattr(self.agent.browser, "last_flight_card", None) or {})
-        links = self.agent.booking_links
-        card = plan if self._time_looks_ok(plan.get("flight_depart", "")) else live
-        if not self._time_looks_ok(card.get("flight_depart", "")):
-            card = {
-                **card,
-                **{k: v for k, v in links.items() if k.startswith("flight") and v},
-            }
+        card = self._flight_card_snapshot()
         if not self._time_looks_ok(card.get("flight_depart", "")):
             return False
-        if not is_plausible_airline_name(card.get("flight_airline") or links.get("flight_airline") or ""):
-            # Times alone are enough to avoid a full re-scrape; airline can stay soft.
-            pass
+        if not self._flight_leg_plausible(card, ret=False):
+            return False
+        ret_date = (self._trip_context.get("return_date") or "").strip()
+        arrive = (self._trip_context.get("arrive_airport") or "").strip().upper()
+        ret_from = (self._trip_context.get("depart_airport") or "").strip().upper()
+        open_jaw = bool(arrive and ret_from and arrive != ret_from)
+        if ret_date and not open_jaw:
+            if not self._time_looks_ok(card.get("flight_return_depart", "")):
+                return False
+            if not self._flight_leg_plausible(card, ret=True):
+                return False
         return True
 
     def _hotel_fields_ready(self) -> bool:
@@ -3871,10 +3933,18 @@ class TravelAgentApp(tk.Tk):
                 and ctx.get("depart_date")
                 and _alive()
             ):
-                if not (
-                    self.agent.booking_links.get("flight_airline")
-                    or self.agent.booking_links.get("flight_depart")
-                ):
+                card = self._flight_card_snapshot()
+                need_return = bool((ctx.get("return_date") or checkout) and not open_jaw)
+                outbound_bad = not self._flight_leg_plausible(card, ret=False)
+                return_bad = need_return and (
+                    not self._time_looks_ok(card.get("flight_return_depart", ""))
+                    or not self._flight_leg_plausible(card, ret=True)
+                )
+                if (
+                    not card.get("flight_depart")
+                    or outbound_bad
+                    or return_bad
+                ) and _alive():
                     _progress("Fetching flight times…", 92)
                     dest_code = arrive or to_flight_code(ctx["destination"]).upper()
                     live_flight = fetch_flight_card(
@@ -4872,6 +4942,30 @@ class TravelAgentApp(tk.Tk):
                 offer.return_airline = offer.airline
             if is_plausible_airline_name(offer.return_airline) and not offer.return_airline_logo:
                 offer.return_airline_logo = airline_logo_url(offer.return_airline)
+        from travel_agent.itinerary_parse import is_plausible_flight_clock_times
+
+        if not is_plausible_flight_clock_times(
+            offer.depart_time,
+            offer.arrive_time,
+            from_code=offer.depart_airport,
+            to_code=offer.arrive_airport,
+            duration=offer.duration,
+        ):
+            offer.depart_time = "--:--"
+            offer.arrive_time = "--:--"
+        if (
+            offer.return_depart_time
+            and offer.return_depart_time != "--:--"
+            and not is_plausible_flight_clock_times(
+                offer.return_depart_time,
+                offer.return_arrive_time,
+                from_code=offer.return_depart_airport,
+                to_code=offer.return_arrive_airport,
+                duration=offer.return_duration,
+            )
+        ):
+            offer.return_depart_time = "--:--"
+            offer.return_arrive_time = "--:--"
 
     def _enrich_hotel_offer(self, parsed: ParsedItinerary, *, hotel_name: str = "") -> None:
         """Prefer tool-scraped hotel name/price/score over LLM prose."""

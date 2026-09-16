@@ -5,8 +5,13 @@ from __future__ import annotations
 from travel_agent.attraction_images import (
     _loremflickr_image,
     images_for_timetable_offline,
+    is_generic_stock_image_url,
 )
-from travel_agent.itinerary_parse import parse_hotel_offer, parse_itinerary
+from travel_agent.itinerary_parse import (
+    is_plausible_flight_clock_times,
+    parse_hotel_offer,
+    parse_itinerary,
+)
 from travel_agent.planner_query import (
     is_placeholder_card_text,
     is_travel_style_label,
@@ -36,6 +41,21 @@ def main() -> int:
     assert is_travel_style_label("Stay · First-time (7 nights)")
     assert not is_travel_style_label("Osaka")
 
+    assert not is_plausible_flight_clock_times(
+        "18:00",
+        "19:15",
+        from_code="HKG",
+        to_code="LGW",
+        duration="",
+    )
+    assert is_plausible_flight_clock_times(
+        "18:00",
+        "06:30",
+        from_code="HKG",
+        to_code="LGW",
+        duration="13h 30m",
+    )
+
     offer = parse_hotel_offer(BAD_HOTEL_PLAN)
     assert not offer.name or "see tool" not in offer.name.lower(), offer.name
 
@@ -50,13 +70,11 @@ def main() -> int:
         "21:00 Rest at hotel\n"
     )
     imgs = images_for_timetable_offline(body, "Osaka")
-    assert len(imgs) == 4, imgs
-    urls = list(imgs.values())
-    assert len(set(urls)) == 4, urls
-    assert all("picsum.photos/seed/" in u for u in urls), urls
+    assert len(imgs) == 0, imgs
+    assert is_generic_stock_image_url(_loremflickr_image("a"))
     assert _loremflickr_image("a") != _loremflickr_image("b")
 
-    print("PASS", urls[0])
+    print("PASS")
     return 0
 
 

@@ -37,6 +37,113 @@ _PRICE_RE = re.compile(
     re.I,
 )
 
+# Metro airport groups for long-haul plausibility (HKG→LGW in 1h is impossible)
+_METRO_AIRPORT: dict[str, str] = {
+    "lon": "lon",
+    "lhr": "lon",
+    "lgw": "lon",
+    "stn": "lon",
+    "ltn": "lon",
+    "tyo": "tyo",
+    "nrt": "tyo",
+    "hnd": "tyo",
+    "nyc": "nyc",
+    "jfk": "nyc",
+    "ewr": "nyc",
+    "lga": "nyc",
+    "par": "par",
+    "cdg": "par",
+    "ory": "par",
+    "bjs": "bjs",
+    "pek": "bjs",
+    "pkx": "bjs",
+    "sha": "sha",
+    "pvg": "sha",
+    "sel": "sel",
+    "icn": "sel",
+    "gmp": "sel",
+    "osa": "osa",
+    "kix": "osa",
+    "itm": "osa",
+    "sfo": "sfo",
+    "lax": "lax",
+    "sin": "sin",
+    "bkk": "bkk",
+    "tpe": "tpe",
+    "hkg": "hkg",
+}
+
+_ASIA_HUBS = frozenset(
+    {"hkg", "sin", "bkk", "tyo", "nrt", "hnd", "icn", "sel", "pvg", "sha", "pek", "bjs", "tpe", "osa", "kix", "kul", "mnl", "jkt", "dps"}
+)
+_EU_US_HUBS = frozenset(
+    {"lon", "lhr", "lgw", "par", "cdg", "fra", "ams", "nyc", "jfk", "lax", "sfo", "ord", "iad", "dfw", "sea", "bos", "mia", "yvr", "syd", "mel", "akl"}
+)
+
+
+def _metro_airport(code: str) -> str:
+    c = re.sub(r"[^A-Za-z]", "", (code or "").lower())[:3]
+    return _METRO_AIRPORT.get(c, c)
+
+
+def _clock_minutes(hhmm: str) -> int | None:
+    m = re.fullmatch(r"([0-2]?\d):([0-5]\d)", (hhmm or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def _elapsed_minutes(dep: str, arr: str) -> int | None:
+    d = _clock_minutes(dep)
+    a = _clock_minutes(arr)
+    if d is None or a is None:
+        return None
+    if a >= d:
+        return a - d
+    return (24 * 60 - d) + a
+
+
+def _duration_minutes(duration: str) -> int | None:
+    if not duration:
+        return None
+    m = re.search(r"(?i)(\d+)\s*h(?:ours?)?(?:\s*(\d+)\s*m(?:ins?)?)?", duration)
+    if not m:
+        m = re.search(r"(?i)(\d+)\s*h\s*(\d+)\s*m", duration)
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2) or 0)
+
+
+def is_plausible_flight_clock_times(
+    depart_time: str,
+    arrive_time: str,
+    *,
+    from_code: str = "",
+    to_code: str = "",
+    duration: str = "",
+) -> bool:
+    """Reject scrapes like HKG 18:00 → LGW 19:15 (same-day 1h long-haul)."""
+    dep = (depart_time or "").strip()
+    arr = (arrive_time or "").strip()
+    if not dep or not arr or dep == "--:--" or arr == "--:--":
+        return False
+    dur_min = _duration_minutes(duration)
+    if dur_min and dur_min >= 360:
+        return True
+    elapsed = _elapsed_minutes(dep, arr)
+    if elapsed is None:
+        return True
+    src = _metro_airport(from_code)
+    dst = _metro_airport(to_code)
+    intercontinental = (src in _ASIA_HUBS and dst in _EU_US_HUBS) or (
+        src in _EU_US_HUBS and dst in _ASIA_HUBS
+    )
+    if intercontinental and elapsed < 240:
+        return False
+    if dur_min and dur_min >= 180 and elapsed < 120:
+        return False
+    return True
+
 
 @dataclass
 class Block:
