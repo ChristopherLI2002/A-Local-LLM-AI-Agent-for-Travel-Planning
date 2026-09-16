@@ -764,11 +764,14 @@ def ensure_day_blocks(
             attraction_plan=attraction_plan,
         )
     else:
-        from travel_agent.attraction_images import enrich_block_images, images_for_timetable
+        from travel_agent.attraction_images import (
+            enrich_block_images_offline,
+            images_for_timetable_offline,
+        )
         from travel_agent.destination_guides import day_ideas_for, format_day_body, format_day_title
 
         for day in parsed.days:
-            enrich_block_images(day, destination)
+            enrich_block_images_offline(day, destination)
 
         # Patch arrival / departure days to match live flight times
         if arrive_time or return_depart_time:
@@ -783,19 +786,19 @@ def ensure_day_blocks(
                 body = format_day_body(ideas[0], arrive_time=arrive_time)
                 parsed.days[0].title = format_day_title(ideas[0], 1)
                 parsed.days[0].body = body
-                parsed.days[0].images = images_for_timetable(body, destination)
+                parsed.days[0].images = images_for_timetable_offline(body, destination)
             if ideas and parsed.days and return_depart_time:
                 last = ideas[-1]
                 idx = len(parsed.days)
                 body = format_day_body(last, return_depart_time=return_depart_time)
                 parsed.days[-1].title = format_day_title(last, idx)
                 parsed.days[-1].body = body
-                parsed.days[-1].images = images_for_timetable(body, destination)
+                parsed.days[-1].images = images_for_timetable_offline(body, destination)
 
     # Even after a full guide rebuild, re-stamp Day 1 / last day if live times exist
     # (covers cases where days looked "detailed" with a wrong 11:00 arrival stub).
     if parsed.days and (arrive_time or return_depart_time):
-        from travel_agent.attraction_images import images_for_timetable
+        from travel_agent.attraction_images import images_for_timetable_offline
         from travel_agent.destination_guides import day_ideas_for, format_day_body, format_day_title
 
         ideas = day_ideas_for(
@@ -809,12 +812,12 @@ def ensure_day_blocks(
             body = format_day_body(ideas[0], arrive_time=arrive_time)
             parsed.days[0].title = format_day_title(ideas[0], 1)
             parsed.days[0].body = body
-            parsed.days[0].images = images_for_timetable(body, destination)
+            parsed.days[0].images = images_for_timetable_offline(body, destination)
         if ideas and return_depart_time and len(parsed.days) >= 1:
             last = ideas[min(len(ideas), len(parsed.days)) - 1]
             idx = len(parsed.days)
             body = format_day_body(last, return_depart_time=return_depart_time)
             parsed.days[-1].title = format_day_title(last, idx)
             parsed.days[-1].body = body
-            parsed.days[-1].images = images_for_timetable(body, destination)
+            parsed.days[-1].images = images_for_timetable_offline(body, destination)
     return parsed

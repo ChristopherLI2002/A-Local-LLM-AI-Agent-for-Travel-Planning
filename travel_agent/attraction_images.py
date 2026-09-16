@@ -698,11 +698,48 @@ def images_for_timetable(body: str, city: str = "") -> dict[str, str]:
     return out
 
 
+def images_for_timetable_offline(body: str, city: str = "") -> dict[str, str]:
+    """Map HH:MM rows to URLs without network I/O (UI-thread safe).
+
+    Uses scraped Trip.com covers when present; otherwise a deterministic
+    LoremFlickr placeholder. Wikipedia/Openverse resolution happens later
+    via the async thumb binder.
+    """
+    out: dict[str, str] = {}
+    used: set[str] = set()
+
+    for line in (body or "").splitlines():
+        m = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)\s+(.*)$", line.strip())
+        if not m:
+            continue
+        t = f"{int(m.group(1)):02d}:{m.group(2)}"
+        detail = m.group(3).strip()
+        trip = lookup_trip_attraction_image(detail)
+        if trip and _image_identity(trip) not in used:
+            out[t] = trip
+            used.add(_image_identity(trip))
+            continue
+        url = _loremflickr_image(f"{city}|{t}|{detail}")
+        out[t] = url
+        used.add(_image_identity(url))
+    return out
+
+
 def enrich_block_images(block: object, city: str = "") -> None:
     """Attach / refresh images so every timed row has a photo URL."""
     body = getattr(block, "body", "") or ""
     if not body or not hasattr(block, "images"):
         return
     imgs = images_for_timetable(body, city)
+    if imgs:
+        block.images = imgs  # type: ignore[attr-defined]
+
+
+def enrich_block_images_offline(block: object, city: str = "") -> None:
+    """UI-safe image attach — no Wikipedia/Openverse network calls."""
+    body = getattr(block, "body", "") or ""
+    if not body or not hasattr(block, "images"):
+        return
+    imgs = images_for_timetable_offline(body, city)
     if imgs:
         block.images = imgs  # type: ignore[attr-defined]

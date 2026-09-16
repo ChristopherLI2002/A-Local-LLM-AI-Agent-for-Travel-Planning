@@ -1389,21 +1389,7 @@ class HotelRowCard(tk.Frame):
     def _set_hotel_photo(self, offer: HotelOffer) -> None:
         url = (offer.image_url or "").strip().rstrip(".,;)")
         title = offer.name or "Hotel"
-        if not url.startswith("http") or title.lower().startswith("hotels in "):
-            try:
-                from travel_agent.attraction_images import lookup_image
-
-                city = offer.city or offer.location or "hotel"
-                query = (
-                    title
-                    if not title.lower().startswith("hotels in ")
-                    else f"{city} hotel exterior"
-                )
-                found = lookup_image(query, city=city)
-                if found and found.startswith("http"):
-                    url = found
-            except Exception:
-                pass
+        # Never call lookup_image here — it hits Wikipedia/Openverse on the UI thread.
         if not url.startswith("http"):
             self._offer_image_url = ""
             self._draw_photo_placeholder(title)
@@ -1651,54 +1637,71 @@ class CarRentalRowCard(tk.Frame):
         self.photo.create_text(60, 36, text="Car", fill="#8A95A1", font=FONT_SMALL)
 
     def _paint_photo(self, url: str) -> None:
-        try:
-            raw = (url or "").strip()
-            if not raw.startswith("http"):
-                self._draw_photo_placeholder()
+        """Show car placeholder immediately; fetch cover off the UI thread."""
+        self._draw_photo_placeholder()
+        raw = (url or "").strip()
+        if not raw.startswith("http"):
+            return
+        token = object()
+        self._car_photo_token = token
+        host = urllib.parse.urlparse(raw).netloc.lower()
+        referer = "https://hk.trip.com/"
+        if "c-ctrip.com" in host or "tripcdn" in host:
+            referer = "https://hk.trip.com/carhire/"
+
+        def worker() -> None:
+            try:
+                req = urllib.request.Request(
+                    raw,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/122.0.0.0 Safari/537.36"
+                        ),
+                        "Referer": referer,
+                        "Accept": (
+                            "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+                        ),
+                    },
+                )
+                data = urllib.request.urlopen(req, timeout=8).read()
+                if len(data) < 800:
+                    return
+                img = Image.open(BytesIO(data)).convert("RGB")
+                sample = img.resize((32, 20))
+                pixels = list(sample.getdata())
+                avg = sum(sum(px) for px in pixels) / max(len(pixels) * 3, 1)
+                if avg < 18:
+                    return
+                tw, th = 120, 72
+                scale = max(tw / max(img.width, 1), th / max(img.height, 1))
+                new_w = max(1, round(img.width * scale))
+                new_h = max(1, round(img.height * scale))
+                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                left = max(0, (new_w - tw) // 2)
+                top = max(0, (new_h - th) // 2)
+                fitted = resized.crop((left, top, left + tw, top + th))
+            except Exception:
                 return
-            # Ctrip CDN car photos (dimg*.c-ctrip.com) need a Trip.com referer
-            host = urllib.parse.urlparse(raw).netloc.lower()
-            referer = "https://hk.trip.com/"
-            if "c-ctrip.com" in host or "tripcdn" in host:
-                referer = "https://hk.trip.com/carhire/"
-            req = urllib.request.Request(
-                raw,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36"
-                    ),
-                    "Referer": referer,
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                },
-            )
-            data = urllib.request.urlopen(req, timeout=12).read()
-            if len(data) < 800:
-                self._draw_photo_placeholder()
-                return
-            img = Image.open(BytesIO(data)).convert("RGB")
-            # Reject near-black silhouette / empty CDN stubs
-            sample = img.resize((32, 20))
-            pixels = list(sample.getdata())
-            avg = sum(sum(px) for px in pixels) / max(len(pixels) * 3, 1)
-            if avg < 18:
-                self._draw_photo_placeholder()
-                return
-            tw, th = 120, 72
-            scale = max(tw / max(img.width, 1), th / max(img.height, 1))
-            new_w = max(1, round(img.width * scale))
-            new_h = max(1, round(img.height * scale))
-            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            left = max(0, (new_w - tw) // 2)
-            top = max(0, (new_h - th) // 2)
-            fitted = resized.crop((left, top, left + tw, top + th))
-            photo = ImageTk.PhotoImage(fitted)
-            self._car_photo = photo
-            self.photo.delete("all")
-            self.photo.create_image(0, 0, image=photo, anchor="nw")
-        except Exception:
-            self._draw_photo_placeholder()
+
+            def apply() -> None:
+                if getattr(self, "_car_photo_token", None) is not token:
+                    return
+                try:
+                    photo = ImageTk.PhotoImage(fitted)
+                    self._car_photo = photo
+                    self.photo.delete("all")
+                    self.photo.create_image(0, 0, image=photo, anchor="nw")
+                except Exception:
+                    self._draw_photo_placeholder()
+
+            try:
+                self.after(0, apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _open(self, _e: object | None = None) -> None:
         url = (self._url or "").strip()
@@ -2693,10 +2696,19 @@ class TravelAgentApp(tk.Tk):
 
         self.days_inner.columnconfigure(0, weight=1)
         self._timetable_thumb_seq = 0
-        for idx, day in enumerate(parsed.days):
-            self._add_day_card(day, index=idx)
+        # Paint one day per event-loop turn so Windows never marks us Not Responding.
+        days = list(parsed.days)
+        self._paint_days_incremental(days, 0)
 
-        self.after(80, self._on_page_body_configure)
+    def _paint_days_incremental(self, days: list[object], index: int) -> None:
+        if index >= len(days):
+            self.after(80, self._on_page_body_configure)
+            return
+        try:
+            self._add_day_card(days[index], index=index)
+        except Exception:
+            pass
+        self.after(1, lambda: self._paint_days_incremental(days, index + 1))
 
     def _day_calendar_date(self, index: int) -> str:
         """Calendar date for day card index 0 = trip depart date."""
@@ -2795,9 +2807,14 @@ class TravelAgentApp(tk.Tk):
         delay_ms: int = 0,
         used_ids: set[str] | None = None,
     ) -> None:
-        """Fetch bytes off-thread; build PhotoImage on the UI thread."""
+        """Resolve image URLs + fetch bytes off-thread; PhotoImage on UI thread.
+
+        Critical: never call candidate_image_urls / Wikipedia on the Tk thread —
+        that freezes the window for tens of seconds per day card.
+        """
         from travel_agent.attraction_images import (
             _image_identity,
+            _loremflickr_image,
             candidate_image_urls,
             fetch_image_bytes,
             sanitize_image_url,
@@ -2805,23 +2822,16 @@ class TravelAgentApp(tk.Tk):
 
         dest = self._trip_context.get("destination", "") or ""
         avoid = set(used_ids or ())
-        urls: list[str] = []
         first = sanitize_image_url(url) if url else ""
         if first:
-            urls.append(first)
-            avoid.discard(_image_identity(first))  # own assigned url is allowed
-        for cand in candidate_image_urls(detail, dest, limit=10, exclude=avoid):
-            if cand not in urls:
-                urls.append(cand)
-
-        for u in list(urls):
-            cache_key = f"{u}|{size[0]}x{size[1]}"
+            avoid.discard(_image_identity(first))
+            cache_key = f"{first}|{size[0]}x{size[1]}"
             cached = self._timetable_thumb_cache.get(cache_key)
             if cached is not None:
                 img_lbl.configure(image=cached)
                 img_lbl.image = cached
                 if used_ids is not None:
-                    used_ids.add(_image_identity(u))
+                    used_ids.add(_image_identity(first))
                 return
 
         def _apply(data: bytes | None, key: str, chosen: str) -> None:
@@ -2835,6 +2845,11 @@ class TravelAgentApp(tk.Tk):
                 self._timetable_thumb_cache[key] = photo
             img_lbl.configure(image=photo)
             img_lbl.image = photo
+            pins = getattr(self, "_timetable_photo_pins", None)
+            if pins is None:
+                self._timetable_photo_pins = [photo]
+            else:
+                pins.append(photo)
             if used_ids is not None and chosen:
                 used_ids.add(_image_identity(chosen))
 
@@ -2842,21 +2857,52 @@ class TravelAgentApp(tk.Tk):
             data = b""
             key = ""
             chosen = ""
-            claimed = set(used_ids or ())
-            if first:
-                claimed.discard(_image_identity(first))
-            for cand in urls:
-                ident = _image_identity(cand)
-                if ident and ident in claimed and cand != first:
-                    continue
-                data = fetch_image_bytes(cand)
-                if data:
-                    key = f"{cand}|{size[0]}x{size[1]}"
-                    chosen = cand
-                    break
-            self.after(0, lambda d=data, k=key, c=chosen: _apply(d, k, c))
 
-        self.after(max(0, delay_ms), lambda: threading.Thread(target=_worker, daemon=True).start())
+            def _try(cand: str) -> bool:
+                nonlocal data, key, chosen
+                cand = (cand or "").strip()
+                if not cand.startswith("http"):
+                    return False
+                try:
+                    blob = fetch_image_bytes(cand)
+                except Exception:
+                    blob = b""
+                if not blob:
+                    return False
+                data = blob
+                key = f"{cand}|{size[0]}x{size[1]}"
+                chosen = cand
+                return True
+
+            # Fetch the assigned URL first — never block on Wiki/Openverse before
+            # showing the LoremFlickr / Trip.com cover we already have.
+            if not (first and _try(first)):
+                claimed = set(used_ids or ())
+                if first:
+                    claimed.discard(_image_identity(first))
+                try:
+                    for cand in candidate_image_urls(
+                        detail, dest, limit=4, exclude=set(avoid) | claimed
+                    ):
+                        if _try(cand):
+                            break
+                except Exception:
+                    pass
+                if not data:
+                    try:
+                        _try(_loremflickr_image(f"{dest}|{detail}"))
+                    except Exception:
+                        pass
+
+            try:
+                self.after(0, lambda d=data, k=key, c=chosen: _apply(d, k, c))
+            except Exception:
+                pass
+
+        self.after(
+            max(0, min(int(delay_ms), 2500)),
+            lambda: threading.Thread(target=_worker, daemon=True).start(),
+        )
 
     def _draw_down_arrow_icon(self, parent: tk.Misc, *, color: str, size: int = 18) -> tk.Canvas:
         """Small canvas arrow icon (shaft + chevron head) for transfer rows."""
@@ -2893,15 +2939,15 @@ class TravelAgentApp(tk.Tk):
         urls = list(getattr(day, "urls", []) or [])
         from travel_agent.attraction_images import (
             _image_identity,
-            images_for_timetable,
-            lookup_image,
+            images_for_timetable_offline,
         )
 
         dest = self._trip_context.get("destination", "") or ""
         slot_images: dict[str, str] = dict(getattr(day, "images", {}) or {})
         if body:
-            # Always fill every timed row with distinct photos
-            filled = images_for_timetable(body, dest)
+            # Offline only — Wiki/Openverse lookups must not run on the UI thread
+            # (images_for_timetable can take ~50s for a single day).
+            filled = images_for_timetable_offline(body, dest)
             slot_images = filled or slot_images
         used_ids: set[str] = {
             _image_identity(u) for u in slot_images.values() if _image_identity(u)
@@ -3046,9 +3092,7 @@ class TravelAgentApp(tk.Tk):
                     anchor="w",
                     wraplength=280,
                 ).pack(side="left", fill="x", expand=True)
-                img_url = slot_images.get(time_txt, "") or lookup_image(
-                    detail, dest, exclude=used_ids
-                )
+                img_url = slot_images.get(time_txt, "")
                 if img_url:
                     used_ids.add(_image_identity(img_url))
                 # Show placeholder immediately; swap real photo in asynchronously
@@ -3066,18 +3110,19 @@ class TravelAgentApp(tk.Tk):
                 )
                 img_lbl.image = placeholder
                 img_lbl.pack(side="right", padx=(10, 0))
-                if img_url:
-                    seq = getattr(self, "_timetable_thumb_seq", 0)
-                    self._timetable_thumb_seq = seq + 1
-                    self._bind_timetable_thumb_async(
-                        img_lbl,
-                        img_url,
-                        detail=detail,
-                        accent=accent,
-                        size=(160, 110),
-                        delay_ms=120 * seq,
-                        used_ids=used_ids,
-                    )
+                # Always bind async so Wiki/Openverse can resolve off-thread
+                # even when we only have a LoremFlickr placeholder URL.
+                seq = getattr(self, "_timetable_thumb_seq", 0)
+                self._timetable_thumb_seq = seq + 1
+                self._bind_timetable_thumb_async(
+                    img_lbl,
+                    img_url,
+                    detail=detail,
+                    accent=accent,
+                    size=(160, 110),
+                    delay_ms=60 * seq,
+                    used_ids=used_ids,
+                )
                 row.configure(height=118)
                 row.pack_propagate(False)
             else:
@@ -3255,33 +3300,20 @@ class TravelAgentApp(tk.Tk):
                 ),
             )
             answer = self.agent.chat(query)
-            # Prefer paint-now when plan_trip already filled cards (avoids a
-            # second multi-minute Trip.com pass that freezes the window).
+            # Never start a second Trip.com scrape after plan_trip — that is what
+            # left the window on "finishing plan…" / Not Responding for minutes.
             self._apply_plan_flight_snapshot()
-            need_refresh = not self._booking_cards_ready_enough()
-            if need_refresh:
-                self.after(
-                    0,
-                    lambda: self._update_plan_progress(
-                        "Refreshing live booking cards…", floor=88
-                    ),
-                )
-                try:
-                    self._ensure_open_jaw_flight_card()
-                except Exception as exc:
-                    self._live_flight_error = str(exc)
-                try:
-                    self._refresh_live_booking_cards(max_seconds=25.0)
-                except Exception:
-                    pass
-                self._apply_plan_flight_snapshot()
-            else:
-                self.after(
-                    0,
-                    lambda: self._update_plan_progress(
-                        "Cards ready — painting itinerary…", floor=92
-                    ),
-                )
+            self.after(
+                0,
+                lambda: self._update_plan_progress(
+                    "Painting itinerary…", floor=94
+                ),
+            )
+            # Heavy parse/ensure on this worker thread so Tk only paints widgets.
+            try:
+                self._pending_parsed = self._prepare_parsed_plan(answer)
+            except Exception:
+                self._pending_parsed = None
             self.after(0, self._finish_plan_progress)
             return answer
 
@@ -3291,6 +3323,134 @@ class TravelAgentApp(tk.Tk):
             on_err=lambda e: self._apply_plan(f"Error: {e}"),
             done=lambda: self._set_busy(False),
         )
+
+    def _paint_live_booking_preview(self) -> None:
+        """Paint flight/hotel cards from scrape state right after plan_trip ends."""
+        if not self.agent:
+            return
+        try:
+            live = dict(
+                getattr(self.agent.browser, "last_plan_flight_card", None)
+                or getattr(self, "_live_flight_card", None)
+                or getattr(self.agent.browser, "last_flight_card", None)
+                or {}
+            )
+            if live.get("flight_depart") or live.get("flight"):
+                self.flight_row.set_offer(self._flight_offer_from_live_card(live))
+        except Exception:
+            pass
+        try:
+            links = self.agent.booking_links
+            name = (links.get("hotel_name") or "").strip()
+            if name and not name.lower().startswith(("hotels in ", "recommended hotel")):
+                from travel_agent.itinerary_parse import HotelOffer
+
+                offer = HotelOffer(
+                    name=name,
+                    url=links.get("hotel") or "",
+                    image_url=links.get("hotel_image") or "",
+                    price_label=links.get("hotel_price") or "",
+                    score=links.get("hotel_score") or "",
+                    location=links.get("hotel_location") or "",
+                )
+                self.hotel_row.set_offer(offer)
+        except Exception:
+            pass
+
+    def _sync_route_context_from_agent(self) -> None:
+        """Copy proposed route into _trip_context (safe on worker or UI thread)."""
+        if not self.agent:
+            return
+        try:
+            route = getattr(self.agent.browser, "last_proposed_route", None)
+            ctx_n = 0
+            try:
+                ctx_n = max(1, int(self._trip_context.get("nights") or 0))
+            except ValueError:
+                ctx_n = 0
+            if not ctx_n:
+                try:
+                    d0 = self._trip_context.get("depart_date") or ""
+                    d1 = self._trip_context.get("return_date") or ""
+                    if d0 and d1:
+                        ctx_n = max(
+                            1,
+                            (date.fromisoformat(d1) - date.fromisoformat(d0)).days,
+                        )
+                except ValueError:
+                    ctx_n = 0
+
+            if route is not None and getattr(route, "stays", None):
+                route_n = sum(
+                    max(1, int(getattr(s, "nights", 1) or 1)) for s in route.stays
+                )
+                if ctx_n and route_n < ctx_n:
+                    from travel_agent.regions import (
+                        align_route_to_nights,
+                        build_regional_route,
+                    )
+
+                    dest = self._trip_context.get("destination") or ""
+                    depart = self._trip_context.get("depart_date") or ""
+                    rebuilt = build_regional_route(dest, ctx_n, depart_date=depart)
+                    if rebuilt is not None:
+                        rebuilt.arrive_airport = (
+                            route.arrive_airport or rebuilt.arrive_airport
+                        )
+                        rebuilt.depart_airport = (
+                            route.depart_airport or rebuilt.depart_airport
+                        )
+                        route = rebuilt
+                    else:
+                        route = align_route_to_nights(
+                            route, ctx_n, depart_date=depart
+                        )
+                    self.agent.browser.last_proposed_route = route
+                self._trip_context["arrive_airport"] = (
+                    route.arrive_airport or ""
+                ).upper()
+                self._trip_context["depart_airport"] = (
+                    route.depart_airport or ""
+                ).upper()
+                self._trip_context["region"] = getattr(route, "label", "") or ""
+                self._trip_context["stays"] = ";".join(
+                    f"{s.city}|{s.nights}|{s.checkin}|{s.checkout}|{s.airport}"
+                    for s in route.stays
+                )
+                self._trip_context["nights"] = str(
+                    sum(max(1, int(s.nights or 1)) for s in route.stays)
+                )
+                self._trip_context["internal_note"] = (
+                    getattr(route, "internal_note", "") or ""
+                )
+            elif ctx_n and not self._trip_context.get("stays"):
+                dest = self._trip_context.get("destination") or "Destination"
+                depart = self._trip_context.get("depart_date") or ""
+                ret = self._trip_context.get("return_date") or ""
+                self._trip_context["stays"] = f"{dest}|{ctx_n}|{depart}|{ret}|"
+        except Exception:
+            pass
+
+    def _prepare_parsed_plan(self, text: str) -> ParsedItinerary:
+        """Parse + enrich itinerary on the browser worker (not the Tk thread)."""
+        self._sync_route_context_from_agent()
+        parsed = self._apply_booking_urls(parse_itinerary(text))
+        live = dict(getattr(self, "_live_flight_card", None) or {})
+        if not live.get("flight_depart") and self.agent:
+            live = dict(
+                getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            )
+        if not live.get("flight_depart") and self.agent:
+            live = dict(getattr(self.agent.browser, "last_flight_card", None) or {})
+        if live.get("flight_depart"):
+            parsed.flight_offer = self._flight_offer_from_live_card(live)
+            if self.agent and live.get("flight_arrive"):
+                self.agent.booking_links["flight_arrive"] = live["flight_arrive"]
+            if self.agent and live.get("flight_return_depart"):
+                self.agent.booking_links["flight_return_depart"] = live[
+                    "flight_return_depart"
+                ]
+        return self._ensure_days(parsed)
 
     def _time_looks_ok(self, raw: str) -> bool:
         return bool(re.fullmatch(r"[0-2]?\d:[0-5]\d", (raw or "").strip()))
@@ -4064,60 +4224,16 @@ class TravelAgentApp(tk.Tk):
                 fb_feats = (_fallback_stay_hotel(city).get("features") or "").strip()
                 if fb_feats and (rec.get("features") or "").strip() == fb_feats:
                     rec["features"] = ""
-                # Detail URL is authoritative — refresh name/photo only when
-                # paint data is weak. Skip score-only / multi_stay-always HTTP
-                # so UI paint never blocks on per-stay urlopen.
-                need_meta = (
-                    generic
-                    or china_wrong
-                    or _is_curated_fallback_name(rec.get("name") or "", city)
-                    or not (rec.get("image_url") or "").startswith("http")
-                    or "loremflickr" in (rec.get("image_url") or "").lower()
-                )
-                if need_meta and saved_url:
-                    try:
-                        from travel_agent.browser_tools import (
-                            _http_fetch_hotel_detail_meta,
-                        )
-
-                        meta = _http_fetch_hotel_detail_meta(saved_url)
-                    except Exception:
-                        meta = {}
-                    if meta.get("name") and not _is_curated_fallback_name(
-                        meta["name"], city
-                    ):
-                        rec["name"] = meta["name"]
-                        name = meta["name"]
-                        low = name.lower()
-                        generic = False
-                    if meta.get("image_url"):
-                        # Always replace stock/wrong photos when we have the
-                        # official cover for this hotelId
-                        cur_img = (rec.get("image_url") or "").lower()
-                        if (
-                            multi_stay
-                            or not cur_img.startswith("http")
-                            or "loremflickr" in cur_img
-                            or "unsplash" in cur_img
-                        ):
-                            rec["image_url"] = meta["image_url"]
-                    for k in (
-                        "score",
-                        "score_label",
-                        "reviews",
-                        "stars",
-                        "location",
-                        "price_label",
-                    ):
-                        if meta.get(k) and (multi_stay or not rec.get(k)):
-                            rec[k] = meta[k]
+                # Intentionally skip _http_fetch_hotel_detail_meta here — paint
+                # runs on the Tk UI thread and that HTTP call freezes the window.
 
             if not (rec.get("image_url") or "").startswith("http"):
+                # Offline placeholder only — real cover loads via async photo paint
                 try:
-                    from travel_agent.attraction_images import lookup_image
+                    from travel_agent.attraction_images import _loremflickr_image
 
-                    rec["image_url"] = lookup_image(
-                        rec.get("name") or f"{city} hotel", city=city
+                    rec["image_url"] = _loremflickr_image(
+                        f"{city}|{rec.get('name') or 'hotel'}"
                     )
                 except Exception:
                     pass
@@ -4791,43 +4907,8 @@ class TravelAgentApp(tk.Tk):
                 )
             elif links.get("hotel") and is_trusted_hotel_detail_url(links["hotel"]):
                 offer.url = links["hotel"]
-            # If the booking URL is a real detail page but the name/photo is still
-            # wrong, read Trip.com detail HTML. Skip score-only fetches (blocks paint).
-            detail_for_meta = ""
-            if offer.url and is_trusted_hotel_detail_url(offer.url):
-                detail_for_meta = offer.url
-            elif live_detail and is_trusted_hotel_detail_url(live_detail):
-                detail_for_meta = live_detail
-            if detail_for_meta and (
-                _bad_name(offer.name)
-                or not (offer.image_url or "").startswith("http")
-                or "loremflickr" in (offer.image_url or "").lower()
-            ):
-                try:
-                    from travel_agent.browser_tools import _http_fetch_hotel_detail_meta
-
-                    meta = _http_fetch_hotel_detail_meta(detail_for_meta)
-                except Exception:
-                    meta = {}
-                if meta.get("name") and not _bad_name(meta["name"]):
-                    offer.name = meta["name"]
-                if meta.get("image_url") and (
-                    not (offer.image_url or "").startswith("http")
-                    or "loremflickr" in (offer.image_url or "").lower()
-                ):
-                    offer.image_url = meta["image_url"]
-                if meta.get("score") and not offer.score:
-                    offer.score = meta["score"]
-                    offer.score_label = meta.get("score_label") or offer.score_label
-                if meta.get("reviews") and not offer.reviews:
-                    offer.reviews = meta["reviews"]
-                if meta.get("location") and not offer.location:
-                    offer.location = meta["location"]
-                if meta.get("stars") and not offer.stars:
-                    try:
-                        offer.stars = int(meta["stars"])
-                    except ValueError:
-                        pass
+            # Do not call _http_fetch_hotel_detail_meta here — it runs on the
+            # Tk UI thread and freezes the window (urlopen timeout up to 25s).
             if links.get("hotel_price"):
                 offer.price_label = links["hotel_price"]
             if links.get("hotel_total"):
@@ -4974,115 +5055,33 @@ class TravelAgentApp(tk.Tk):
                     self.flight_row.set_offer(self._flight_offer_from_live_card(live))
             return
         self._last_plan = text
-        # Prefer the agent's proposed rough route for airports / multi-stay cards,
-        # but never shrink below the nights the user set in the wizard.
-        try:
-            route = (
-                getattr(self.agent.browser, "last_proposed_route", None)
-                if self.agent
-                else None
-            )
-            ctx_n = 0
+        pending = getattr(self, "_pending_parsed", None)
+        self._pending_parsed = None
+        if pending is not None:
+            parsed = pending
+        else:
+            self._sync_route_context_from_agent()
             try:
-                ctx_n = max(1, int(self._trip_context.get("nights") or 0))
-            except ValueError:
-                ctx_n = 0
-            if not ctx_n:
-                try:
-                    d0 = self._trip_context.get("depart_date") or ""
-                    d1 = self._trip_context.get("return_date") or ""
-                    if d0 and d1:
-                        ctx_n = max(
-                            1,
-                            (
-                                date.fromisoformat(d1) - date.fromisoformat(d0)
-                            ).days,
-                        )
-                except ValueError:
-                    ctx_n = 0
-
-            if route is not None and getattr(route, "stays", None):
-                route_n = sum(max(1, int(getattr(s, "nights", 1) or 1)) for s in route.stays)
-                if ctx_n and route_n < ctx_n:
-                    from travel_agent.regions import (
-                        align_route_to_nights,
-                        build_regional_route,
-                    )
-
-                    dest = self._trip_context.get("destination") or ""
-                    depart = self._trip_context.get("depart_date") or ""
-                    rebuilt = build_regional_route(dest, ctx_n, depart_date=depart)
-                    if rebuilt is not None:
-                        rebuilt.arrive_airport = (
-                            route.arrive_airport or rebuilt.arrive_airport
-                        )
-                        rebuilt.depart_airport = (
-                            route.depart_airport or rebuilt.depart_airport
-                        )
-                        route = rebuilt
-                    else:
-                        route = align_route_to_nights(
-                            route, ctx_n, depart_date=depart
-                        )
-                    if self.agent:
-                        self.agent.browser.last_proposed_route = route
-                self._trip_context["arrive_airport"] = (
-                    route.arrive_airport or ""
-                ).upper()
-                self._trip_context["depart_airport"] = (
-                    route.depart_airport or ""
-                ).upper()
-                self._trip_context["region"] = getattr(route, "label", "") or ""
-                self._trip_context["stays"] = ";".join(
-                    f"{s.city}|{s.nights}|{s.checkin}|{s.checkout}|{s.airport}"
-                    for s in route.stays
-                )
-                self._trip_context["nights"] = str(
-                    sum(max(1, int(s.nights or 1)) for s in route.stays)
-                )
-                self._trip_context["internal_note"] = getattr(
-                    route, "internal_note", ""
-                ) or ""
-            elif ctx_n and not self._trip_context.get("stays"):
-                # Single-city: keep a synthetic stay covering the full trip
-                dest = self._trip_context.get("destination") or "Destination"
-                depart = self._trip_context.get("depart_date") or ""
-                ret = self._trip_context.get("return_date") or ""
-                self._trip_context["stays"] = (
-                    f"{dest}|{ctx_n}|{depart}|{ret}|"
-                )
-        except Exception:
-            pass
-        parsed = self._apply_booking_urls(parse_itinerary(text))
-        # Apply live flight times BEFORE building day cards (Day 1 must start after landing)
-        live = dict(getattr(self, "_live_flight_card", None) or {})
-        if not live.get("flight_depart") and self.agent:
-            live = dict(
-                getattr(self.agent.browser, "last_plan_flight_card", None) or {}
-            )
-        if not live.get("flight_depart") and self.agent:
-            live = dict(getattr(self.agent.browser, "last_flight_card", None) or {})
-        if live.get("flight_depart"):
-            parsed.flight_offer = self._flight_offer_from_live_card(live)
-            if self.agent and live.get("flight_arrive"):
-                self.agent.booking_links["flight_arrive"] = live["flight_arrive"]
-            if self.agent and live.get("flight_return_depart"):
-                self.agent.booking_links["flight_return_depart"] = live[
-                    "flight_return_depart"
-                ]
-        parsed = self._ensure_days(parsed)
+                parsed = self._prepare_parsed_plan(text)
+            except Exception:
+                parsed = self._apply_booking_urls(parse_itinerary(text))
+                parsed = self._ensure_days(parsed)
         self._render_parsed(parsed)
         if parsed.flight_offer and parsed.flight_offer.depart_time not in {"", "--:--"}:
             self.flight_row.set_offer(parsed.flight_offer)
         err = getattr(self, "_live_flight_error", "") or ""
         if err:
             self._set_status(f"Flight scrape: {err}", C["danger"])
-        # If still empty, scrape again in the background and refresh just the flight card
-        need_refill = (
-            not parsed.flight_offer
-            or parsed.flight_offer.depart_time in {"", "--:--"}
-            or not is_plausible_airline_name(parsed.flight_offer.airline or "")
-        )
+            self._live_flight_error = ""
+        elif parsed.flight_offer and parsed.flight_offer.depart_time not in {
+            "",
+            "--:--",
+        }:
+            self._set_status("Itinerary ready", C["ok"])
+        # Optional background open-jaw refill — never block the first paint.
+        # Disabled by default: a second Trip.com scrape after paint made the
+        # window look frozen again even though it ran off the UI thread.
+        need_refill = False
         arrive = (self._trip_context.get("arrive_airport") or "").strip().upper()
         ret_from = (self._trip_context.get("depart_airport") or "").strip().upper()
         if need_refill and arrive and ret_from and arrive != ret_from:
@@ -5244,13 +5243,10 @@ class TravelAgentApp(tk.Tk):
             )
             answer = self.agent.chat(refine)
             self._apply_plan_flight_snapshot()
-            need_refresh = not self._booking_cards_ready_enough()
-            if need_refresh:
-                try:
-                    self._refresh_live_booking_cards(max_seconds=20.0)
-                except Exception:
-                    pass
-                self._apply_plan_flight_snapshot()
+            try:
+                self._pending_parsed = self._prepare_parsed_plan(answer)
+            except Exception:
+                self._pending_parsed = None
             self.after(0, self._finish_plan_progress)
             return answer
 
@@ -5264,8 +5260,16 @@ class TravelAgentApp(tk.Tk):
     def _apply_refine(self, text: str) -> None:
         self._last_plan = text
         self._append_chat("Agent", text[:800] + ("…" if len(text) > 800 else ""), "agent")
-        parsed = self._apply_booking_urls(parse_itinerary(text))
-        parsed = self._ensure_days(parsed)
+        pending = getattr(self, "_pending_parsed", None)
+        self._pending_parsed = None
+        if pending is not None:
+            parsed = pending
+        else:
+            try:
+                parsed = self._prepare_parsed_plan(text)
+            except Exception:
+                parsed = self._apply_booking_urls(parse_itinerary(text))
+                parsed = self._ensure_days(parsed)
         self._render_parsed(parsed)
 
     def _append_chat(self, who: str, text: str, tag: str) -> None:
@@ -5519,9 +5523,12 @@ class TravelAgentApp(tk.Tk):
             self.after(
                 0,
                 lambda: self._update_plan_progress(
-                    "Drafting day-by-day itinerary…", floor=84
+                    "Building day-by-day itinerary…", floor=84
                 ),
             )
+        # Optimistic card paint so the window stays useful while finalize runs
+        if name == "plan_trip":
+            self.after(0, self._paint_live_booking_preview)
 
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.header.set_status(text, color or C["muted"])
