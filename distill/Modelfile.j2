@@ -1,0 +1,17 @@
+FROM ./{{ gguf_name }}
+
+SYSTEM """{{ system_prompt }}"""
+
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{- range .Messages }}{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ .Content }}<|im_end|>
+{{ end }}{{- end }}<|im_start|>assistant
+"""
+
+PARAMETER temperature 0.2
+PARAMETER num_ctx 16384
+PARAMETER stop <|im_end|>
+PARAMETER stop <|endoftext|>

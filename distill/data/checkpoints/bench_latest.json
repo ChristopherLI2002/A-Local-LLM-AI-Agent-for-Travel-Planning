@@ -1,0 +1,16 @@
+{
+  "phase": "bench",
+  "progress_path": "D:\\distill-out\\bench_progress.jsonl",
+  "status_path": "D:\\A Local LLM AI Agent for Travel Planning\\distill\\data\\checkpoints\\bench_latest.json",
+  "total_completed": 39,
+  "last_key": "voyage-student-1-5b-dayfix|78113c0f72b5dae6",
+  "last_ok": true,
+  "last_finished_at": "2026-09-15T17:23:45.059436+00:00",
+  "updated_at": "2026-09-15T17:23:45.063505+00:00",
+  "resume_cmd": "python -m distill.bench --resume --max-hours 1",
+  "max_hours": 1.0,
+  "destination": "Taipei",
+  "error": "",
+  "elapsed_sec": 1.81,
+  "n_tool_rounds": 1
+}

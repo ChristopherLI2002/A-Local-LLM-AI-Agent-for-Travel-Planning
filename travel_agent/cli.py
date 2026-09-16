@@ -53,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    from travel_agent.config import apply_model_settings
+
+    apply_model_settings(args.model)
 
     # Desktop window is the default unless --cli or -q is used.
     if not args.cli and not args.query:

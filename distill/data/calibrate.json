@@ -1,0 +1,33 @@
+{
+  "metrics": {
+    "model": "qwen2.5:14b-instruct-q4_K_M",
+    "host": "http://127.0.0.1:11434",
+    "prefill_tokens_est": 425,
+    "prefill_wall_sec": 28.97,
+    "prefill_tok_per_sec": 14.67,
+    "decode_tokens": 256,
+    "decode_wall_sec": 86.24,
+    "decode_tok_per_sec": 2.97,
+    "prompt_eval_count_r2": 51,
+    "sample_preview": "Day 1:\n- 9:00 AM: Arrive at Tokyo Station.\n- 10:30 AM: Visit the Imperial Palace East Garden for a peaceful stroll (Chiyoda, Tokyo).\n- 12:30 PM: Lunch at Tsukiji Hongoku Sushi in Tsukiji Outer Market."
+  },
+  "schedule": {
+    "est_unit_sec": 487.9,
+    "est_phase2_hours_300": 52.9,
+    "est_phase2_sessions_3h": 17.6,
+    "est_phase2_hours_200_with_7b_tools": 21.1,
+    "note": "Estimates only; use --tool-turn-teacher qwen2.5:7b and --target-rollouts 200 to cut time."
+  },
+  "installed": [
+    "qwen2.5:14b-instruct-q4_K_M",
+    "qwen2.5:3b",
+    "llava:7b",
+    "moondream:latest",
+    "qwen2.5-coder:7b",
+    "qwen2.5:7b",
+    "qwen3-vl:4b",
+    "qwen2.5vl:3b",
+    "nomic-embed-text:latest",
+    "qwen3.5:9b"
+  ]
+}

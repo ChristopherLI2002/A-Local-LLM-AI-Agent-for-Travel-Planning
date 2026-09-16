@@ -1,0 +1,16 @@
+{
+  "phase": "teacher_rollout",
+  "progress_path": "D:\\A Local LLM AI Agent for Travel Planning\\distill\\data\\raw_rollouts.jsonl",
+  "status_path": "D:\\A Local LLM AI Agent for Travel Planning\\distill\\data\\checkpoints\\teacher_rollout_latest.json",
+  "total_completed": 240,
+  "last_key": "4b8728d9ef5bb023",
+  "last_ok": true,
+  "last_finished_at": "2026-09-09T07:29:13.692063+00:00",
+  "updated_at": "2026-09-09T07:29:13.697822+00:00",
+  "resume_cmd": "python -m distill.teacher_rollout --resume --max-hours 1",
+  "max_hours": 1.0,
+  "destination": "Bali",
+  "error": "",
+  "elapsed_sec": 70.66,
+  "n_tool_rounds": 2
+}

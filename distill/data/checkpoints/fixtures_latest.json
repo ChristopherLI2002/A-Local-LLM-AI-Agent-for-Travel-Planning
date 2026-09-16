@@ -1,0 +1,14 @@
+{
+  "phase": "record_fixtures",
+  "progress_path": "D:\\A Local LLM AI Agent for Travel Planning\\distill\\data\\tool_fixtures.jsonl",
+  "status_path": "D:\\A Local LLM AI Agent for Travel Planning\\distill\\data\\checkpoints\\fixtures_latest.json",
+  "total_completed": 29,
+  "last_key": "dest:new york",
+  "last_ok": true,
+  "last_finished_at": "2026-09-08T04:03:08.833938+00:00",
+  "updated_at": "2026-09-08T09:31:51.900410+00:00",
+  "resume_cmd": "python -m distill.record_fixtures --resume --max-hours 1",
+  "max_hours": 1.0,
+  "destination": "New York",
+  "elapsed_sec": 180.73
+}

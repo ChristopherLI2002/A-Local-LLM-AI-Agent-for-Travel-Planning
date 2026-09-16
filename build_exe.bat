@@ -36,7 +36,7 @@ echo Done.
 echo   EXE:  %cd%\dist\LocalLLMTravelAgent\LocalLLMTravelAgent.exe
 echo.
 echo Needs on this PC:
-echo   1. Ollama + ollama pull qwen2.5:3b
+echo   1. Ollama + voyage-student-1-5b-dayfix (or ollama pull qwen2.5:3b)
 echo   2. Chromium in %%LOCALAPPDATA%%\ms-playwright  (or Chrome / Edge)
 echo   Close old app windows before rebuilding.
 echo.

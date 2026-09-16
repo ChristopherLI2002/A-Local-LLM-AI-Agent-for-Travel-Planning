@@ -1,0 +1,5 @@
+# Distillation run artifacts (large / regenerable)
+distill/data/*.jsonl
+distill/data/*.json
+distill/data/transcripts/
+!distill/data/.gitkeep

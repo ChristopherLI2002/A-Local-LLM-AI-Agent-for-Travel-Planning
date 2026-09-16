@@ -84,6 +84,114 @@ def is_regional_destination(destination: str) -> bool:
     return bool(normalize_region_key(destination))
 
 
+# Country / continent labels that must never become hotel stay cities.
+_COUNTRY_ONLY = frozenset(
+    {
+        "japan",
+        "korea",
+        "south korea",
+        "north korea",
+        "china",
+        "france",
+        "italy",
+        "spain",
+        "germany",
+        "uk",
+        "united kingdom",
+        "england",
+        "usa",
+        "us",
+        "united states",
+        "america",
+        "thailand",
+        "vietnam",
+        "indonesia",
+        "malaysia",
+        "philippines",
+        "australia",
+        "canada",
+        "taiwan",
+        "macau",
+        "macao",
+    }
+)
+
+
+def _is_country_only_label(name: str) -> bool:
+    key = " ".join((name or "").strip().lower().replace(",", " ").split())
+    return key in _COUNTRY_ONLY
+
+
+def parse_stay_cities_arg(stay_cities: str, *, total_nights: int) -> list[tuple[str, int]]:
+    """Parse ``San Francisco:4,Los Angeles:3`` — never ``Tokyo, Japan`` as two stays.
+
+    Models often pass destination-shaped strings (``Tokyo, Japan``) into stay_cities.
+    Those must collapse to one city. Country-only tokens are dropped.
+    """
+    raw = (stay_cities or "").strip()
+    if not raw:
+        return []
+
+    n = max(1, int(total_nights or 1))
+    # "Tokyo:4, Osaka:3" style — only split on commas that separate City:N segments
+    if ":" in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+    else:
+        # No night markers → treat whole string as one place (strip ", Country")
+        parts = [raw]
+
+    parsed: list[tuple[str, int]] = []
+    for part in parts:
+        if ":" in part:
+            city_s, nights_s = part.rsplit(":", 1)
+            city_s = city_s.strip()
+            # "Tokyo, Japan:4" → city head before country
+            if "," in city_s:
+                head, tail = city_s.split(",", 1)
+                if _is_country_only_label(tail):
+                    city_s = head.strip()
+            try:
+                nights_i = max(1, int(nights_s.strip()))
+            except ValueError:
+                nights_i = 0
+            if city_s and not _is_country_only_label(city_s):
+                parsed.append((city_s, nights_i))
+        else:
+            city_s = part.strip()
+            if "," in city_s:
+                head, tail = city_s.split(",", 1)
+                if _is_country_only_label(tail):
+                    city_s = head.strip()
+                elif not _is_country_only_label(head):
+                    # Ambiguous "A, B" without nights — keep first city only
+                    city_s = head.strip()
+            if city_s and not _is_country_only_label(city_s):
+                parsed.append((city_s, 0))
+
+    # Drop country tokens that slipped through (e.g. second half of bad splits)
+    parsed = [(c, ni) for c, ni in parsed if c and not _is_country_only_label(c)]
+    if not parsed:
+        return []
+
+    # Single remaining city → all nights there
+    if len(parsed) == 1:
+        return [(parsed[0][0], n)]
+
+    fixed = sum(x[1] for x in parsed if x[1] > 0)
+    zeros = [i for i, x in enumerate(parsed) if x[1] <= 0]
+    remain = max(0, n - fixed)
+    if zeros:
+        split = _split_nights(remain if remain > 0 else len(zeros), len(zeros))
+        for i, idx in enumerate(zeros):
+            city_s, _ = parsed[idx]
+            parsed[idx] = (city_s, split[i] if i < len(split) else 1)
+    total = sum(x[1] for x in parsed) or 1
+    if total != n and parsed:
+        adj = n - (total - parsed[-1][1])
+        parsed[-1] = (parsed[-1][0], max(1, adj))
+    return parsed
+
+
 def _split_nights(nights: int, parts: int) -> list[int]:
     """Split nights across cities (at least 1 each when possible)."""
     n = max(1, int(nights or 1))
@@ -312,7 +420,11 @@ def build_single_city_route(
 
     n = max(1, int(nights or 1))
     city = to_hotel_city(destination) or (destination or "Destination").strip()
-    airport = to_flight_code(destination) or to_flight_code(city) or "xxx"
+    if "," in city:
+        city = city.split(",", 1)[0].strip() or city
+    airport = (to_flight_code(destination) or to_flight_code(city) or "").lower()
+    if airport == "xxx":
+        airport = ""
     checkin = depart_date
     checkout = ""
     if checkin:
@@ -361,40 +473,19 @@ def propose_trip_route(
 
     n = max(1, int(nights or 1))
     # Explicit stay list from the agent
-    if stay_cities.strip():
+    parsed_stays = parse_stay_cities_arg(stay_cities, total_nights=n)
+    if parsed_stays:
         stays: list[StaySegment] = []
         cursor = depart_date
-        parts = [p.strip() for p in stay_cities.split(",") if p.strip()]
-        parsed: list[tuple[str, int]] = []
-        for part in parts:
-            if ":" in part:
-                city_s, nights_s = part.rsplit(":", 1)
-                try:
-                    nights_i = max(1, int(nights_s.strip()))
-                except ValueError:
-                    nights_i = 1
-                parsed.append((city_s.strip(), nights_i))
-            else:
-                parsed.append((part, 0))
-        # Fill missing nights evenly
-        fixed = sum(x[1] for x in parsed if x[1] > 0)
-        zeros = [i for i, x in enumerate(parsed) if x[1] <= 0]
-        remain = max(0, n - fixed)
-        if zeros:
-            split = _split_nights(remain if remain > 0 else len(zeros), len(zeros))
-            for i, idx in enumerate(zeros):
-                city_s, _ = parsed[idx]
-                parsed[idx] = (city_s, split[i] if i < len(split) else 1)
-        # Normalize total to n nights
-        total = sum(x[1] for x in parsed) or 1
-        if total != n and parsed:
-            # Adjust last stay
-            adj = n - (total - parsed[-1][1])
-            parsed[-1] = (parsed[-1][0], max(1, adj))
-
-        for city_s, nights_i in parsed:
+        for city_s, nights_i in parsed_stays:
             city = to_hotel_city(city_s) or city_s
-            airport = to_flight_code(city_s) or to_flight_code(city) or "xxx"
+            if "," in city:
+                city = city.split(",", 1)[0].strip() or city
+            airport = (
+                to_flight_code(city_s) or to_flight_code(city) or ""
+            ).lower()
+            if airport == "xxx":
+                airport = ""
             checkin = cursor
             checkout = ""
             if checkin:
@@ -428,8 +519,8 @@ def propose_trip_route(
         return RegionalRoute(
             key="custom",
             label=destination.strip() or "Custom route",
-            arrive_airport=arrive or "xxx",
-            depart_airport=depart or arrive or "xxx",
+            arrive_airport=(arrive or "").lower(),
+            depart_airport=(depart or arrive or "").lower(),
             stays=stays,
             internal_note=(
                 f"Custom route: {cities_note}. "

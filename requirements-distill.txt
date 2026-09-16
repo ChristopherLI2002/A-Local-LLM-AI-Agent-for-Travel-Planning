@@ -1,0 +1,16 @@
+# Extra deps for distillation training / export (not required to run the travel agent GUI).
+# Install: pip install -r requirements-distill.txt
+# Keep torch from your existing CUDA wheel (torch 2.5.1+cu121 already present).
+
+transformers>=4.44.0
+datasets>=2.20.0
+accelerate>=0.33.0
+peft>=0.12.0
+trl>=0.9.6
+bitsandbytes>=0.43.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+pyyaml>=6.0
+tqdm>=4.66.0
+safetensors>=0.4.0
+huggingface_hub>=0.24.0

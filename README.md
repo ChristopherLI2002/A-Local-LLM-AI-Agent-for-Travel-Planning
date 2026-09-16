@@ -15,13 +15,13 @@ Booking links open real `hk.trip.com` pages in your browser. The model is instru
 ## Prerequisites
 
 1. [Ollama](https://ollama.com/) installed and able to run locally  
-2. A tool-capable chat model (default: `qwen2.5:3b` — lighter/faster locally)  
+2. A tool-capable chat model — default **`voyage-student-1-5b-dayfix`** (distilled local student; fallback `qwen2.5:3b`)  
 3. Python **3.10+** (only needed for source runs / building the EXE)  
 4. Playwright Chromium (or Google Chrome / Microsoft Edge as fallback)
 
 ```bash
 ollama serve
-ollama pull qwen2.5:3b
+# Student is local (ollama list). Fallback: ollama pull qwen2.5:3b
 ```
 
 ## Setup (from source)
@@ -38,7 +38,8 @@ Edit `.env` if needed:
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API (use IPv4 loopback, not `localhost`, on Windows) |
-| `OLLAMA_MODEL` | `qwen2.5:3b` | Override with `-m` (e.g. `qwen2.5:7b` for quality) |
+| `OLLAMA_MODEL` | `voyage-student-1-5b-dayfix` | Distilled student; `-m qwen2.5:3b` / `7b` for stock models |
+| `STUDENT_MODE` | `true` | Compact prompt + slim tools (auto-on for `voyage-student-*`) |
 | `TRIP_BASE_URL` | `https://hk.trip.com` | Market site |
 | `TRIP_LOCALE` | `en_hk` | Locale query param |
 | `TRIP_CURRENCY` | `HKD` | Prices in HKD |
@@ -46,8 +47,8 @@ Edit `.env` if needed:
 | `FAST_MODE` | `true` | Skip extra LLM ranking of flight/hotel/car candidates |
 | `LLM_RANK_CANDIDATES` | `false` | Set `true` (+ `FAST_MODE=false`) to LLM-rank scrapes |
 | `MAX_TOOL_ROUNDS` | `8` | Cap agent↔tool loops |
-| `OLLAMA_NUM_CTX` | `4096` | Context window (lower = faster) |
-| `OLLAMA_NUM_PREDICT` | `768` | Max new tokens per reply |
+| `OLLAMA_NUM_CTX` | `16384` | Context window (student needs headroom for scrapes) |
+| `OLLAMA_NUM_PREDICT` | `2048` | Max new tokens per reply |
 | `OLLAMA_TEMPERATURE` | `0.2` | Generation temperature |
 
 Tip: if you want the browser to stay hidden while scraping, keep `HEADLESS=true` (default).
@@ -227,7 +228,7 @@ This folder is git-ignored.
 - Playwright browsers are loaded from `%LOCALAPPDATA%\ms-playwright` (not from inside the EXE `_internal` folder).
 - If Chromium is missing, the app tries installed **Chrome** or **Edge**.
 - No embedded map; use day cards plus Open Trip.Planner / booking links.
-- Default model: `qwen2.5:3b` (`OLLAMA_MODEL` or `-m` to override).
+- Default model: `voyage-student-1-5b-dayfix` with `STUDENT_MODE=true` (`OLLAMA_MODEL` or `-m` to override).
 
 ### Ollama troubleshooting (Windows)
 

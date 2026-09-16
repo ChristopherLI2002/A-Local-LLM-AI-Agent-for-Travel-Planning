@@ -61,11 +61,28 @@ def make_ollama_client(host: str | None = None):
     )
 
 
+DEFAULT_OLLAMA_MODEL = "voyage-student-1-5b-dayfix"
+
+
+def is_student_model(name: str | None) -> bool:
+    """True for distilled Voyage students (need compact prompt + slim tools)."""
+    low = (name or "").strip().lower()
+    return "voyage-student" in low or low.startswith("student-")
+
+
+def _default_student_mode() -> bool:
+    """STUDENT_MODE env wins; otherwise follow the configured model name."""
+    raw = os.getenv("STUDENT_MODE")
+    if raw is not None and str(raw).strip():
+        return _env_bool("STUDENT_MODE", True)
+    return is_student_model(os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
+
+
 @dataclass
 class Settings:
     ollama_host: str = normalize_ollama_host()
-    # Lighter default for faster local responses (still tool-capable).
-    ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+    # Distilled student default; override with OLLAMA_MODEL / -m.
+    ollama_model: str = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
     trip_base_url: str = os.getenv("TRIP_BASE_URL", "https://hk.trip.com")
     trip_locale: str = os.getenv("TRIP_LOCALE", "en_hk")
     trip_currency: str = os.getenv("TRIP_CURRENCY", "HKD")
@@ -73,16 +90,41 @@ class Settings:
     browser_timeout_ms: int = int(os.getenv("BROWSER_TIMEOUT_MS", "45000"))
     # Fewer agent↔tool loops = faster end-to-end plans
     max_tool_rounds: int = int(os.getenv("MAX_TOOL_ROUNDS", "8"))
+    student_max_tool_rounds: int = int(os.getenv("STUDENT_MAX_TOOL_ROUNDS", "4"))
+    student_tool_result_max_chars: int = int(
+        os.getenv("STUDENT_TOOL_RESULT_MAX_CHARS", "3500")
+    )
     # Fast mode: skip extra LLM ranking/attraction-arrange calls; use heuristics
     fast_mode: bool = _env_bool("FAST_MODE", True)
     # When false (or fast_mode), pick cheapest/first scraped option without Ollama
     llm_rank_candidates: bool = _env_bool("LLM_RANK_CANDIDATES", False)
-    ollama_num_ctx: int = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
-    ollama_num_predict: int = int(os.getenv("OLLAMA_NUM_PREDICT", "768"))
+    # Student needs a larger ctx for scrape+itinerary; base models can lower via .env
+    ollama_num_ctx: int = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
+    ollama_num_predict: int = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
     ollama_temperature: float = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
+    # Compact system prompt + slim tools (required for distilled students)
+    student_mode: bool = _default_student_mode()
 
 
 settings = Settings()
+
+
+def apply_model_settings(model: str | None) -> None:
+    """Keep runtime settings aligned when the user picks ``-m`` / GUI model."""
+    name = (model or "").strip()
+    if not name:
+        return
+    settings.ollama_model = name
+    if is_student_model(name):
+        # Distilled students must use compact prompt + slim tools.
+        settings.student_mode = True
+    else:
+        # Non-students: only enable if .env explicitly requests it.
+        raw = os.getenv("STUDENT_MODE")
+        if raw is not None and str(raw).strip():
+            settings.student_mode = _env_bool("STUDENT_MODE", False)
+        else:
+            settings.student_mode = False
 
 
 def ollama_chat_options(*, short: bool = False) -> dict:
@@ -152,7 +194,7 @@ def resolve_ollama_model(
     if not chat_models:
         raise RuntimeError(
             f"No Ollama models installed at {host or settings.ollama_host}. "
-            f"The app will try to download {want or 'qwen2.5:3b'} on startup."
+            f"The app will try to download {want or DEFAULT_OLLAMA_MODEL} on startup."
         )
     if want:
         for name in chat_models:

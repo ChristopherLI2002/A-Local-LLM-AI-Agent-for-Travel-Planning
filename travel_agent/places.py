@@ -144,22 +144,41 @@ def normalize_place(value: str) -> str:
     return text
 
 
-def to_flight_code(value: str) -> str:
-    """Map a city/airport name or code to a Trip.com flight city code (IATA)."""
+def place_lookup_keys(value: str) -> list[str]:
+    """Candidates for city/airport maps — strip country suffixes like 'Tokyo, Japan'."""
     key = normalize_place(value)
     if not key:
+        return []
+    keys: list[str] = [key]
+    # "Tokyo, Japan" / "Seoul, Korea" / "Paris, France"
+    if "," in key:
+        head = key.split(",", 1)[0].strip()
+        if head and head not in keys:
+            keys.append(head)
+    # "Tokyo (NRT)" / "Los Angeles (LAX)"
+    bare = re.sub(r"\s*\([^)]*\)\s*", " ", key).strip()
+    bare = re.sub(r"\s+", " ", bare)
+    if bare and bare not in keys:
+        keys.append(bare)
+    return keys
+
+
+def to_flight_code(value: str) -> str:
+    """Map a city/airport name or code to a Trip.com flight city code (IATA)."""
+    keys = place_lookup_keys(value)
+    if not keys:
         return ""
-    if key in _CITY_TO_CODE:
-        return _CITY_TO_CODE[key]
-    # Already a known 3-letter IATA in our map
-    if re.fullmatch(r"[a-z]{3}", key) and key in _CITY_TO_CODE:
-        return _CITY_TO_CODE[key]
-    if re.fullmatch(r"[a-z]{3}", key):
-        # Accept unknown 3-letter tokens as codes (Trip.com city codes)
-        return key
+    for key in keys:
+        if key in _CITY_TO_CODE:
+            return _CITY_TO_CODE[key]
+        if re.fullmatch(r"[a-z]{3}", key):
+            # Known map entry or accept unknown 3-letter Trip.com city codes
+            return _CITY_TO_CODE.get(key, key)
     # Try tokens (e.g. "Miami Florida", "Paris France")
-    parts = key.split()
-    if len(parts) > 1:
+    for key in keys:
+        parts = key.replace(",", " ").split()
+        if len(parts) <= 1:
+            continue
         for part in parts:
             if part in _CITY_TO_CODE:
                 return _CITY_TO_CODE[part]
@@ -170,7 +189,6 @@ def to_flight_code(value: str) -> str:
                 return part
     # Never return multi-letter junk like "florida" as an airport code
     return ""
-
 
 # Trip.com hotel list requires numeric city= IDs (city names return 0 results).
 _HOTEL_CITY_IDS: dict[str, tuple[str, str]] = {
@@ -274,46 +292,51 @@ def typed_place_name(value: str) -> str:
 def to_hotel_city(value: str) -> str:
     """Hotel searches prefer human city names (spaces, never '+')."""
     raw = typed_place_name(value)
-    key = normalize_place(raw)
-    if key in _HOTEL_CITY_IDS:
-        return _HOTEL_CITY_IDS[key][1]
-    # If user passed an airport code, expand to a city name when known
-    code_to_city = {
-        "hkg": "Hong Kong",
-        "par": "Paris",
-        "cdg": "Paris",
-        "ory": "Paris",
-        "tyo": "Tokyo",
-        "nrt": "Tokyo",
-        "hnd": "Tokyo",
-        "tpe": "Taipei",
-        "sel": "Seoul",
-        "icn": "Seoul",
-        "sin": "Singapore",
-        "bkk": "Bangkok",
-        "lon": "London",
-        "lhr": "London",
-        "nyc": "New York",
-        "sfo": "San Francisco",
-        "lax": "Los Angeles",
-        "san": "San Diego",
-        "mia": "Miami",
-        "mco": "Orlando",
-    }
-    if key in code_to_city:
-        return code_to_city[key]
-    # Title-case multi-word cities
-    if key in _CITY_TO_CODE and not re.fullmatch(r"[a-z]{3}", key):
-        return raw.title() if raw else key.title()
-    return raw or key
+    for key in place_lookup_keys(raw):
+        if key in _HOTEL_CITY_IDS:
+            return _HOTEL_CITY_IDS[key][1]
+        # If user passed an airport code, expand to a city name when known
+        code_to_city = {
+            "hkg": "Hong Kong",
+            "par": "Paris",
+            "cdg": "Paris",
+            "ory": "Paris",
+            "tyo": "Tokyo",
+            "nrt": "Tokyo",
+            "hnd": "Tokyo",
+            "tpe": "Taipei",
+            "sel": "Seoul",
+            "icn": "Seoul",
+            "sin": "Singapore",
+            "bkk": "Bangkok",
+            "lon": "London",
+            "lhr": "London",
+            "nyc": "New York",
+            "sfo": "San Francisco",
+            "lax": "Los Angeles",
+            "san": "San Diego",
+            "mia": "Miami",
+            "mco": "Orlando",
+        }
+        if key in code_to_city:
+            return code_to_city[key]
+        # Title-case multi-word cities
+        if key in _CITY_TO_CODE and not re.fullmatch(r"[a-z]{3}", key):
+            # Prefer the city head before a country comma
+            head = key.split(",", 1)[0].strip()
+            return head.title() if head else (raw.title() if raw else key.title())
+    # Fall back to city-before-comma when the full string is unknown
+    if "," in (raw or ""):
+        return raw.split(",", 1)[0].strip() or raw
+    return raw or normalize_place(value)
 
 
 def to_hotel_city_id(value: str) -> str | None:
     """Return Trip.com numeric hotel city ID when known."""
-    key = normalize_place(value)
-    if key in _HOTEL_CITY_IDS:
-        return _HOTEL_CITY_IDS[key][0]
-    # Already a numeric id
-    if re.fullmatch(r"\d{1,6}", key):
-        return key
+    for key in place_lookup_keys(value):
+        if key in _HOTEL_CITY_IDS:
+            return _HOTEL_CITY_IDS[key][0]
+        # Already a numeric id
+        if re.fullmatch(r"\d{1,6}", key):
+            return key
     return None

@@ -996,6 +996,7 @@ class TripBrowser:
         self.selection_context: SelectionContext = SelectionContext()
         self.llm_model: str = settings.ollama_model
         self.llm_host: str = settings.ollama_host
+        self._home_warmup_error: str = ""
 
     def _update_selection_context(self, **kwargs: Any) -> None:
         """Merge trip prefs used when the LLM ranks scraped flights/hotels."""
@@ -1178,7 +1179,12 @@ class TripBrowser:
         )
         self.page = context.new_page()
         self.page.set_default_timeout(settings.browser_timeout_ms)
-        self.open_home()
+        # Warm-up navigation must not kill app startup (Trip.com flakes / VPN / DNS).
+        try:
+            self.open_home()
+        except Exception as exc:
+            # Browser is still usable; first search will retry navigation.
+            self._home_warmup_error = str(exc)
 
     def close(self) -> None:
         if self._browser:
@@ -1202,9 +1208,24 @@ class TripBrowser:
         timeout: int = 45000,
         retries: int = 3,
     ) -> None:
-        """Navigate with retries when Trip.com interrupts with a competing redirect."""
+        """Navigate with retries when Trip.com interrupts or the connection drops."""
         page = self._require_page()
         last_err: Exception | None = None
+        retry_markers = (
+            "interrupted",
+            "navigation",
+            "err_connection",
+            "err_connection_closed",
+            "err_connection_reset",
+            "err_connection_refused",
+            "err_timed_out",
+            "err_network_changed",
+            "err_internet_disconnected",
+            "err_empty_response",
+            "err_ssl",
+            "timeout",
+            "net::",
+        )
         for attempt in range(max(1, retries)):
             try:
                 page.goto(url, wait_until=wait_until, timeout=timeout)
@@ -1212,17 +1233,22 @@ class TripBrowser:
             except Exception as exc:
                 last_err = exc
                 msg = str(exc).lower()
-                if "interrupted" not in msg and "navigation" not in msg:
+                if not any(m in msg for m in retry_markers):
                     raise
                 # Let the interrupting navigation settle, then retry the target URL
                 try:
                     page.wait_for_load_state("domcontentloaded", timeout=8000)
                 except Exception:
                     pass
-                page.wait_for_timeout(800 + attempt * 400)
+                page.wait_for_timeout(800 + attempt * 600)
+                # Soft reload between connection drops
+                if "err_connection" in msg or "net::" in msg:
+                    try:
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
         if last_err:
             raise last_err
-
     def open_home(self) -> str:
         page = self._require_page()
         self._safe_goto(TRIP_HOME)
@@ -3957,6 +3983,20 @@ class TripBrowser:
             arrive_code = regional.arrive_airport
             return_from_code = regional.depart_airport
             hotel_city = regional.stays[0].city if regional.stays else hotel_city
+
+        # Guard: never search Trip.com with placeholder / invalid IATA (shows as XXX/--:--/n/a).
+        if not arrive_code or str(arrive_code).lower() in {"xxx", "na", "n/a"}:
+            arrive_code = to_flight_code(destination) or to_flight_code(hotel_city or "")
+        if not return_from_code or str(return_from_code).lower() in {"xxx", "na", "n/a"}:
+            return_from_code = arrive_code
+        if regional and arrive_code:
+            regional.arrive_airport = str(arrive_code).lower()
+            regional.depart_airport = str(return_from_code or arrive_code).lower()
+            if regional.stays and not to_flight_code(regional.stays[0].city):
+                regional.stays[0].airport = str(arrive_code).lower()
+                if "," in (regional.stays[0].city or ""):
+                    regional.stays[0].city = regional.stays[0].city.split(",", 1)[0].strip()
+            self.last_proposed_route = regional
 
         # Treat multi-city / open-jaw as regional for flight+hotel scraping
         open_jaw_route = bool(

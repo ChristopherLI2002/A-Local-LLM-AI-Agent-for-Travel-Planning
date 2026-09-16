@@ -105,7 +105,17 @@ def pull_ollama_model(
     timeout: float = 3600.0,
 ) -> None:
     """Download a model with ``ollama pull`` (hidden console on Windows)."""
-    want = (model or settings.ollama_model or "qwen2.5:3b").strip()
+    from travel_agent.config import DEFAULT_OLLAMA_MODEL, is_student_model
+
+    want = (model or settings.ollama_model or DEFAULT_OLLAMA_MODEL).strip()
+    if is_student_model(want):
+        raise RuntimeError(
+            f"Local distilled model '{want}' is not on the Ollama registry.\n"
+            "Create it from your distill export, e.g.:\n"
+            "  python -m distill.export_gguf --config distill/configs/student-1_5b-dayfix.yaml\n"
+            "  ollama create voyage-student-1-5b-dayfix -f Modelfile\n"
+            "Or switch to a public model:  python -m travel_agent -m qwen2.5:3b"
+        )
     bin_path = ollama_bin()
     if not bin_path:
         raise FileNotFoundError(
@@ -183,8 +193,10 @@ def ensure_ollama_model(
     on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Ensure the preferred model is installed; pull it automatically if missing."""
+    from travel_agent.config import DEFAULT_OLLAMA_MODEL
+
     host = normalize_ollama_host(host or settings.ollama_host)
-    want = (model or settings.ollama_model or "qwen2.5:3b").strip()
+    want = (model or settings.ollama_model or DEFAULT_OLLAMA_MODEL).strip()
 
     if model_is_installed(want, host):
         installed = fetch_ollama_model_names(host)

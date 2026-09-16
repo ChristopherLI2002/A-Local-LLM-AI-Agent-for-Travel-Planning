@@ -528,6 +528,7 @@ class FlightRowCard(tk.Frame):
 
         times = tk.Frame(self.card, bg="#FFFFFF")
         times.pack(fill="x")
+        self._times_frame = times
 
         # --- Outbound leg ---
         self.leg_out_lbl = tk.Label(
@@ -695,6 +696,7 @@ class FlightRowCard(tk.Frame):
 
         bottom = tk.Frame(self.card, bg="#FFFFFF")
         bottom.pack(fill="x", pady=(10, 0))
+        self._bottom_frame = bottom
         price_col = tk.Frame(bottom, bg="#FFFFFF")
         price_col.pack(side="left")
         self.price = tk.Label(
@@ -712,6 +714,10 @@ class FlightRowCard(tk.Frame):
 
         self._url = ""
         self._return_url = ""
+        self._progress = LiveProgressPanel(
+            self.card, title="Finding flights", compact=True
+        )
+        self._showing_progress = False
         self.select_btn.bind("<Button-1>", self._open)
         self.select_btn.bind(
             "<Enter>", lambda _e: self.select_btn.configure(bg=C["trip_blue_hover"])
@@ -924,35 +930,32 @@ class FlightRowCard(tk.Frame):
         else:
             messagebox.showinfo("No link", "Generate an itinerary first to get a return search link.")
 
+    def _show_flight_progress(self, message: str) -> None:
+        if not self._showing_progress:
+            self.badges.pack_forget()
+            self._times_frame.pack_forget()
+            self._bottom_frame.pack_forget()
+            self._progress.pack(fill="x", padx=2, pady=4)
+            self._showing_progress = True
+        self._progress.reset(message, title="Finding flights")
+
+    def _hide_flight_progress(self) -> None:
+        if not self._showing_progress:
+            return
+        self._progress.pack_forget()
+        self.badges.pack(fill="x", pady=(0, 8))
+        self._times_frame.pack(fill="x")
+        self._bottom_frame.pack(fill="x", pady=(10, 0))
+        self._showing_progress = False
+
     def set_loading(self, message: str) -> None:
-        self._clear_badges()
-        self._add_badge(message, filled=False)
-        self.leg_out_lbl.configure(text="Outbound")
-        self.airline_lbl.configure(text="Searching Trip.com…")
-        self._draw_logo("…")
-        self.dep_time.configure(text="--:--")
-        self.arr_time.configure(text="--:--")
-        self.dep_airport.configure(text="—")
-        self.arr_airport.configure(text="—")
-        self.duration.configure(text="—")
-        self.stops.configure(text="—")
-        self.leg_ret_lbl.configure(text="Return")
-        self.return_airline_lbl.configure(text="—")
-        self._draw_ret_logo("…")
-        self.ret_dep_time.configure(text="--:--")
-        self.ret_arr_time.configure(text="--:--")
-        self.ret_dep_airport.configure(text="—")
-        self.ret_arr_airport.configure(text="—")
-        self.ret_duration.configure(text="—")
-        self.ret_stops.configure(text="—")
-        self.return_block.pack_forget()
-        self.price.configure(text="…")
-        self.trip_lbl.configure(text="")
+        self._show_flight_progress(message or "Comparing flights on Trip.com…")
         self._url = ""
         self._return_url = ""
-        self.select_btn.configure(text="Open outbound search")
-        if self.ret_link_row.winfo_ismapped():
-            self.ret_link_row.pack_forget()
+
+    def set_progress_activity(self, message: str, *, floor: float | None = None) -> None:
+        if self._showing_progress:
+            self._progress.set_activity(message, floor=floor)
 
     def _clear_badges(self) -> None:
         for child in self.badges.winfo_children():
@@ -985,6 +988,7 @@ class FlightRowCard(tk.Frame):
             ).pack()
 
     def set_offer(self, offer: FlightOffer) -> None:
+        self._hide_flight_progress()
         self._clear_badges()
         self._add_badge(offer.badge or "Recommended", filled=True)
         if offer.baggage:
@@ -1074,6 +1078,7 @@ class HotelRowCard(tk.Frame):
 
         body = tk.Frame(self.card, bg="#FFFFFF")
         body.pack(fill="x")
+        self._body = body
 
         # Full-bleed hotel photo across the bookings column
         self.photo = tk.Canvas(
@@ -1231,7 +1236,29 @@ class HotelRowCard(tk.Frame):
         self.cta.bind("<Enter>", lambda _e: self.cta.configure(bg=C["trip_blue_hover"]))
         self.cta.bind("<Leave>", lambda _e: self.cta.configure(bg=C["trip_blue"]))
 
+        self._progress = LiveProgressPanel(
+            self.card, title="Finding hotels", compact=True
+        )
+        self._showing_progress = False
         self.set_loading("Waiting for plan…")
+
+    def _show_hotel_progress(self, message: str) -> None:
+        if not self._showing_progress:
+            self._body.pack_forget()
+            self._progress.pack(fill="x", padx=2, pady=4)
+            self._showing_progress = True
+        self._progress.reset(message, title="Finding hotels")
+
+    def _hide_hotel_progress(self) -> None:
+        if not self._showing_progress:
+            return
+        self._progress.pack_forget()
+        self._body.pack(fill="x")
+        self._showing_progress = False
+
+    def set_progress_activity(self, message: str, *, floor: float | None = None) -> None:
+        if self._showing_progress:
+            self._progress.set_activity(message, floor=floor)
 
     def _on_photo_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
         if event.width > 40 and abs(event.width - self._PHOTO_W) > 2:
@@ -1355,22 +1382,11 @@ class HotelRowCard(tk.Frame):
             messagebox.showinfo("No link", "Generate an itinerary first to get a booking link.")
 
     def set_loading(self, message: str) -> None:
-        self._draw_photo_placeholder("…")
-        self.name_lbl.configure(text=message)
-        self.stars_lbl.configure(text="")
-        self.score_badge.configure(text="—")
-        self.score_word.configure(text="")
-        self.reviews_lbl.configure(text="")
-        self.location_lbl.configure(text="Searching Trip.com hotels…")
-        self.features_lbl.configure(text="")
-        self.room_lbl.configure(text="")
-        self.beds_lbl.configure(text="")
-        self.social_lbl.configure(text="")
-        self.price_lbl.configure(text="…")
-        self.total_lbl.configure(text="")
+        self._show_hotel_progress(message or "Comparing hotels on Trip.com…")
         self._url = ""
 
     def set_offer(self, offer: HotelOffer) -> None:
+        self._hide_hotel_progress()
         heading = offer.stay_label or (
             f"Stay · {offer.city}" if offer.city else "Recommended hotel"
         )
@@ -1714,6 +1730,228 @@ class CarRentalRowCard(tk.Frame):
             self._draw_photo_placeholder()
 
 
+class LiveProgressPanel(tk.Frame):
+    """Pill progress bar + percent + activity text (bookings + day panel)."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        title: str = "Working…",
+        compact: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        pad = 12 if compact else 20
+        pady = 14 if compact else 22
+        super().__init__(master, bg="#FFFFFF", padx=pad, pady=pady, **kwargs)
+        self._pct = 0.0
+        self._target = 6.0
+        self._ceiling = 92.0
+        self._tick_id: str | None = None
+        self._bar_w = 1
+        self._title_text = title
+
+        self.title_lbl = tk.Label(
+            self,
+            text=title,
+            bg="#FFFFFF",
+            fg=C["ink"],
+            font=FONT_UI_BOLD,
+            anchor="w",
+        )
+        self.title_lbl.pack(fill="x")
+
+        self.detail = tk.Label(
+            self,
+            text="Starting…",
+            bg="#FFFFFF",
+            fg=C["muted"],
+            font=FONT_BODY,
+            anchor="w",
+            wraplength=360 if compact else 420,
+            justify="left",
+        )
+        self.detail.pack(fill="x", pady=(6, 12 if compact else 14))
+
+        row = tk.Frame(self, bg="#FFFFFF")
+        row.pack(fill="x")
+        self.pct_lbl = tk.Label(
+            row,
+            text="0%",
+            bg="#FFFFFF",
+            fg=C["trip_blue"],
+            font=FONT_UI_BOLD,
+            width=5,
+            anchor="e",
+        )
+        self.pct_lbl.pack(side="right", padx=(10, 0))
+
+        self.canvas = tk.Canvas(
+            row,
+            height=14,
+            bg="#FFFFFF",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.canvas.pack(side="left", fill="x", expand=True)
+        self.canvas.bind("<Configure>", self._on_resize)
+
+        self._draw_bar()
+        self._schedule_tick()
+
+    def reset(self, message: str = "Starting…", *, title: str | None = None) -> None:
+        self._pct = 0.0
+        self._target = 8.0
+        self._ceiling = 88.0
+        if title:
+            self._title_text = title
+            self.title_lbl.configure(text=title)
+        self.set_activity(message, floor=8)
+        self._schedule_tick()
+
+    def _on_resize(self, _event: tk.Event | None = None) -> None:
+        self._bar_w = max(40, int(self.canvas.winfo_width()))
+        self._draw_bar()
+
+    def _draw_bar(self) -> None:
+        w = max(40, int(self._bar_w))
+        h = 14
+        r = h / 2
+        self.canvas.delete("all")
+        self.canvas.configure(width=w)
+        self.canvas.create_oval(0, 0, h, h, fill="#E6EBF0", outline="#D0D7DE")
+        self.canvas.create_oval(w - h, 0, w, h, fill="#E6EBF0", outline="#D0D7DE")
+        self.canvas.create_rectangle(r, 0, w - r, h, fill="#E6EBF0", outline="")
+        self.canvas.create_line(r, 0.5, w - r, 0.5, fill="#D0D7DE")
+        self.canvas.create_line(r, h - 0.5, w - r, h - 0.5, fill="#D0D7DE")
+        fill_w = max(h, int(w * max(0.0, min(1.0, self._pct / 100.0))))
+        if self._pct <= 0.5:
+            return
+        blue = C["trip_blue"]
+        self.canvas.create_oval(0, 0, h, h, fill=blue, outline=blue)
+        if fill_w > h:
+            self.canvas.create_rectangle(r, 0, fill_w - r, h, fill=blue, outline="")
+            self.canvas.create_oval(fill_w - h, 0, fill_w, h, fill=blue, outline=blue)
+
+    def _schedule_tick(self) -> None:
+        if self._tick_id is not None:
+            try:
+                self.after_cancel(self._tick_id)
+            except Exception:
+                pass
+        self._tick_id = self.after(120, self._tick)
+
+    def _tick(self) -> None:
+        self._tick_id = None
+        if not self.winfo_exists():
+            return
+        if self._pct < self._target:
+            self._pct = min(self._target, self._pct + max(0.8, (self._target - self._pct) * 0.22))
+        elif self._pct < self._ceiling:
+            self._pct = min(self._ceiling, self._pct + 0.35)
+        self.pct_lbl.configure(text=f"{int(self._pct)}%")
+        self._draw_bar()
+        self._schedule_tick()
+
+    def set_activity(self, text: str, *, floor: float | None = None) -> None:
+        msg = (text or "").strip() or "Working…"
+        if len(msg) > 120:
+            msg = msg[:117] + "…"
+        self.detail.configure(text=msg)
+        if floor is not None:
+            self._target = max(self._target, float(floor))
+            self._ceiling = max(self._ceiling, min(96.0, self._target + 12.0))
+
+    def finish(self) -> None:
+        self._target = 100.0
+        self._ceiling = 100.0
+        self._pct = 100.0
+        self.pct_lbl.configure(text="100%")
+        self.detail.configure(text="Done")
+        self._draw_bar()
+        if self._tick_id is not None:
+            try:
+                self.after_cancel(self._tick_id)
+            except Exception:
+                pass
+            self._tick_id = None
+
+    def destroy(self) -> None:  # type: ignore[override]
+        if self._tick_id is not None:
+            try:
+                self.after_cancel(self._tick_id)
+            except Exception:
+                pass
+            self._tick_id = None
+        super().destroy()
+
+
+class PlanProgressCard(LiveProgressPanel):
+    """Day-panel progress: pill bar + percent + live agent activity."""
+
+    _TOOL_FLOOR = {
+        "propose_trip_route": 8,
+        "plan_trip": 22,
+        "search_flights": 28,
+        "compare_flight_prices": 40,
+        "search_hotels": 48,
+        "compare_hotel_prices": 58,
+        "search_cars": 62,
+        "search_attractions": 70,
+        "search_trains": 66,
+        "search_transfers": 68,
+    }
+    _TOOL_LABELS = {
+        "propose_trip_route": "Proposing your route…",
+        "plan_trip": "Scraping Trip.com flights & hotels…",
+        "search_flights": "Searching flights on Trip.com…",
+        "compare_flight_prices": "Comparing flight fares…",
+        "search_hotels": "Searching hotels on Trip.com…",
+        "compare_hotel_prices": "Comparing hotel rates…",
+        "search_cars": "Searching car rentals…",
+        "search_attractions": "Looking up attractions…",
+        "search_trains": "Searching trains…",
+        "search_transfers": "Searching airport transfers…",
+    }
+
+    def __init__(self, master: tk.Misc, **kwargs: Any) -> None:
+        super().__init__(master, title="Building your itinerary", compact=False, **kwargs)
+
+    def note_tool_start(self, name: str, detail: str = "") -> None:
+        label = self._TOOL_LABELS.get(name, f"Running {name}…")
+        if detail:
+            label = f"{label} ({detail})"
+        floor = float(self._TOOL_FLOOR.get(name, max(10, int(self._pct))))
+        if name == "plan_trip":
+            self._ceiling = 78.0
+        elif name in {"search_flights", "search_hotels", "search_cars"}:
+            self._ceiling = max(self._ceiling, floor + 14.0)
+        self.set_activity(label, floor=floor)
+
+    def note_tool_end(self, name: str) -> None:
+        bump = {
+            "propose_trip_route": 18,
+            "plan_trip": 82,
+            "search_flights": 42,
+            "search_hotels": 60,
+            "search_cars": 68,
+            "search_attractions": 76,
+            "compare_flight_prices": 46,
+            "compare_hotel_prices": 64,
+        }.get(name, int(self._pct) + 4)
+        self._target = max(self._target, float(bump))
+        self._ceiling = max(self._ceiling, min(94.0, self._target + 6.0))
+        self.set_activity(f"Finished {name.replace('_', ' ')}…")
+
+    def note_writing(self) -> None:
+        self._ceiling = 97.0
+        self.set_activity("Writing day-by-day itinerary…", floor=86)
+
+    def finish(self) -> None:
+        super().finish()
+        self.detail.configure(text="Done — loading your plan…")
+
+
 class TravelAgentApp(tk.Tk):
     def __init__(self, model: str, headless: bool = True) -> None:
         super().__init__()
@@ -1729,6 +1967,7 @@ class TravelAgentApp(tk.Tk):
         self._trip_context: dict[str, str] = {}
         self._live_flight_card: dict[str, str] = {}
         self._live_flight_error: str = ""
+        self._plan_progress: PlanProgressCard | None = None
         # Playwright sync API is thread-bound: one long-lived worker owns the browser.
         self._browser_jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self._browser_thread: threading.Thread | None = None
@@ -2285,8 +2524,48 @@ class TravelAgentApp(tk.Tk):
         )
 
     def _clear_days(self) -> None:
+        self._plan_progress = None
         for child in self.days_inner.winfo_children():
             child.destroy()
+
+    def _show_plan_progress(self, *, title_detail: str = "Starting…") -> PlanProgressCard:
+        """Replace the blank day panel with a live percent + activity bar."""
+        self._clear_days()
+        card = PlanProgressCard(self.days_inner)
+        card.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        self.days_inner.columnconfigure(0, weight=1)
+        card.set_activity(title_detail, floor=4)
+        self._plan_progress = card
+        return card
+
+    def _update_plan_progress(
+        self,
+        detail: str,
+        *,
+        floor: float | None = None,
+        tool: str | None = None,
+        tool_done: bool = False,
+    ) -> None:
+        card = self._plan_progress
+        if card is None or not card.winfo_exists():
+            return
+        if tool and tool_done:
+            card.note_tool_end(tool)
+            return
+        if tool:
+            dest = ""
+            text = (detail or "").strip()
+            if text.endswith(")") and "(" in text:
+                dest = text[text.rfind("(") + 1 : -1].strip()
+            card.note_tool_start(tool, dest)
+            return
+        if detail:
+            card.set_activity(detail, floor=floor)
+
+    def _finish_plan_progress(self) -> None:
+        card = self._plan_progress
+        if card is not None and card.winfo_exists():
+            card.finish()
 
     def _fill_card(self, card: dict[str, tk.Misc], text: str, urls: list[str]) -> None:
         body: tk.Label = card["body"]  # type: ignore[assignment]
@@ -2912,22 +3191,25 @@ class TravelAgentApp(tk.Tk):
         elif self.car_row.winfo_ismapped():
             self.car_row.pack_forget()
         self._clear_days()
-        loading = tk.Frame(self.days_inner, bg="#FFFFFF", padx=14, pady=16)
-        loading.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        tk.Label(
-            loading,
-            text="Building your itinerary… status updates appear at the top.",
-            bg="#FFFFFF",
-            fg=C["muted"],
-            font=FONT_BODY,
-            anchor="w",
-        ).pack(anchor="w")
+        dest = (self._trip_context.get("destination") or "").strip() or "your trip"
+        self._show_plan_progress(
+            title_detail=f"Planning {dest} — proposing route, then live Trip.com search…"
+        )
         self._set_busy(True, "Building Trip.Planner-style itinerary…")
 
         def job() -> str:
             assert self.agent is not None
             self.agent.force_rent_car = bool(self._trip_context.get("rent_car"))
+            self.after(
+                0,
+                lambda: self._update_plan_progress(
+                    "Asking the local model for the next step…", floor=10
+                ),
+            )
             answer = self.agent.chat(query)
+            self.after(0, lambda: self._update_plan_progress(
+                "Refreshing live booking cards…", floor=88
+            ))
             # Guarantee open-jaw times exist before the UI paints the card
             try:
                 self._ensure_open_jaw_flight_card()
@@ -2954,6 +3236,7 @@ class TravelAgentApp(tk.Tk):
                     self._live_flight_card = merged
             except Exception:
                 pass
+            self.after(0, self._finish_plan_progress)
             return answer
 
         self._run_browser_job(
@@ -3916,13 +4199,13 @@ class TravelAgentApp(tk.Tk):
         def _iata(raw: str, *, fallback: str = "") -> str:
             """Force airports to 3-letter IATA (never 'FLORIDA' / city names)."""
             code = to_flight_code((raw or "").strip())
-            if code and re.fullmatch(r"[A-Za-z]{3}", code):
+            if code and re.fullmatch(r"[A-Za-z]{3}", code) and code.lower() != "xxx":
                 return code.upper()
             fb = to_flight_code((fallback or "").strip())
-            if fb and re.fullmatch(r"[A-Za-z]{3}", fb):
+            if fb and re.fullmatch(r"[A-Za-z]{3}", fb) and fb.lower() != "xxx":
                 return fb.upper()
             only = re.sub(r"[^A-Za-z]", "", (raw or ""))
-            if re.fullmatch(r"[A-Za-z]{3}", only):
+            if re.fullmatch(r"[A-Za-z]{3}", only) and only.lower() != "xxx":
                 return only.upper()
             return "—"
 
@@ -4795,14 +5078,20 @@ class TravelAgentApp(tk.Tk):
             "Only use https://hk.trip.com/... URLs from tools."
         )
         self._set_busy(True, "Refining itinerary…")
+        self._show_plan_progress(title_detail="Refining your itinerary with the local model…")
 
         def job() -> str:
             assert self.agent is not None
+            self.after(
+                0,
+                lambda: self._update_plan_progress("Applying your changes…", floor=20),
+            )
             answer = self.agent.chat(refine)
             try:
                 self._refresh_live_booking_cards()
             except Exception:
                 pass
+            self.after(0, self._finish_plan_progress)
             return answer
 
         self._run_browser_job(
@@ -4900,7 +5189,10 @@ class TravelAgentApp(tk.Tk):
                     on_tool_end=self._on_tool_end,
                     on_status=lambda msg: self.after(
                         0,
-                        lambda m=msg: self._set_status(m, C["muted"]),
+                        lambda m=msg: (
+                            self._set_status(m, C["muted"]),
+                            self._update_plan_progress(m),
+                        ),
                     ),
                 )
                 agent.start()
@@ -4910,12 +5202,14 @@ class TravelAgentApp(tk.Tk):
                 except Exception:
                     pass
                 mode = "headless" if self.headless else "browser visible"
+                student = " · student" if getattr(agent, "student_mode", False) else ""
 
                 def _ready_ui() -> None:
                     self._ready = True
                     self._sync_action_buttons()
                     self._set_status(
-                        f"Ready · {self.model} · Trip.com HK · {mode}", C["ok"]
+                        f"Ready · {self.model}{student} · Trip.com HK · {mode}",
+                        C["ok"],
                     )
 
                 self.after(0, _ready_ui)
@@ -4924,14 +5218,34 @@ class TravelAgentApp(tk.Tk):
                     self._ready = False
                     self._sync_action_buttons(preparing_label=True)
                     self._set_status(f"Startup failed: {e}", C["danger"])
+                    err = str(e)
+                    low = err.lower()
+                    hints: list[str] = []
+                    if "err_connection" in low or "net::" in low or "trip.com" in low:
+                        hints.append(
+                            "Trip.com did not load (network / VPN / firewall). "
+                            "Check https://hk.trip.com in a normal browser, then retry."
+                        )
+                    if "ollama" in low or "model" in low:
+                        hints.append(
+                            "Need Ollama on PATH. This app starts Ollama and can use "
+                            f"{self.model} when it is already installed locally."
+                        )
+                    if "playwright" in low or "chromium" in low or "browser" in low:
+                        hints.append(
+                            "For the browser, run once:\n"
+                            "  python -m playwright install chromium\n"
+                            "Or install Google Chrome / Microsoft Edge."
+                        )
+                    if not hints:
+                        hints.append(
+                            "Need Ollama on PATH for the local model.\n"
+                            "For the browser: python -m playwright install chromium "
+                            "(or install Chrome / Edge)."
+                        )
                     messagebox.showerror(
                         "Startup error",
-                        f"{e}\n\n"
-                        "Need Ollama on PATH. This app starts Ollama and downloads "
-                        f"{self.model} automatically when missing.\n\n"
-                        "For the browser, run once:\n"
-                        "  python -m playwright install chromium\n"
-                        "Or install Google Chrome / Microsoft Edge.",
+                        err + "\n\n" + "\n\n".join(hints),
                     )
 
                 self.after(0, _fail_ui)
@@ -4985,15 +5299,27 @@ class TravelAgentApp(tk.Tk):
         if dest:
             msg = f"{msg} ({dest})"
         self.after(0, lambda m=msg: self._set_status(m, C["accent_deep"]))
+        self.after(
+            0,
+            lambda n=name, m=msg, d=str(dest or ""): self._update_plan_progress(
+                m, tool=n
+            ),
+        )
         if name in {"search_flights", "compare_flight_prices", "plan_trip"}:
             self.after(
                 0,
-                lambda: self.flight_row.set_loading("Searching Trip.com flights…"),
+                lambda m=msg: (
+                    self.flight_row.set_loading(m),
+                    self.flight_row.set_progress_activity(m, floor=25),
+                ),
             )
         if name in {"search_hotels", "compare_hotel_prices", "plan_trip"}:
             self.after(
                 0,
-                lambda: self.hotel_row.set_loading("Searching Trip.com hotels…"),
+                lambda m=msg: (
+                    self.hotel_row.set_loading(m),
+                    self.hotel_row.set_progress_activity(m, floor=30),
+                ),
             )
         if name == "search_cars" or (
             name == "plan_trip" and self._trip_context.get("rent_car")
@@ -5010,6 +5336,32 @@ class TravelAgentApp(tk.Tk):
         snippet = (preview or "").replace("\n", " ").strip()[:80]
         msg = f"Finished {name}" + (f" · {snippet}…" if snippet else "")
         self.after(0, lambda m=msg: self._set_status(m, C["muted"]))
+        self.after(
+            0,
+            lambda n=name: self._update_plan_progress("", tool=n, tool_done=True),
+        )
+        if name in {"search_flights", "compare_flight_prices", "plan_trip"}:
+            self.after(
+                0,
+                lambda: self.flight_row.set_progress_activity(
+                    "Flights ready — finishing plan…", floor=85
+                ),
+            )
+        if name in {"search_hotels", "compare_hotel_prices", "plan_trip"}:
+            self.after(
+                0,
+                lambda: self.hotel_row.set_progress_activity(
+                    "Hotels ready — finishing plan…", floor=85
+                ),
+            )
+        # After scrapes finish, student/model drafts the day board
+        if name in {"plan_trip", "search_attractions"}:
+            self.after(
+                0,
+                lambda: self._update_plan_progress(
+                    "Drafting day-by-day itinerary…", floor=84
+                ),
+            )
 
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.header.set_status(text, color or C["muted"])
@@ -5065,6 +5417,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    from travel_agent.config import apply_model_settings
+
+    apply_model_settings(args.model)
     app = TravelAgentApp(model=args.model, headless=not args.show_browser)
     app.mainloop()
     return 0
