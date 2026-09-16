@@ -7,6 +7,7 @@ import math
 import queue
 import re
 import threading
+import time
 import tkinter as tk
 import urllib.parse
 import urllib.request
@@ -803,7 +804,7 @@ class FlightRowCard(tk.Frame):
                 "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             },
         )
-        return urllib.request.urlopen(req, timeout=10).read()
+        return urllib.request.urlopen(req, timeout=6).read()
 
     def _decode_logo_tile(self, data: bytes, tile: int) -> Image.Image | None:
         try:
@@ -834,15 +835,13 @@ class FlightRowCard(tk.Frame):
         canvas: tk.Canvas,
         photo_attr: str,
     ) -> None:
-        """Paint one or more airline logos (stacked like Trip.com for codeshares)."""
+        """Paint airline logos; HTTP fetch runs off the UI thread."""
         names = split_airline_names(airline) or (
             [airline.strip()] if (airline or "").strip() else ["TP"]
         )
-        # Collect CDN urls for every carrier; keep scraped url as last-resort for #1
         urls = airline_logo_urls(airline)
         scraped = (logo_url or "").strip()
         if scraped.startswith("http") and scraped not in urls:
-            # Only append scraped if we have a single carrier and no CDN yet
             if len(urls) <= 1:
                 urls = list(urls) + [scraped]
 
@@ -850,50 +849,69 @@ class FlightRowCard(tk.Frame):
             w[0] for w in re.sub(r"[,/&+]", " ", names[0]).split()[:2] if w
         ) or "TP"
 
+        # Instant placeholder so paint never blocks on CDN urlopen
+        self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
         if not urls:
-            self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
             return
 
         tile = self._LOGO_SIZE
-        # Trip.com-style overlap: second logo offset down-right
         overlap = max(10, tile // 3) if len(urls) > 1 else 0
         n = min(len(urls), 3)
-        canvas_w = tile + overlap * (n - 1)
-        canvas_h = tile + overlap * (n - 1)
-        canvas.configure(width=canvas_w, height=canvas_h)
-        canvas.delete("all")
+        token = object()
+        setattr(self, f"{photo_attr}_token", token)
 
-        photos: list[tk.PhotoImage] = []
-        for i, url in enumerate(urls[:n]):
+        def worker() -> None:
+            blobs: list[bytes] = []
+            for url in urls[:n]:
+                try:
+                    blobs.append(self._fetch_logo_bytes(url))
+                except Exception:
+                    continue
+
+            def apply() -> None:
+                if getattr(self, f"{photo_attr}_token", None) is not token:
+                    return
+                if not blobs:
+                    return
+                canvas_w = tile + overlap * (len(blobs) - 1)
+                canvas_h = tile + overlap * (len(blobs) - 1)
+                try:
+                    canvas.configure(width=canvas_w, height=canvas_h)
+                    canvas.delete("all")
+                except tk.TclError:
+                    return
+                photos: list[tk.PhotoImage] = []
+                for i, data in enumerate(blobs):
+                    tile_img = self._decode_logo_tile(data, tile)
+                    if tile_img is None:
+                        continue
+                    disc = Image.new("RGBA", (tile, tile), (0, 0, 0, 0))
+                    draw = ImageDraw.Draw(disc)
+                    inset = 1
+                    draw.ellipse(
+                        (inset, inset, tile - 1 - inset, tile - 1 - inset),
+                        fill=(255, 255, 255, 255),
+                        outline=(220, 226, 232, 255),
+                    )
+                    disc.alpha_composite(tile_img)
+                    photo = ImageTk.PhotoImage(disc)
+                    photos.append(photo)
+                    ox = i * overlap
+                    oy = i * overlap
+                    canvas.create_image(ox + tile // 2, oy + tile // 2, image=photo)
+                if not photos:
+                    self._draw_logo_on(
+                        canvas, initials=initials, photo_attr=photo_attr
+                    )
+                    return
+                setattr(self, photo_attr, photos[0] if len(photos) == 1 else photos)
+
             try:
-                data = self._fetch_logo_bytes(url)
+                canvas.after(0, apply)
             except Exception:
-                continue
-            tile_img = self._decode_logo_tile(data, tile)
-            if tile_img is None:
-                continue
-            # White disc behind each logo so overlapping edges stay clean
-            disc = Image.new("RGBA", (tile, tile), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(disc)
-            inset = 1
-            draw.ellipse(
-                (inset, inset, tile - 1 - inset, tile - 1 - inset),
-                fill=(255, 255, 255, 255),
-                outline=(220, 226, 232, 255),
-            )
-            disc.alpha_composite(tile_img)
-            photo = ImageTk.PhotoImage(disc)
-            photos.append(photo)
-            ox = i * overlap
-            oy = i * overlap
-            canvas.create_image(ox + tile // 2, oy + tile // 2, image=photo)
+                pass
 
-        if not photos:
-            self._draw_logo_on(canvas, initials=initials, photo_attr=photo_attr)
-            return
-
-        # Keep references so Tk doesn't GC the images
-        setattr(self, photo_attr, photos[0] if len(photos) == 1 else photos)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _set_airline_logo(self, offer: FlightOffer) -> None:
         self._load_logo_photo(
@@ -1308,39 +1326,65 @@ class HotelRowCard(tk.Frame):
         )
 
     def _paint_hotel_photo(self, url: str, title: str) -> None:
+        """Show placeholder immediately; fetch cover image off the UI thread."""
+        self._draw_photo_placeholder(title or "Hotel")
+        token = object()
+        self._hotel_photo_token = token
         try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36"
-                    ),
-                    "Referer": "https://hk.trip.com/",
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                },
-            )
-            data = urllib.request.urlopen(req, timeout=15).read()
-            img = Image.open(BytesIO(data)).convert("RGB")
-            self.update_idletasks()
             target_w = max(self.photo.winfo_width(), self._PHOTO_W, 280)
             target_h = max(self.photo.winfo_height(), self._PHOTO_H, 140)
-            scale = max(target_w / max(img.width, 1), target_h / max(img.height, 1))
-            new_w = max(1, round(img.width * scale))
-            new_h = max(1, round(img.height * scale))
-            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            left = max(0, (new_w - target_w) // 2)
-            top = max(0, (new_h - target_h) // 2)
-            fitted = resized.crop((left, top, left + target_w, top + target_h))
-            photo = ImageTk.PhotoImage(fitted)
-            self._hotel_photo = photo
-            self._PHOTO_W = target_w
-            self._PHOTO_H = target_h
-            self.photo.delete("all")
-            self.photo.create_image(0, 0, image=photo, anchor="nw")
-        except Exception:
-            self._draw_photo_placeholder(title or "Hotel")
+        except tk.TclError:
+            target_w, target_h = self._PHOTO_W, self._PHOTO_H
+
+        def worker() -> None:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/122.0.0.0 Safari/537.36"
+                        ),
+                        "Referer": "https://hk.trip.com/",
+                        "Accept": (
+                            "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+                        ),
+                    },
+                )
+                data = urllib.request.urlopen(req, timeout=8).read()
+                img = Image.open(BytesIO(data)).convert("RGB")
+                scale = max(
+                    target_w / max(img.width, 1), target_h / max(img.height, 1)
+                )
+                new_w = max(1, round(img.width * scale))
+                new_h = max(1, round(img.height * scale))
+                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                left = max(0, (new_w - target_w) // 2)
+                top = max(0, (new_h - target_h) // 2)
+                fitted = resized.crop((left, top, left + target_w, top + target_h))
+            except Exception:
+                return
+
+            def apply() -> None:
+                if getattr(self, "_hotel_photo_token", None) is not token:
+                    return
+                try:
+                    photo = ImageTk.PhotoImage(fitted)
+                    self._hotel_photo = photo
+                    self._PHOTO_W = target_w
+                    self._PHOTO_H = target_h
+                    self.photo.delete("all")
+                    self.photo.create_image(0, 0, image=photo, anchor="nw")
+                except Exception:
+                    self._draw_photo_placeholder(title or "Hotel")
+
+            try:
+                self.after(0, apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _set_hotel_photo(self, offer: HotelOffer) -> None:
         url = (offer.image_url or "").strip().rstrip(".,;)")
@@ -1350,7 +1394,11 @@ class HotelRowCard(tk.Frame):
                 from travel_agent.attraction_images import lookup_image
 
                 city = offer.city or offer.location or "hotel"
-                query = title if not title.lower().startswith("hotels in ") else f"{city} hotel exterior"
+                query = (
+                    title
+                    if not title.lower().startswith("hotels in ")
+                    else f"{city} hotel exterior"
+                )
                 found = lookup_image(query, city=city)
                 if found and found.startswith("http"):
                     url = found
@@ -3207,35 +3255,33 @@ class TravelAgentApp(tk.Tk):
                 ),
             )
             answer = self.agent.chat(query)
-            self.after(0, lambda: self._update_plan_progress(
-                "Refreshing live booking cards…", floor=88
-            ))
-            # Guarantee open-jaw times exist before the UI paints the card
-            try:
-                self._ensure_open_jaw_flight_card()
-            except Exception as exc:
-                self._live_flight_error = str(exc)
-            try:
-                self._refresh_live_booking_cards()
-            except Exception:
-                pass
-            # Snapshot for the main-thread UI paint (do not rely only on browser state)
-            try:
-                plan = (
-                    getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            # Prefer paint-now when plan_trip already filled cards (avoids a
+            # second multi-minute Trip.com pass that freezes the window).
+            self._apply_plan_flight_snapshot()
+            need_refresh = not self._booking_cards_ready_enough()
+            if need_refresh:
+                self.after(
+                    0,
+                    lambda: self._update_plan_progress(
+                        "Refreshing live booking cards…", floor=88
+                    ),
                 )
-                # Only overwrite if the scrape actually has times (URLs alone are not enough)
-                if plan.get("flight_depart"):
-                    self._live_flight_card = dict(plan)
-                elif not getattr(self, "_live_flight_card", {}).get("flight_depart") and plan:
-                    # Keep URLs for buttons, but do not pretend times exist
-                    merged = dict(getattr(self, "_live_flight_card", None) or {})
-                    for k, v in plan.items():
-                        if v and (k in {"flight", "flight_return"} or not merged.get(k)):
-                            merged[k] = v
-                    self._live_flight_card = merged
-            except Exception:
-                pass
+                try:
+                    self._ensure_open_jaw_flight_card()
+                except Exception as exc:
+                    self._live_flight_error = str(exc)
+                try:
+                    self._refresh_live_booking_cards(max_seconds=25.0)
+                except Exception:
+                    pass
+                self._apply_plan_flight_snapshot()
+            else:
+                self.after(
+                    0,
+                    lambda: self._update_plan_progress(
+                        "Cards ready — painting itinerary…", floor=92
+                    ),
+                )
             self.after(0, self._finish_plan_progress)
             return answer
 
@@ -3245,6 +3291,73 @@ class TravelAgentApp(tk.Tk):
             on_err=lambda e: self._apply_plan(f"Error: {e}"),
             done=lambda: self._set_busy(False),
         )
+
+    def _time_looks_ok(self, raw: str) -> bool:
+        return bool(re.fullmatch(r"[0-2]?\d:[0-5]\d", (raw or "").strip()))
+
+    def _flight_fields_ready(self) -> bool:
+        """True when scraped flight times are good enough to paint without re-scrape."""
+        if not self.agent:
+            return False
+        plan = dict(getattr(self.agent.browser, "last_plan_flight_card", None) or {})
+        live = dict(getattr(self.agent.browser, "last_flight_card", None) or {})
+        links = self.agent.booking_links
+        card = plan if self._time_looks_ok(plan.get("flight_depart", "")) else live
+        if not self._time_looks_ok(card.get("flight_depart", "")):
+            card = {
+                **card,
+                **{k: v for k, v in links.items() if k.startswith("flight") and v},
+            }
+        if not self._time_looks_ok(card.get("flight_depart", "")):
+            return False
+        if not is_plausible_airline_name(card.get("flight_airline") or links.get("flight_airline") or ""):
+            # Times alone are enough to avoid a full re-scrape; airline can stay soft.
+            pass
+        return True
+
+    def _hotel_fields_ready(self) -> bool:
+        if not self.agent:
+            return False
+        links = self.agent.booking_links
+        stays = list(getattr(self.agent.browser, "last_hotel_stays", None) or [])
+        detail = (
+            (links.get("hotel") or "")
+            or (getattr(self.agent.browser, "last_hotel_detail_url", "") or "")
+            or ((stays[0].get("url") if stays else "") or "")
+        )
+        name = (
+            (links.get("hotel_name") or "")
+            or (getattr(self.agent.browser, "last_hotel_name", "") or "")
+            or ((stays[0].get("name") if stays else "") or "")
+        )
+        if not is_trusted_hotel_detail_url(detail) and not is_openable_hotel_url(detail):
+            return False
+        low = (name or "").lower()
+        if not name or low.startswith("hotels in ") or low.startswith("recommended hotel"):
+            return False
+        return True
+
+    def _booking_cards_ready_enough(self) -> bool:
+        """Skip post-plan refresh when plan_trip already produced usable cards."""
+        return self._flight_fields_ready() and self._hotel_fields_ready()
+
+    def _apply_plan_flight_snapshot(self) -> None:
+        """Copy frozen plan flight card into _live_flight_card for UI paint."""
+        if not self.agent:
+            return
+        try:
+            plan = getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+            if plan.get("flight_depart"):
+                self._live_flight_card = dict(plan)
+            elif not getattr(self, "_live_flight_card", {}).get("flight_depart") and plan:
+                merged = dict(getattr(self, "_live_flight_card", None) or {})
+                for k, v in plan.items():
+                    if v and (k in {"flight", "flight_return"} or not merged.get(k)):
+                        merged[k] = v
+                self._live_flight_card = merged
+            self.agent._apply_plan_flight_card()
+        except Exception:
+            pass
 
     def _ensure_open_jaw_flight_card(self) -> None:
         """Scrape open-jaw legs when the flight card would otherwise show --:--."""
@@ -3344,10 +3457,32 @@ class TravelAgentApp(tk.Tk):
                 f"(check network / try again)"
             )
 
-    def _refresh_live_booking_cards(self) -> None:
-        """Refresh flight/hotel card fields from Trip.com (browser thread only)."""
+    def _refresh_live_booking_cards(self, max_seconds: float = 25.0) -> None:
+        """Refresh flight/hotel card fields from Trip.com (browser thread only).
+
+        Caps wall time so a second scrape cannot freeze the window after plan_trip.
+        Skips legs that already look paint-ready.
+        """
         if not self.agent:
             return
+        deadline = time.monotonic() + max(5.0, float(max_seconds or 25.0))
+
+        def _alive() -> bool:
+            return time.monotonic() < deadline
+
+        def _progress(msg: str, floor: int = 88) -> None:
+            try:
+                self.after(
+                    0,
+                    lambda m=msg, f=floor: self._update_plan_progress(m, floor=f),
+                )
+            except Exception:
+                pass
+
+        if self._booking_cards_ready_enough():
+            _progress("Cards ready — skipping live refresh…", 92)
+            return
+
         ctx = self._trip_context
         checkout = ctx.get("return_date") or ""
         if not checkout and ctx.get("depart_date"):
@@ -3409,38 +3544,44 @@ class TravelAgentApp(tk.Tk):
                     pass
 
         open_jaw = bool(arrive and ret_from and arrive != ret_from)
+        hotel_ready = self._hotel_fields_ready()
+        flight_ready = self._flight_fields_ready()
 
         # Hotel photo/details first — flight goto must not discard hotel image work
-        try:
-            live_detail = (
-                getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
-            ).strip()
-            if live_detail and is_trusted_hotel_detail_url(live_detail):
-                self.agent.booking_links["hotel"] = live_detail
-            need_detail = not is_trusted_hotel_detail_url(
-                self.agent.booking_links.get("hotel", "")
-            )
-            if need_detail and hotel_city and hotel_checkin:
-                live = fetch_hotel_detail_link(
-                    self.agent.browser,
-                    city=hotel_city,
-                    checkin=hotel_checkin,
-                    checkout=hotel_checkout or checkout,
+        if not hotel_ready and _alive():
+            try:
+                _progress("Refreshing hotel card…", 88)
+                live_detail = (
+                    getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+                ).strip()
+                if live_detail and is_trusted_hotel_detail_url(live_detail):
+                    self.agent.booking_links["hotel"] = live_detail
+                need_detail = not is_trusted_hotel_detail_url(
+                    self.agent.booking_links.get("hotel", "")
                 )
-                self._merge_live_hotel(live)
-            # Prefer Playwright detail again after fetch
-            live_detail = (
-                getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
-            ).strip()
-            if live_detail and is_trusted_hotel_detail_url(live_detail):
-                self.agent.booking_links["hotel"] = live_detail
-            self._ensure_hotel_image()
-        except Exception:
-            pass
+                if need_detail and hotel_city and hotel_checkin and _alive():
+                    live = fetch_hotel_detail_link(
+                        self.agent.browser,
+                        city=hotel_city,
+                        checkin=hotel_checkin,
+                        checkout=hotel_checkout or checkout,
+                    )
+                    self._merge_live_hotel(live)
+                live_detail = (
+                    getattr(self.agent.browser, "last_hotel_detail_url", "") or ""
+                ).strip()
+                if live_detail and is_trusted_hotel_detail_url(live_detail):
+                    self.agent.booking_links["hotel"] = live_detail
+                if _alive():
+                    self._ensure_hotel_image()
+            except Exception:
+                pass
+        elif hotel_ready:
+            _progress("Hotel card ready…", 90)
 
         # Guarantee car hire scrape when Rent a car was selected
         try:
-            if ctx.get("rent_car"):
+            if ctx.get("rent_car") and _alive():
                 card = dict(getattr(self.agent.browser, "last_car_card", None) or {})
                 if self.agent.booking_links.get("car") and not card.get("url"):
                     card["url"] = self.agent.booking_links["car"]
@@ -3448,7 +3589,8 @@ class TravelAgentApp(tk.Tk):
                     pickup = hotel_city or to_hotel_city(
                         ctx.get("destination", "") or ""
                     )
-                    if pickup:
+                    if pickup and _alive():
+                        _progress("Fetching car rental…", 91)
                         self.after(
                             0,
                             lambda: self._set_status(
@@ -3464,6 +3606,14 @@ class TravelAgentApp(tk.Tk):
                         self.agent._prefer_live_car_card()
         except Exception:
             pass
+
+        if flight_ready:
+            _progress("Flight card ready…", 93)
+            return
+
+        if not _alive():
+            _progress("Refresh budget reached — painting with current cards…", 94)
+            return
 
         try:
             links = self.agent.booking_links
@@ -3498,11 +3648,11 @@ class TravelAgentApp(tk.Tk):
                 if ctx.get("depart_date"):
                     links.setdefault("flight_date", ctx["depart_date"])
 
-                # Missing times/airline/price → scrape both open-jaw legs now
                 sparse = not links.get("flight_depart") or not links.get(
                     "flight_airline"
                 )
-                if sparse and ctx.get("depart_date") and ctx.get("return_date"):
+                if sparse and ctx.get("depart_date") and ctx.get("return_date") and _alive():
+                    _progress("Fetching open-jaw flight times…", 92)
                     self.after(
                         0,
                         lambda: self._set_status(
@@ -3519,11 +3669,17 @@ class TravelAgentApp(tk.Tk):
                         adults=1,
                     )
                     self._merge_live_flight(oj)
-            elif ctx.get("origin") and ctx.get("destination") and ctx.get("depart_date"):
+            elif (
+                ctx.get("origin")
+                and ctx.get("destination")
+                and ctx.get("depart_date")
+                and _alive()
+            ):
                 if not (
                     self.agent.booking_links.get("flight_airline")
                     or self.agent.booking_links.get("flight_depart")
                 ):
+                    _progress("Fetching flight times…", 92)
                     dest_code = arrive or to_flight_code(ctx["destination"]).upper()
                     live_flight = fetch_flight_card(
                         self.agent.browser,
@@ -3544,7 +3700,8 @@ class TravelAgentApp(tk.Tk):
                 )
             except Exception:
                 pass
-
+        if not _alive():
+            _progress("Refresh budget reached — painting with current cards…", 94)
     def _merge_live_hotel(self, live: dict[str, str]) -> None:
         """Copy scraped hotel detail fields into agent.booking_links."""
         if not self.agent:
@@ -3907,16 +4064,15 @@ class TravelAgentApp(tk.Tk):
                 fb_feats = (_fallback_stay_hotel(city).get("features") or "").strip()
                 if fb_feats and (rec.get("features") or "").strip() == fb_feats:
                     rec["features"] = ""
-                # Detail URL is authoritative — always refresh name/photo/score from
-                # Trip.com detail HTML for multi-city (avoids first-list-card mismatch).
+                # Detail URL is authoritative — refresh name/photo only when
+                # paint data is weak. Skip score-only / multi_stay-always HTTP
+                # so UI paint never blocks on per-stay urlopen.
                 need_meta = (
-                    multi_stay
-                    or generic
+                    generic
                     or china_wrong
                     or _is_curated_fallback_name(rec.get("name") or "", city)
                     or not (rec.get("image_url") or "").startswith("http")
                     or "loremflickr" in (rec.get("image_url") or "").lower()
-                    or not (rec.get("score") or "").strip()
                 )
                 if need_meta and saved_url:
                     try:
@@ -4635,8 +4791,8 @@ class TravelAgentApp(tk.Tk):
                 )
             elif links.get("hotel") and is_trusted_hotel_detail_url(links["hotel"]):
                 offer.url = links["hotel"]
-            # If the booking URL is a real detail page but the name is still wrong,
-            # read the official Trip.com title / cover from the detail HTML.
+            # If the booking URL is a real detail page but the name/photo is still
+            # wrong, read Trip.com detail HTML. Skip score-only fetches (blocks paint).
             detail_for_meta = ""
             if offer.url and is_trusted_hotel_detail_url(offer.url):
                 detail_for_meta = offer.url
@@ -4645,7 +4801,7 @@ class TravelAgentApp(tk.Tk):
             if detail_for_meta and (
                 _bad_name(offer.name)
                 or not (offer.image_url or "").startswith("http")
-                or not (offer.score or "").strip()
+                or "loremflickr" in (offer.image_url or "").lower()
             ):
                 try:
                     from travel_agent.browser_tools import _http_fetch_hotel_detail_meta
@@ -5087,10 +5243,14 @@ class TravelAgentApp(tk.Tk):
                 lambda: self._update_plan_progress("Applying your changes…", floor=20),
             )
             answer = self.agent.chat(refine)
-            try:
-                self._refresh_live_booking_cards()
-            except Exception:
-                pass
+            self._apply_plan_flight_snapshot()
+            need_refresh = not self._booking_cards_ready_enough()
+            if need_refresh:
+                try:
+                    self._refresh_live_booking_cards(max_seconds=20.0)
+                except Exception:
+                    pass
+                self._apply_plan_flight_snapshot()
             self.after(0, self._finish_plan_progress)
             return answer
 
