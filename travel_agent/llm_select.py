@@ -470,7 +470,9 @@ def enrich_car_candidates_from_page(
 
 _ATTRACTION_SKIP_RE = re.compile(
     r"(?i)\b(eSIM|SIM card|wifi|wi-fi|airport express|lounge|transfer|private car|"
-    r"charter|ticket only|voucher|buffet deal|JR Pass)\b"
+    r"charter|ticket only|voucher|buffet deal|JR Pass|"
+    r"special administrative region|total budget|laver cup|"
+    r"open 20\d{2})\b"
 )
 _ATTRACTION_NAV_RE = re.compile(
     r"(?i)^(attractions?\s*&\s*tours|attractions|experiences|must-have|top picks|"
@@ -752,10 +754,12 @@ def _label_with_meta(name: str, cards_by_name: dict[str, dict[str, str]]) -> str
     if not card:
         return base
     extras: list[str] = []
-    if card.get("visit_time"):
-        extras.append(card["visit_time"])
-    if card.get("open_hours"):
-        extras.append(f"Open {card['open_hours']}")
+    visit = re.sub(r"\s+", " ", (card.get("visit_time") or "").strip())
+    if visit and visit.lower() not in {"n/a", "na", "-", "unknown"}:
+        extras.append(visit)
+    hours = re.sub(r"\s+", " ", (card.get("open_hours") or "").strip())
+    if hours and hours.lower() not in {"n/a", "na", "-", "unknown"}:
+        extras.append(f"Open {hours}")
     if not extras:
         return bare or base
     return f"{bare or base} ({' · '.join(extras)})"

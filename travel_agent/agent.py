@@ -678,6 +678,13 @@ class TravelAgent:
             # Never pass travel style as interests-only when destination is empty junk
             if styles and is_travel_style_label(str(args.get("interests") or "")):
                 args["interests"] = styles
+        elif name == "search_attractions":
+            # Student often passes origin (Hong Kong) instead of the trip destination.
+            dest = ctx_dest.split(",", 1)[0].strip() if ctx_dest else ""
+            if dest and is_travel_style_label(dest):
+                dest = ""
+            if dest:
+                args["city"] = dest
 
     def _chat_with_recovery(self, *, tools: list[dict[str, Any]] | None) -> dict[str, Any]:
         """Run one Ollama chat call, reconnecting once on socket reset.

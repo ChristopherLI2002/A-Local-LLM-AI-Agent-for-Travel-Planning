@@ -2605,6 +2605,8 @@ class TravelAgentApp(tk.Tk):
 
     def _clear_days(self) -> None:
         self._plan_progress = None
+        # Invalidate in-flight thumb workers so they don't paint onto destroyed labels
+        self._timetable_thumb_gen = int(getattr(self, "_timetable_thumb_gen", 0) or 0) + 1
         for child in self.days_inner.winfo_children():
             child.destroy()
 
@@ -2857,13 +2859,14 @@ class TravelAgentApp(tk.Tk):
         from travel_agent.attraction_images import (
             _image_identity,
             _loremflickr_image,
-            candidate_image_urls,
             fetch_image_bytes,
             is_generic_stock_image_url,
+            resolve_timetable_image_url,
             sanitize_image_url,
         )
 
         dest = self._trip_context.get("destination", "") or ""
+        gen = int(getattr(self, "_timetable_thumb_gen", 0) or 0)
         avoid = set(used_ids or ())
         first = sanitize_image_url(url) if url else ""
         if first and is_generic_stock_image_url(first):
@@ -2880,7 +2883,11 @@ class TravelAgentApp(tk.Tk):
                 return
 
         def _apply(data: bytes | None, key: str, chosen: str) -> None:
-            if not img_lbl.winfo_exists() or not data:
+            if int(getattr(self, "_timetable_thumb_gen", 0) or 0) != gen:
+                return
+            if not img_lbl.winfo_exists():
+                return
+            if not data:
                 return
             photo = self._timetable_thumb_cache.get(key)
             if photo is None:
@@ -2905,11 +2912,13 @@ class TravelAgentApp(tk.Tk):
 
             def _try(cand: str) -> bool:
                 nonlocal data, key, chosen
-                cand = (cand or "").strip()
+                cand = sanitize_image_url(cand) if cand else ""
                 if not cand.startswith("http"):
                     return False
+                if is_generic_stock_image_url(cand) and data:
+                    return False
                 try:
-                    blob = fetch_image_bytes(cand)
+                    blob = fetch_image_bytes(cand, retries=2)
                 except Exception:
                     blob = b""
                 if not blob:
@@ -2919,23 +2928,18 @@ class TravelAgentApp(tk.Tk):
                 chosen = cand
                 return True
 
-            # Trip.com cover first; otherwise Wikipedia/Openverse (not random stock).
-            if first and not is_generic_stock_image_url(first) and _try(first):
+            # 1) Assigned Trip.com / pre-resolved URL
+            if first and _try(first):
                 pass
             else:
-                claimed = set(used_ids or ())
-                if first:
-                    claimed.discard(_image_identity(first))
+                # 2) One fast Wiki title lookup (no Openverse fan-out)
                 try:
-                    for cand in candidate_image_urls(
-                        detail, dest, limit=6, exclude=set(avoid) | claimed
-                    ):
-                        if is_generic_stock_image_url(cand):
-                            continue
-                        if _try(cand):
-                            break
+                    wiki = resolve_timetable_image_url(detail, dest)
+                    if wiki and _image_identity(wiki) not in avoid:
+                        _try(wiki)
                 except Exception:
                     pass
+                # 3) Deterministic stock so the tile is never stuck pink
                 if not data:
                     try:
                         _try(_loremflickr_image(f"{dest}|{detail}"))
@@ -2948,7 +2952,7 @@ class TravelAgentApp(tk.Tk):
                 pass
 
         self.after(
-            max(0, min(int(delay_ms), 2500)),
+            max(0, min(int(delay_ms), 1200)),
             lambda: threading.Thread(target=_worker, daemon=True).start(),
         )
 
@@ -3020,13 +3024,20 @@ class TravelAgentApp(tk.Tk):
 
         day_date = self._day_calendar_date(index)
 
+        from travel_agent.planner_query import is_junk_timetable_activity
+
         raw_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
         activities: list[str] = []
         for ln in raw_lines:
             ln = re.sub(r"^[•\-\*]\s*", "", ln)
             ln = re.sub(r"^\d+[\.)]\s*", "", ln)
-            if ln:
-                activities.append(ln)
+            if not ln:
+                continue
+            tm = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)\s+(.*)$", ln)
+            detail = tm.group(3).strip() if tm else ln
+            if is_junk_timetable_activity(detail):
+                continue
+            activities.append(ln)
         if not activities:
             activities = ["Details coming soon."]
 
@@ -5294,28 +5305,29 @@ class TravelAgentApp(tk.Tk):
                 )
                 return
             live = dict(payload.get("live") or {})  # type: ignore[arg-type]
+            # Update booking cards only — never rebuild day widgets (that cancels
+            # in-flight photo downloads and leaves permanent orange placeholders).
             if live.get("flight_depart"):
-                self.flight_row.set_offer(self._flight_offer_from_live_card(live))
-                if self._last_plan:
-                    try:
-                        parsed = self._apply_booking_urls(
-                            parse_itinerary(self._last_plan)
-                        )
-                        parsed.flight_offer = self._flight_offer_from_live_card(live)
-                        parsed = self._ensure_days(parsed)
-                        self._render_parsed(parsed)
-                        self.flight_row.set_offer(parsed.flight_offer)
-                    except Exception:
-                        pass
-            elif self.agent:
-                # Hotel-only salvage when flights still empty
-                try:
-                    parsed = self._apply_booking_urls(
-                        parse_itinerary(self._last_plan or "")
-                    )
-                    self._render_hotel_cards(parsed)
-                except Exception:
-                    pass
+                offer = self._flight_offer_from_live_card(live)
+                self.flight_row.set_offer(offer)
+                if self.agent and live.get("flight_arrive"):
+                    self.agent.booking_links["flight_arrive"] = live["flight_arrive"]
+                if self.agent and live.get("flight_return_depart"):
+                    self.agent.booking_links["flight_return_depart"] = live[
+                        "flight_return_depart"
+                    ]
+            try:
+                parsed = self._apply_booking_urls(
+                    parse_itinerary(self._last_plan or "")
+                )
+                self._enrich_hotel_offer(
+                    parsed,
+                    hotel_name=(self.agent.booking_links.get("hotel_name") if self.agent else "")
+                    or "",
+                )
+                self._render_hotel_cards(parsed)
+            except Exception:
+                pass
             if self._flight_fields_ready():
                 self._set_status("Itinerary ready", C["ok"])
             else:
@@ -5371,11 +5383,7 @@ class TravelAgentApp(tk.Tk):
                     ]
             if self._last_plan:
                 try:
-                    parsed = self._apply_booking_urls(parse_itinerary(self._last_plan))
-                    if oj.get("flight_depart"):
-                        parsed.flight_offer = offer
-                    parsed = self._ensure_days(parsed)
-                    self._render_parsed(parsed)
+                    # Booking cards only — full day re-render cancels photo loads.
                     self.flight_row.set_offer(offer)
                 except Exception:
                     pass

@@ -118,9 +118,16 @@ _WIKI_TITLES: dict[str, str] = {
     "man mo temple": "Man Mo Temple",
     "london eye": "London Eye",
     "borough market": "Borough Market",
+    "westminster abbey": "Westminster Abbey",
     "westminster": "Palace of Westminster",
     "big ben": "Big Ben",
+    "houses of parliament": "Palace of Westminster",
     "british museum": "British Museum",
+    "russell square": "Russell Square",
+    "dishoom": "Indian cuisine",
+    "pret": "Café",
+    "museum café": "British Museum",
+    "museum cafe": "British Museum",
     "buckingham": "Buckingham Palace",
     "tower of london": "Tower of London",
     "tower bridge": "Tower Bridge",
@@ -149,7 +156,9 @@ _WIKI_TITLES: dict[str, str] = {
     "transfer to airport": "Airport terminal",
     "flight departs": "Airplane",
     "airport": "Airport terminal",
-    "hotel check-in": "Capsule hotel",
+    "hotel check-in": "Hotel lobby",
+    "check-in and drop": "Hotel lobby",
+    "drop bags": "Hotel lobby",
     "hotel checkout": "Capsule hotel",
     "wake up": "Capsule hotel",
     "neighborhood walk": "Street",
@@ -165,7 +174,7 @@ _WIKI_TITLES: dict[str, str] = {
 _CATEGORY_FALLBACKS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\b(land at airport|transfer to airport|airport|narita|haneda|nrt|hnd|icn|cdg)\b"), "Airport terminal"),
     (re.compile(r"(?i)\b(flight departs|airplane|boarding)\b"), "Airplane"),
-    (re.compile(r"(?i)\b(hotel|check-in|checkout|check out|wake up|pack)\b"), "Capsule hotel"),
+    (re.compile(r"(?i)\b(hotel|check-in|checkout|check out|wake up|pack)\b"), "Hotel lobby"),
     (re.compile(r"(?i)\b(ramen|ichiran)\b"), "Ramen"),
     (re.compile(r"(?i)\b(sushi|uobei)\b"), "Sushi"),
     (re.compile(r"(?i)\b(yakitori|omoide)\b"), "Yakitori"),
@@ -186,6 +195,7 @@ _CITY_FALLBACKS: dict[str, str] = {
     "singapore": "Singapore",
     "taipei": "Taipei",
     "hong kong": "Hong Kong",
+    "london": "London",
 }
 
 # Prefer real terminal / runway photos — never the generic "Airport" diagram page
@@ -316,10 +326,13 @@ def sanitize_image_url(url: str, *, width: int = 500) -> str:
     url = (url or "").strip()
     if not url:
         return ""
+    # Drop tracking / API query junk that some hosts reject
+    if "wikimedia.org" in url.lower() or "wikipedia.org" in url.lower():
+        url = url.split("?", 1)[0]
     if width not in _ALLOWED_THUMB_WIDTHS:
         width = 500
     # Allowed steps: 20,40,60,120,250,330,500,960,... — never invent other widths.
-    if "upload.wikimedia.org" in url and "/thumb/" in url:
+    if ("upload.wikimedia.org" in url or "thumb.wikimedia.org" in url) and "/thumb/" in url:
         url = re.sub(r"/\d+px-", f"/{width}px-", url)
     return url
 
@@ -330,7 +343,7 @@ def _thumb_url_variants(url: str) -> list[str]:
     if not url:
         return []
     # Non-Wikimedia hosts: fetch as-is only
-    if "upload.wikimedia.org" not in url:
+    if "upload.wikimedia.org" not in url and "thumb.wikimedia.org" not in url:
         return [url]
     out: list[str] = []
     seen: set[str] = set()
@@ -339,8 +352,9 @@ def _thumb_url_variants(url: str) -> list[str]:
         if cand and cand not in seen:
             seen.add(cand)
             out.append(cand)
-    if url not in seen:
-        out.append(url)
+    cleaned = sanitize_image_url(url)
+    if cleaned and cleaned not in seen:
+        out.append(cleaned)
     return out
 
 
@@ -635,6 +649,31 @@ def is_generic_stock_image_url(url: str) -> bool:
     )
 
 
+def resolve_timetable_image_url(text: str, city: str = "") -> str:
+    """Fast one-shot photo URL for a timetable row (Trip.com / Wiki only).
+
+    Avoid Openverse here — calling it for every day slot stalls the GUI for
+    minutes under the shared fetch lock.
+    """
+    trip = lookup_trip_attraction_image(text)
+    if trip:
+        return trip
+    title = _title_lookup(text) or _category_title(text)
+    if not title and _is_airport_query(text):
+        title = _city_airport_title(city) or "Airport terminal"
+    if title and title.lower() != "airport":
+        wiki = _wikipedia_thumbnail(title)
+        if wiki:
+            return wiki
+    # Short city landmark fallback
+    city_title = _CITY_FALLBACKS.get((city or "").strip().lower(), "")
+    if city_title:
+        wiki = _wikipedia_thumbnail(city_title)
+        if wiki:
+            return wiki
+    return ""
+
+
 def candidate_image_urls(
     text: str,
     city: str = "",
@@ -648,8 +687,11 @@ def candidate_image_urls(
     seen: set[str] = set(exclude or ())
 
     def _add(u: str) -> None:
-        u = _acceptable_image_url(sanitize_image_url(u) if "upload.wikimedia.org" in (u or "") else u)
+        u = _acceptable_image_url(sanitize_image_url(u) if "upload.wikimedia.org" in (u or "") or "thumb.wikimedia.org" in (u or "") else u)
         if not u:
+            return
+        # Openverse "thumb/?format=json" is not a paint-ready image URL
+        if "openverse.org" in u.lower() and "format=json" in u.lower():
             return
         ident = _image_identity(u)
         if not ident or ident in seen:
@@ -658,28 +700,25 @@ def candidate_image_urls(
         urls.append(u)
 
     airport = _is_airport_query(text)
+    # Prefer a single known title first (avoids 5× Wiki API round-trips)
+    primary = resolve_timetable_image_url(text, city)
+    if primary:
+        _add(primary)
+        if len(urls) >= limit:
+            return urls[:limit]
     # For airports, prefer photographic sources first (Wiki "Airport" is a diagram)
     if airport:
-        for phrase in phrases[:5]:
-            for ov in _openverse_images(phrase, limit=4):
+        for phrase in phrases[:2]:
+            for ov in _openverse_images(phrase, limit=2):
                 _add(ov)
                 if len(urls) >= limit:
                     return urls[:limit]
-        for phrase in phrases[:5]:
-            _add(_wikipedia_thumbnail(phrase))
-            if len(urls) >= limit:
-                return urls[:limit]
         _add(_loremflickr_image(f"airport,terminal,airplane,{text[:40]}"))
     else:
-        for phrase in phrases[:5]:
+        for phrase in phrases[:2]:
             _add(_wikipedia_thumbnail(phrase))
             if len(urls) >= limit:
                 return urls[:limit]
-        for phrase in phrases[:5]:
-            for ov in _openverse_images(phrase, limit=4):
-                _add(ov)
-                if len(urls) >= limit:
-                    return urls[:limit]
         _add(_loremflickr_image(f"{phrases[0] if phrases else (city or 'travel')}|{text[:48]}"))
     return urls[:limit]
 

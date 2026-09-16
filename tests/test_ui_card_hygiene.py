@@ -12,7 +12,15 @@ from travel_agent.itinerary_parse import (
     parse_hotel_offer,
     parse_itinerary,
 )
+from travel_agent.destination_guides import (
+    DayIdea,
+    activity_conflicts_destination,
+    day_ideas_for,
+    filter_attraction_plan_for_destination,
+    format_day_body,
+)
 from travel_agent.planner_query import (
+    is_junk_timetable_activity,
     is_placeholder_card_text,
     is_travel_style_label,
 )
@@ -73,6 +81,56 @@ def main() -> int:
     assert len(imgs) == 0, imgs
     assert is_generic_stock_image_url(_loremflickr_image("a"))
     assert _loremflickr_image("a") != _loremflickr_image("b")
+
+    from travel_agent.attraction_images import resolve_timetable_image_url
+
+    wiki = resolve_timetable_image_url(
+        "British Museum (Great Court) — pick 2–3 rooms", "London"
+    )
+    assert wiki and "wikimedia" in wiki.lower(), wiki
+
+    assert is_junk_timetable_activity(
+        "Hong Kong Special Administrative Region (HK$12,000 Total Budget)"
+    )
+    assert is_junk_timetable_activity("Laver Cup 2026 (Open 2026.09.25-2026.09.27)")
+
+    assert activity_conflicts_destination("Hong Kong City Hall, N/A", "London")
+    assert not activity_conflicts_destination("Westminster Abbey", "London")
+    hk_plan = [
+        {
+            "title": "Arrival · London",
+            "go": "Hong Kong City Hall, N/A",
+            "also": "Victoria Peak",
+            "lunch": "Lunch",
+            "dinner": "Dinner",
+            "route": "MTR",
+        }
+    ]
+    assert filter_attraction_plan_for_destination(hk_plan, "London") == []
+    london_ideas = day_ideas_for(
+        "London",
+        3,
+        attraction_plan=hk_plan,
+    )
+    assert any("Westminster" in (d.go + d.also) for d in london_ideas), london_ideas
+
+    idea = DayIdea(
+        title="Arrival · Hong Kong",
+        go="Land side",
+        also="Victoria Peak",
+        lunch="Dim sum",
+        dinner="Temple Street",
+        route="Airport Express / MTR",
+    )
+    body = format_day_body(idea, arrive_time="09:10")
+    assert "09:10" in body
+    assert "Hotel check-in" in body
+    # After 60 min airport transfer + 75 min immigration floor → check-in ≥ 10:25
+    assert "10:25" in body or "10:10" in body
+    checkin_line = next(l for l in body.splitlines() if "Hotel check-in" in l)
+    checkin_time = checkin_line.split()[0]
+    check_h, check_m = map(int, checkin_time.split(":"))
+    assert check_h * 60 + check_m >= 10 * 60 + 25, body
 
     print("PASS")
     return 0

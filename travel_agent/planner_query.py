@@ -59,6 +59,35 @@ def is_placeholder_card_text(text: str) -> bool:
     return any(tok in low for tok in PLACEHOLDER_CARD_TOKENS if len(tok) > 3)
 
 
+_JUNK_TIMETABLE_RE = re.compile(
+    r"(?i)\b("
+    r"special administrative region|total budget|budget snapshot|"
+    r"hk\$[\d,]+|hkd\s*[\d,]+|see tool|trip\.com fare|"
+    r"recommended hotel|recommended flight|"
+    r"open 20\d{2}\.\d{2}|open 20\d{2}-|"
+    r"eSIM|sim card|lounge pass|airport express ticket|"
+    r"private transfer only|voucher only|buffet deal"
+    r")\b"
+)
+
+
+def is_junk_timetable_activity(text: str) -> bool:
+    """True when a timetable row is budget/region/scrape noise, not a real stop."""
+    raw = (text or "").strip()
+    if not raw or len(raw) < 3:
+        return True
+    if is_placeholder_card_text(raw):
+        return True
+    if _JUNK_TIMETABLE_RE.search(raw):
+        return True
+    # Whole-line price / budget snippets
+    if re.fullmatch(r"(?i)HK\$[\d,]+(?:\s+total\s+budget)?", raw):
+        return True
+    if re.search(r"(?i)\btotal budget\b", raw) and re.search(r"HK\$|hkd", raw):
+        return True
+    return False
+
+
 def build_plan_query(
     destination: str,
     depart_date: str,

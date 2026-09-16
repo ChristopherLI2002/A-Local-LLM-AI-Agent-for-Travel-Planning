@@ -579,6 +579,8 @@ def parse_hotel_offer(text: str, fallback_url: str = "") -> HotelOffer:
 
 def _clean_day_body(text: str) -> str:
     """Normalize markdown-ish day content into readable card text."""
+    from travel_agent.planner_query import is_junk_timetable_activity
+
     lines: list[str] = []
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
@@ -592,6 +594,11 @@ def _clean_day_body(text: str) -> str:
         line = re.sub(r"^\*{1,2}|\*{1,2}$", "", line).strip()
         line = re.sub(r"^[-*•]\s+", "• ", line)
         line = re.sub(r"^\d+\.\s+", "• ", line)
+        tm = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)\s+(.*)$", line)
+        if tm and is_junk_timetable_activity(tm.group(3).strip()):
+            continue
+        if not tm and is_junk_timetable_activity(line):
+            continue
         if line:
             lines.append(line)
     # Collapse trailing blank lines

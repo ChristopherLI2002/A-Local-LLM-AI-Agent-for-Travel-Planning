@@ -522,22 +522,156 @@ def normalize_guide_city(destination: str) -> str:
     return ""
 
 
+def activity_conflicts_destination(text: str, destination: str) -> bool:
+    """True when an activity label clearly belongs to a different city than the trip."""
+    dest_key = normalize_guide_city(destination)
+    if not dest_key:
+        return False
+    low = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not low:
+        return False
+    for city in _GUIDES:
+        if city == dest_key:
+            continue
+        label = city.replace("_", " ")
+        if re.search(rf"\b{re.escape(label)}\b", low):
+            return True
+    # Extra markers for common cross-leaks (origin HK on a London trip, etc.)
+    if dest_key != "hong kong" and re.search(r"\bhong kong\b", low):
+        return True
+    if dest_key != "hong kong" and any(
+        m in low
+        for m in (
+            "victoria peak",
+            "tsim sha tsui",
+            "lantau",
+            "star ferry",
+            "hong kong city hall",
+            "temple street night market",
+        )
+    ):
+        return True
+    if dest_key == "hong kong" and re.search(
+        r"\b(london|paris|tokyo|osaka|seoul|singapore|bangkok|taipei)\b", low
+    ):
+        return True
+    return False
+
+
+def filter_attraction_names_for_destination(
+    names: list[str],
+    destination: str,
+) -> list[str]:
+    """Drop scraped sights whose names belong to another city."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        name = re.sub(r",\s*N/A\s*$", "", (raw or "").strip(), flags=re.I)
+        name = re.sub(r"\s*\([^)]*\bN/A\b[^)]*\)\s*$", "", name, flags=re.I).strip()
+        if not name or activity_conflicts_destination(name, destination):
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def filter_attraction_cards_for_destination(
+    cards: list[dict[str, str]],
+    destination: str,
+) -> list[dict[str, str]]:
+    """Keep Trip.com cards that match the trip destination city."""
+    out: list[dict[str, str]] = []
+    for card in cards:
+        name = (card.get("name") or "").strip()
+        addr = (card.get("address") or "").strip()
+        blob = f"{name} {addr}"
+        if not name or activity_conflicts_destination(blob, destination):
+            continue
+        cleaned = dict(card)
+        cleaned["name"] = re.sub(r",\s*N/A\s*$", "", name, flags=re.I)
+        out.append(cleaned)
+    return out
+
+
+def filter_attraction_plan_for_destination(
+    plan: list[dict[str, str]],
+    destination: str,
+) -> list[dict[str, str]]:
+    """Remove day rows whose sights belong to the wrong city."""
+    out: list[dict[str, str]] = []
+    for row in plan:
+        raw_go = str(row.get("go") or "")
+        raw_also = str(row.get("also") or "")
+        if activity_conflicts_destination(raw_go, destination):
+            raw_go = ""
+        if activity_conflicts_destination(raw_also, destination):
+            raw_also = ""
+        go = _clean_day_field(raw_go, destination=destination, fallback="")
+        also = _clean_day_field(raw_also, destination=destination, fallback="")
+        if not go and not also:
+            continue
+        enriched = dict(row)
+        enriched["go"] = go or also
+        enriched["also"] = also or go
+        enriched["title"] = _clean_day_field(
+            str(row.get("title") or ""), destination=destination, fallback=""
+        ) or str(row.get("title") or "")
+        enriched["lunch"] = _clean_day_field(
+            str(row.get("lunch") or ""), destination=destination, fallback=""
+        ) or str(row.get("lunch") or "")
+        enriched["dinner"] = _clean_day_field(
+            str(row.get("dinner") or ""), destination=destination, fallback=""
+        ) or str(row.get("dinner") or "")
+        out.append(enriched)
+    return out
+
+
+def _clean_day_field(text: str, *, fallback: str = "", destination: str = "") -> str:
+    from travel_agent.planner_query import is_junk_timetable_activity
+
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    t = re.sub(r",\s*N/A\s*$", "", t, flags=re.I)
+    t = re.sub(r"\s*\([^)]*\bN/A\b[^)]*\)\s*$", "", t, flags=re.I).strip()
+    if not t or is_junk_timetable_activity(t):
+        return fallback
+    if destination and activity_conflicts_destination(t, destination):
+        return fallback
+    # Trip.com event tickets: "Laver Cup 2026 (Open 2026.09.25-2026.09.27)"
+    if re.search(r"(?i)\bopen 20\d{2}[.\-]", t):
+        t = re.sub(r"\s*\([^)]*open 20\d{2}[^)]*\)\s*", "", t, flags=re.I).strip()
+    if is_junk_timetable_activity(t):
+        return fallback
+    return t[:120]
+
+
 def day_ideas_from_llm_plan(
     plan: list[dict[str, str]],
     *,
     nights: int,
+    destination: str = "",
 ) -> list[DayIdea]:
     """Convert LLM-arranged attraction route into DayIdea cards."""
     n = max(1, int(nights or 1))
     ideas: list[DayIdea] = []
     for row in plan[:n]:
+        go = _clean_day_field(
+            str(row.get("go") or ""), fallback="Explore the city", destination=destination
+        )
+        also = _clean_day_field(
+            str(row.get("also") or ""), fallback=go, destination=destination
+        )
         ideas.append(
             DayIdea(
-                title=str(row.get("title") or "").strip() or "Sightseeing",
-                go=str(row.get("go") or "").strip() or "Explore the city",
-                also=str(row.get("also") or "").strip() or str(row.get("go") or ""),
-                lunch=str(row.get("lunch") or "").strip() or "Lunch nearby",
-                dinner=str(row.get("dinner") or "").strip() or "Dinner nearby",
+                title=_clean_day_field(
+                    str(row.get("title") or ""), fallback="Sightseeing"
+                ),
+                go=go,
+                also=also if also != go else _clean_day_field("", fallback="Nearby sights"),
+                lunch=_clean_day_field(str(row.get("lunch") or ""), fallback="Lunch nearby"),
+                dinner=_clean_day_field(str(row.get("dinner") or ""), fallback="Dinner nearby"),
                 route=str(row.get("route") or "").strip() or "Local transit",
             )
         )
@@ -782,9 +916,18 @@ def day_ideas_for(
 
     # LLM-arranged route from scraped Trip.com attractions (preferred when present)
     if attraction_plan:
-        llm_ideas = day_ideas_from_llm_plan(attraction_plan, nights=n)
-        if llm_ideas:
-            return llm_ideas
+        raw_plan = list(attraction_plan)
+        filtered_plan = filter_attraction_plan_for_destination(raw_plan, dest_label)
+        city = normalize_guide_city(destination)
+        # If any row was wrong-city junk, prefer the curated guide (e.g. London)
+        # instead of a partially leaked origin-city schedule.
+        plan_ok = filtered_plan and len(filtered_plan) == len(raw_plan)
+        if plan_ok or (filtered_plan and not city):
+            llm_ideas = day_ideas_from_llm_plan(
+                filtered_plan, nights=n, destination=dest_label
+            )
+            if llm_ideas:
+                return llm_ideas
 
     # Multi-city region (e.g. California → SF + LA)
     if regional_route is None:
@@ -807,11 +950,15 @@ def day_ideas_for(
         dest_label = "Los Angeles"
 
     if not base and attractions:
-        base = day_ideas_from_attractions(
-            list(attractions),
-            city=dest_label,
-            nights=n,
+        filtered = filter_attraction_names_for_destination(
+            list(attractions), dest_label
         )
+        if filtered:
+            base = day_ideas_from_attractions(
+                filtered,
+                city=dest_label,
+                nights=n,
+            )
     if not base:
         base = _generic_ideas(dest_label, style)
 
@@ -872,6 +1019,8 @@ def _infer_transfer(prev: str, nxt: str, idea: DayIdea) -> tuple[str, int]:
             return "Elizabeth line / Heathrow Express", 45
         if "gatwick" in route or "lgw" in blob:
             return "Gatwick Express / Thameslink", 50
+        if "airport express" in route or "mtr" in route or "hkg" in blob:
+            return "Airport Express / MTR", 45
         return "Airport transfer", 60
 
     # Same-neighborhood / meal near last stop
@@ -921,14 +1070,34 @@ def _with_transfers(
     slots: list[tuple[str, str]],
     idea: DayIdea,
 ) -> str:
-    """Insert ↓ transport · ~N min lines between place rows."""
+    """Insert ↓ transport · ~N min lines and shift times forward cumulatively."""
     if not slots:
         return ""
-    lines: list[str] = [f"{slots[0][0]}  {slots[0][1]}"]
+    anchor = _parse_hhmm(slots[0][0])
+    if not anchor:
+        lines: list[str] = [f"{slots[0][0]}  {slots[0][1]}"]
+        for i in range(1, len(slots)):
+            method, mins = _infer_transfer(slots[i - 1][1], slots[i][1], idea)
+            lines.append(f"↓ {method} · ~{mins} min")
+            lines.append(f"{slots[i][0]}  {slots[i][1]}")
+        return "\n".join(lines)
+
+    h, m = anchor
+    lines = [f"{_fmt_hhmm(h, m)}  {slots[0][1]}"]
     for i in range(1, len(slots)):
         method, mins = _infer_transfer(slots[i - 1][1], slots[i][1], idea)
+        h, m = _add_minutes(h, m, mins)
+        if i == 1 and "land at airport" in slots[0][1].lower():
+            min_h, min_m = _add_minutes(*anchor, 75)
+            if min_h * 60 + min_m > h * 60 + m:
+                h, m = min_h, min_m
+        planned = _parse_hhmm(slots[i][0])
+        if planned:
+            ph, pm = planned
+            if ph * 60 + pm > h * 60 + m:
+                h, m = ph, pm
         lines.append(f"↓ {method} · ~{mins} min")
-        lines.append(f"{slots[i][0]}  {slots[i][1]}")
+        lines.append(f"{_fmt_hhmm(h, m)}  {slots[i][1]}")
     return "\n".join(lines)
 
 
@@ -1120,6 +1289,13 @@ def is_vague_day_body(body: str) -> bool:
     )
     if any(m in low for m in markers):
         return True
+    from travel_agent.planner_query import is_junk_timetable_activity
+
+    for line in (body or "").splitlines():
+        m = re.match(r"^[0-2]?\d:[0-5]\d\s+(.*)$", line.strip())
+        detail = m.group(1).strip() if m else line.strip()
+        if detail and is_junk_timetable_activity(detail):
+            return True
     has_meal = bool(
         re.search(r"\b(1[0-2]|13):[0-5]\d\b", body or "")
         and re.search(r"\b(18|19|20):[0-5]\d\b", body or "")

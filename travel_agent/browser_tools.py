@@ -1458,6 +1458,9 @@ class TripBrowser:
             if len(cleaned_cards) >= limit:
                 break
 
+        from travel_agent.destination_guides import filter_attraction_cards_for_destination
+
+        cleaned_cards = filter_attraction_cards_for_destination(cleaned_cards, city_name)
         self.last_attraction_cards = cleaned_cards
         self.last_attractions = [c["name"] for c in cleaned_cards]
         try:
@@ -4386,7 +4389,19 @@ class TripBrowser:
                     hotel_city or destination, limit=18
                 )
         except Exception:
-            attractions = list(self.last_attractions or [])
+            from travel_agent.destination_guides import filter_attraction_names_for_destination
+
+            stay_city = hotel_city or destination
+            attractions = filter_attraction_names_for_destination(
+                list(self.last_attractions or []), stay_city
+            )
+            if attractions != list(self.last_attractions or []):
+                self.last_attractions = attractions
+                self.last_attraction_cards = [
+                    c
+                    for c in (self.last_attraction_cards or [])
+                    if (c.get("name") or "") in attractions
+                ]
 
         if attractions:
             self._arrange_attractions_route(
