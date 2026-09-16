@@ -19,10 +19,22 @@ Booking links open real `hk.trip.com` pages in your browser. The model is instru
 3. Python **3.10+** (only needed for source runs / building the EXE)  
 4. Playwright Chromium (or Google Chrome / Microsoft Edge as fallback)
 
+### Student model (Hugging Face)
+
+Weights + Ollama GGUF: **[ChristopherLi/voyage-student-1-5b-dayfill](https://huggingface.co/ChristopherLi/voyage-student-1-5b-dayfill)**
+
 ```bash
+# Download GGUF + Modelfile, then register with Ollama
+huggingface-cli download ChristopherLi/voyage-student-1-5b-dayfill \
+  student-1-5b-dayfill.q4_k_m.gguf Modelfile \
+  --local-dir ./voyage-student-1-5b-dayfill
+cd voyage-student-1-5b-dayfill
+ollama create voyage-student-1-5b-dayfill -f Modelfile
+
 ollama serve
-# Student is local (ollama list). Fallback: ollama pull qwen2.5:3b
+# Fallback if you skip the student: ollama pull qwen2.5:3b
 ```
+
 
 ## Setup (from source)
 
@@ -229,6 +241,8 @@ This folder is git-ignored.
 - If Chromium is missing, the app tries installed **Chrome** or **Edge**.
 - No embedded map; use day cards plus Open Trip.Planner / booking links.
 - Default model: `voyage-student-1-5b-dayfix` with `STUDENT_MODE=true` (`OLLAMA_MODEL` or `-m` to override).
+
+- Student checkpoint on Hugging Face: [ChristopherLi/voyage-student-1-5b-dayfill](https://huggingface.co/ChristopherLi/voyage-student-1-5b-dayfill) (Q4_K_M GGUF + Modelfile).
 
 ### Ollama troubleshooting (Windows)
 
