@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 
 TRAVEL_STYLES = (
     "First-time",
@@ -11,6 +13,50 @@ TRAVEL_STYLES = (
     "Relaxed",
     "Adventure",
 )
+
+_TRAVEL_STYLE_SET = {s.lower() for s in TRAVEL_STYLES}
+
+# LLM / student placeholders that must never appear on booking cards
+PLACEHOLDER_CARD_TOKENS = (
+    "see tool results",
+    "see tool result",
+    "see trip.com",
+    "from tool results",
+    "tool results",
+    "unavailable",
+    "n/a",
+    "tbd",
+    "unknown",
+)
+
+
+def is_travel_style_label(text: str) -> bool:
+    """True when text is a wizard travel style (not a city / hotel area)."""
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    if raw in _TRAVEL_STYLE_SET:
+        return True
+    # "Stay · First-time (7 nights)" / multi-style "Food, Culture"
+    parts = re.split(r"[,·|/]+", raw)
+    cleaned = []
+    for p in parts:
+        p = re.sub(r"^\s*stay\s*\d*\s*", "", p, flags=re.I)
+        p = re.sub(r"\(\s*\d+\s*nights?\s*\)", "", p, flags=re.I)
+        p = p.strip(" -–—:")
+        if p:
+            cleaned.append(p)
+    return bool(cleaned) and all(p in _TRAVEL_STYLE_SET for p in cleaned)
+
+
+def is_placeholder_card_text(text: str) -> bool:
+    """True for student/tool placeholder strings painted onto flight/hotel cards."""
+    low = (text or "").strip().lower()
+    if not low:
+        return True
+    if low in PLACEHOLDER_CARD_TOKENS:
+        return True
+    return any(tok in low for tok in PLACEHOLDER_CARD_TOKENS if len(tok) > 3)
 
 
 def build_plan_query(

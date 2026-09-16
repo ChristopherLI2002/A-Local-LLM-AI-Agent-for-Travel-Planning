@@ -1421,8 +1421,32 @@ class HotelRowCard(tk.Frame):
 
     def set_offer(self, offer: HotelOffer) -> None:
         self._hide_hotel_progress()
-        heading = offer.stay_label or (
-            f"Stay · {offer.city}" if offer.city else "Recommended hotel"
+        from travel_agent.planner_query import (
+            is_placeholder_card_text,
+            is_travel_style_label,
+        )
+
+        city = (offer.city or "").strip()
+        if is_travel_style_label(city) or is_placeholder_card_text(city):
+            city = ""
+        loc = (offer.location or "").strip()
+        if is_travel_style_label(loc) or is_placeholder_card_text(loc):
+            loc = city or "—"
+        stay_label = (offer.stay_label or "").strip()
+        if stay_label and (
+            is_travel_style_label(stay_label)
+            or is_placeholder_card_text(stay_label)
+            or is_travel_style_label(
+                re.sub(
+                    r"(?i)^\s*stay\s*\d*\s*[·\-–—:]?\s*|\(\s*\d+\s*nights?\s*\)",
+                    "",
+                    stay_label,
+                ).strip()
+            )
+        ):
+            stay_label = ""
+        heading = stay_label or (
+            f"Stay · {city}" if city else "Recommended hotel"
         )
         if offer.nights and "night" not in heading.lower():
             heading = f"{heading} ({offer.nights} night{'s' if offer.nights != 1 else ''})"
@@ -1431,21 +1455,26 @@ class HotelRowCard(tk.Frame):
         try:
             from travel_agent.browser_tools import clean_hotel_display_name
 
-            display_name = clean_hotel_display_name(
-                offer.name or "", offer.city or ""
-            ) or (offer.name or "Hotel")
+            raw_name = offer.name or ""
+            if is_placeholder_card_text(raw_name) or is_travel_style_label(raw_name):
+                display_name = f"Hotels in {city}" if city else "Recommended hotel"
+            else:
+                display_name = clean_hotel_display_name(raw_name, city) or (
+                    raw_name or "Hotel"
+                )
         except Exception:
             display_name = offer.name or "Hotel"
+            if is_placeholder_card_text(display_name):
+                display_name = "Recommended hotel"
         self.name_lbl.configure(text=display_name)
         self.stars_lbl.configure(text="★" * max(0, min(offer.stars, 5)))
         self.score_badge.configure(text=offer.score or "—")
         self.score_word.configure(text=offer.score_label or "")
         self.reviews_lbl.configure(text=offer.reviews or "")
-        loc = offer.location or offer.city or "—"
         dates = ""
         if offer.checkin and offer.checkout:
             dates = f"  ·  {offer.checkin} → {offer.checkout}"
-        self.location_lbl.configure(text=f"Loc · {loc}{dates}")
+        self.location_lbl.configure(text=f"Loc · {loc or city or '—'}{dates}")
         self.features_lbl.configure(text=f"Highlights · {offer.features}")
         self.room_lbl.configure(text=offer.room_type)
         self.beds_lbl.configure(text=offer.beds)
@@ -1459,11 +1488,11 @@ class HotelRowCard(tk.Frame):
                 url,
                 checkin=offer.checkin or "",
                 checkout=offer.checkout or "",
-                city=offer.city or offer.location or "",
+                city=city or loc or "",
             ) or url
-        elif not is_openable_hotel_url(url) and offer.city and offer.checkin and offer.checkout:
+        elif not is_openable_hotel_url(url) and city and offer.checkin and offer.checkout:
             url = build_hotel_list_url(
-                city=offer.city,
+                city=city,
                 checkin=offer.checkin,
                 checkout=offer.checkout,
             )
@@ -3495,6 +3524,13 @@ class TravelAgentApp(tk.Tk):
         low = (name or "").lower()
         if not name or low.startswith("hotels in ") or low.startswith("recommended hotel"):
             return False
+        from travel_agent.planner_query import (
+            is_placeholder_card_text,
+            is_travel_style_label,
+        )
+
+        if is_placeholder_card_text(name) or is_travel_style_label(name):
+            return False
         return True
 
     def _booking_cards_ready_enough(self) -> bool:
@@ -4081,19 +4117,29 @@ class TravelAgentApp(tk.Tk):
         # California-style regions). Enrich with live scrape when available.
         ctx_stays: list[dict[str, str]] = []
         if self._trip_context.get("stays"):
+            from travel_agent.planner_query import is_travel_style_label
+
+            dest_fallback = (
+                to_hotel_city(self._trip_context.get("destination", "") or "")
+                or self._trip_context.get("destination", "")
+                or "Destination"
+            )
             for part in self._trip_context["stays"].split(";"):
                 bits = part.split("|")
                 if len(bits) >= 2:
+                    city = bits[0].strip()
+                    if is_travel_style_label(city):
+                        city = dest_fallback
                     ctx_stays.append(
                         {
-                            "city": bits[0],
+                            "city": city,
                             "nights": bits[1],
                             "checkin": bits[2] if len(bits) > 2 else "",
                             "checkout": bits[3] if len(bits) > 3 else "",
                             "airport": bits[4] if len(bits) > 4 else "",
-                            "label": f"Stay · {bits[0]} ({bits[1]} night{'s' if bits[1] != '1' else ''})",
-                            "name": f"Hotels in {bits[0]}",
-                            "location": bits[0],
+                            "label": f"Stay · {city} ({bits[1]} night{'s' if bits[1] != '1' else ''})",
+                            "name": f"Hotels in {city}",
+                            "location": city,
                             "url": "",
                             "price_label": "",
                             "total_label": "",
@@ -4839,10 +4885,16 @@ class TravelAgentApp(tk.Tk):
 
         def _bad_name(name: str) -> bool:
             from travel_agent.browser_tools import _is_curated_fallback_name
+            from travel_agent.planner_query import (
+                is_placeholder_card_text,
+                is_travel_style_label,
+            )
 
             low = (name or "").lower()
             return (
                 not name
+                or is_placeholder_card_text(name)
+                or is_travel_style_label(name)
                 or name in {"Recommended hotel", "Hotel"}
                 or low.startswith("recommended hotel")
                 or low.startswith("hotels in ")
@@ -4976,6 +5028,35 @@ class TravelAgentApp(tk.Tk):
         if hotel_name and _bad_name(offer.name) and not _bad_name(hotel_name):
             offer.name = hotel_name
 
+        from travel_agent.planner_query import (
+            is_placeholder_card_text,
+            is_travel_style_label,
+        )
+
+        # Never paint travel styles (First-time, Food, …) as city / location
+        if is_travel_style_label(offer.city) or is_placeholder_card_text(offer.city):
+            offer.city = dest
+        if is_travel_style_label(offer.location) or is_placeholder_card_text(
+            offer.location
+        ):
+            offer.location = dest or offer.city or ""
+        if is_travel_style_label(offer.stay_label) or is_placeholder_card_text(
+            offer.stay_label
+        ):
+            offer.stay_label = (
+                f"Stay · {offer.city or dest}" if (offer.city or dest) else ""
+            )
+        elif offer.stay_label and is_travel_style_label(
+            re.sub(
+                r"(?i)^\s*stay\s*\d*\s*[·\-–—:]?\s*|\(\s*\d+\s*nights?\s*\)",
+                "",
+                offer.stay_label,
+            ).strip()
+        ):
+            offer.stay_label = (
+                f"Stay · {offer.city or dest}" if (offer.city or dest) else ""
+            )
+
         if dest and offer.location in {"", "See map on Trip.com"}:
             offer.location = dest
         if _bad_name(offer.name):
@@ -5067,7 +5148,7 @@ class TravelAgentApp(tk.Tk):
                 parsed = self._apply_booking_urls(parse_itinerary(text))
                 parsed = self._ensure_days(parsed)
         self._render_parsed(parsed)
-        if parsed.flight_offer and parsed.flight_offer.depart_time not in {"", "--:--"}:
+        if parsed.flight_offer:
             self.flight_row.set_offer(parsed.flight_offer)
         err = getattr(self, "_live_flight_error", "") or ""
         if err:
@@ -5078,15 +5159,84 @@ class TravelAgentApp(tk.Tk):
             "--:--",
         }:
             self._set_status("Itinerary ready", C["ok"])
-        # Optional background open-jaw refill — never block the first paint.
-        # Disabled by default: a second Trip.com scrape after paint made the
-        # window look frozen again even though it ran off the UI thread.
+        else:
+            self._set_status("Itinerary ready — filling live fares…", C["accent_deep"])
+        # First paint must stay snappy. If plan_trip left empty --:-- / placeholder
+        # hotel titles, refill Trip.com cards in a capped background job.
+        if not self._booking_cards_ready_enough():
+            self._queue_sparse_booking_refill()
+        # Optional open-jaw-specific refill when airports differ and times still blank
         need_refill = False
         arrive = (self._trip_context.get("arrive_airport") or "").strip().upper()
         ret_from = (self._trip_context.get("depart_airport") or "").strip().upper()
         if need_refill and arrive and ret_from and arrive != ret_from:
             self._queue_open_jaw_refill()
         self._append_chat("System", "Itinerary ready. Refine below if you like.", "agent")
+
+    def _queue_sparse_booking_refill(self) -> None:
+        """After first paint, refill empty flight/hotel cards without blocking UI."""
+
+        def job() -> dict[str, object]:
+            assert self.agent is not None
+            try:
+                self._refresh_live_booking_cards(max_seconds=18.0)
+            except Exception as e:
+                return {"error": str(e)}
+            self._apply_plan_flight_snapshot()
+            live = dict(getattr(self, "_live_flight_card", None) or {})
+            if not live.get("flight_depart"):
+                live = dict(
+                    getattr(self.agent.browser, "last_plan_flight_card", None) or {}
+                )
+            links = dict(self.agent.booking_links)
+            return {"live": live, "links": links}
+
+        def on_ok(payload: dict[str, object]) -> None:
+            if not isinstance(payload, dict):
+                return
+            if payload.get("error"):
+                self._set_status(
+                    f"Live fare refresh: {payload['error']}", C["danger"]
+                )
+                return
+            live = dict(payload.get("live") or {})  # type: ignore[arg-type]
+            if live.get("flight_depart"):
+                self.flight_row.set_offer(self._flight_offer_from_live_card(live))
+                if self._last_plan:
+                    try:
+                        parsed = self._apply_booking_urls(
+                            parse_itinerary(self._last_plan)
+                        )
+                        parsed.flight_offer = self._flight_offer_from_live_card(live)
+                        parsed = self._ensure_days(parsed)
+                        self._render_parsed(parsed)
+                        self.flight_row.set_offer(parsed.flight_offer)
+                    except Exception:
+                        pass
+            elif self.agent:
+                # Hotel-only salvage when flights still empty
+                try:
+                    parsed = self._apply_booking_urls(
+                        parse_itinerary(self._last_plan or "")
+                    )
+                    self._render_hotel_cards(parsed)
+                except Exception:
+                    pass
+            if self._flight_fields_ready():
+                self._set_status("Itinerary ready", C["ok"])
+            else:
+                self._set_status(
+                    "Open outbound search if flight times are still blank.",
+                    C["danger"],
+                )
+
+        self._run_browser_job(
+            job,
+            on_ok=on_ok,
+            on_err=lambda e: self._set_status(
+                f"Live fare refresh failed: {e}", C["danger"]
+            ),
+        )
 
     def _queue_open_jaw_refill(self) -> None:
         """Re-scrape open-jaw legs after the plan paints, then update the flight card."""

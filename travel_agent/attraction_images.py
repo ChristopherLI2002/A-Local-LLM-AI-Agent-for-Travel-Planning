@@ -371,6 +371,8 @@ def fetch_image_bytes(url: str, *, retries: int = 4) -> bytes:
         referer = "https://openverse.org/"
     elif "loremflickr" in host:
         referer = "https://loremflickr.com/"
+    elif "picsum.photos" in host or "fastly.picsum" in host:
+        referer = "https://picsum.photos/"
     elif "tripcdn" in host or "trip.com" in host:
         referer = "https://hk.trip.com/"
 
@@ -394,9 +396,13 @@ def fetch_image_bytes(url: str, *, retries: int = 4) -> bytes:
                     )
                     with urllib.request.urlopen(req, timeout=14) as resp:
                         data = resp.read()
+                        final_url = (resp.geturl() or cand or "").lower()
                         # Follow LoremFlickr / CDN redirects already resolved by urlopen
                         ctype = (resp.headers.get("Content-Type") or "").lower()
                     _LAST_FETCH_AT = time.monotonic()
+                # LoremFlickr often 200s a single defaultImage for every tag query
+                if "defaultimage" in final_url or "/default" in final_url:
+                    continue
                 if data and len(data) > 200 and (
                     "image" in ctype
                     or (not ctype)
@@ -592,13 +598,11 @@ def _openverse_image(query: str) -> str:
 
 
 def _loremflickr_image(query: str, *, width: int = 480, height: int = 320) -> str:
-    """Deterministic stock photo URL from LoremFlickr tags (always available)."""
-    tags = re.sub(r"[^\w\s,-]", " ", query or "travel")
-    tags = re.sub(r"\s+", ",", tags.strip())
-    tags = re.sub(r",+", ",", tags).strip(",") or "travel"
-    # lock=seed keeps the same image for the same activity across reloads
-    seed = hashlib.sha1(query.encode("utf-8")).hexdigest()[:10]
-    return f"https://loremflickr.com/{width}/{height}/{urllib.parse.quote(tags)}/all?lock={seed}"
+    """Deterministic stock photo URL (Picsum seed — LoremFlickr returns one default JPEG)."""
+    seed = hashlib.sha1((query or "travel").encode("utf-8")).hexdigest()[:16]
+    w = max(40, min(int(width), 1200))
+    h = max(40, min(int(height), 1200))
+    return f"https://picsum.photos/seed/{seed}/{w}/{h}"
 
 
 def candidate_image_urls(
@@ -702,7 +706,7 @@ def images_for_timetable_offline(body: str, city: str = "") -> dict[str, str]:
     """Map HH:MM rows to URLs without network I/O (UI-thread safe).
 
     Uses scraped Trip.com covers when present; otherwise a deterministic
-    LoremFlickr placeholder. Wikipedia/Openverse resolution happens later
+    Picsum seed URL. Wikipedia/Openverse resolution happens later
     via the async thumb binder.
     """
     out: dict[str, str] = {}

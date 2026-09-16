@@ -448,7 +448,7 @@ class TravelAgent:
     def _flight_hotel_fallback_sections(self) -> str:
         links = self.booking_links
         corpus = self._tool_corpus()
-        airline = links.get("flight_airline") or "See tool results"
+        airline = links.get("flight_airline") or ""
         depart = links.get("flight_depart") or ""
         arrive = links.get("flight_arrive") or ""
         price = links.get("flight_price") or ""
@@ -459,21 +459,26 @@ class TravelAgent:
             if m:
                 hotel = m.group(1).strip()
         hotel_url = links.get("hotel") or ""
+        # Never emit "see tool results" — the student copies that onto UI cards.
         parts = [
             "Recommended flight",
-            f"- Airline: {airline}",
-            f"- Depart: {depart}" if depart else "- Depart: see tool results",
-            f"- Arrive: {arrive}" if arrive else "- Arrive: see tool results",
-            f"- Price: {price}" if price else "- Price: see tool results",
+            f"- Airline: {airline}" if airline else "",
+            f"- Depart: {depart}" if depart else "",
+            f"- Arrive: {arrive}" if arrive else "",
+            f"- Price: {price}" if price else "",
             f"- Link: {flight_url}" if flight_url else "",
             "",
             "Recommended hotel",
-            f"- Hotel: {hotel or 'see tool results'}",
+            f"- Hotel: {hotel}" if hotel else "",
             f"- Link: {hotel_url}" if hotel_url else "",
             "",
             "Budget snapshot",
-            f"- Flight: {price or 'see tool results'}",
-            f"- Hotel: {links.get('hotel_total') or links.get('hotel_price') or 'see tool results'}",
+            f"- Flight: {price}" if price else "",
+            (
+                f"- Hotel: {links.get('hotel_total') or links.get('hotel_price')}"
+                if (links.get("hotel_total") or links.get("hotel_price"))
+                else ""
+            ),
         ]
         return "\n".join(p for p in parts if p is not None)
 
@@ -574,6 +579,8 @@ class TravelAgent:
         return text
 
     def _fill_tool_args_from_context(self, name: str, args: dict[str, Any]) -> None:
+        from travel_agent.planner_query import is_travel_style_label
+
         ctx = self.browser.selection_context
         route = self.browser.last_proposed_route
         ctx_dest = (getattr(ctx, "destination", "") or "").strip()
@@ -587,6 +594,9 @@ class TravelAgent:
             if "," in dest:
                 dest = dest.split(",", 1)[0].strip() or dest
             args.setdefault("destination", dest)
+            # Student often swaps destination with a travel style (First-time).
+            if ctx_dest and is_travel_style_label(str(args.get("destination") or "")):
+                args["destination"] = dest
             args.setdefault("nights", ctx_n or 7)
             if ctx_in:
                 args.setdefault("depart_date", ctx_in)
@@ -608,17 +618,24 @@ class TravelAgent:
             dest = ctx_dest or str(args.get("hotel_city") or args.get("destination") or "").strip()
             if "," in dest:
                 dest = dest.split(",", 1)[0].strip() or dest
+            if is_travel_style_label(dest) and ctx_dest:
+                dest = ctx_dest.split(",", 1)[0].strip() if "," in ctx_dest else ctx_dest
             args.setdefault("destination", dest)
             # Overwrite model country-suffix destinations that break acity lookup.
             cur_dest = str(args.get("destination") or "")
             if "," in cur_dest:
                 args["destination"] = cur_dest.split(",", 1)[0].strip() or cur_dest
+            if ctx_dest and is_travel_style_label(str(args.get("destination") or "")):
+                args["destination"] = dest
             if route is not None:
                 args.setdefault("arrive_airport", getattr(route, "arrive_airport", "") or "")
                 args.setdefault("return_airport", getattr(route, "depart_airport", "") or "")
                 stays = getattr(route, "stays", None) or []
                 if stays and not args.get("hotel_city"):
-                    args["hotel_city"] = getattr(stays[0], "city", "") or ctx_dest
+                    stay_city = getattr(stays[0], "city", "") or ctx_dest
+                    if is_travel_style_label(stay_city):
+                        stay_city = ctx_dest
+                    args["hotel_city"] = stay_city
             args.setdefault(
                 "hotel_city",
                 ctx_dest or str(args.get("destination") or "").strip() or "destination",
@@ -632,6 +649,7 @@ class TravelAgent:
                 ctx_dest
                 and (
                     not hc
+                    or is_travel_style_label(hc)
                     or "plain words" in hc
                     or "first stay" in hc
                     or "hotel city" in hc
@@ -656,6 +674,9 @@ class TravelAgent:
                 args["budget_hkd"] = budget
             styles = (getattr(ctx, "travel_styles", "") or "").strip()
             if styles and not str(args.get("interests") or "").strip():
+                args["interests"] = styles
+            # Never pass travel style as interests-only when destination is empty junk
+            if styles and is_travel_style_label(str(args.get("interests") or "")):
                 args["interests"] = styles
 
     def _chat_with_recovery(self, *, tools: list[dict[str, Any]] | None) -> dict[str, Any]:

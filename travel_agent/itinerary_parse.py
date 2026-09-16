@@ -334,6 +334,9 @@ def parse_hotel_offer(text: str, fallback_url: str = "") -> HotelOffer:
         or "day-by-day" in offer.name.lower()
         or "sample hotel" in offer.name.lower()
         or "rates range" in offer.name.lower()
+        or "see tool" in offer.name.lower()
+        or "tool result" in offer.name.lower()
+        or offer.name.strip().lower() in {"see trip.com", "n/a", "tbd", "unavailable"}
         or "option" in offer.name.lower() and "hotel" in offer.name.lower()
         or len(offer.name) > 70
     ):
@@ -404,6 +407,18 @@ def parse_hotel_offer(text: str, fallback_url: str = "") -> HotelOffer:
         offer.reviews = f"{rev_m.group(1)} reviews"
 
     offer.location = _labeled(blob, "location", "area", "neighbourhood", "neighborhood", "district")
+    try:
+        from travel_agent.planner_query import (
+            is_placeholder_card_text,
+            is_travel_style_label,
+        )
+
+        if is_travel_style_label(offer.location) or is_placeholder_card_text(
+            offer.location
+        ):
+            offer.location = ""
+    except Exception:
+        pass
     offer.features = _labeled(blob, "features", "highlights", "amenities")
     offer.room_type = _labeled(blob, "room", "room type")
     offer.beds = _labeled(blob, "beds", "bed", "bed type")
